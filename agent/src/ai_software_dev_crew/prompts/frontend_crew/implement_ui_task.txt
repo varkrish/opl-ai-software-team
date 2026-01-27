@@ -1,0 +1,151 @@
+YOUR ONLY JOB: Create ALL files defined in tech_stack.md (source files, config files, build files).
+
+Requirements: {requirements}
+Design Specs: {design_specs}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+MANDATORY 6-STEP PROCESS (DO NOT SKIP ANY STEP):
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+STEP 1: READ TECH STACK TO GET COMPLETE FILE STRUCTURE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Call file_reader(file_path='tech_stack.md')
+
+EXTRACT ALL FILES from the "File Structure" section:
+- Source files (src/App.js, src/components/Display.js, etc.)
+- Config files (package.json, babel.config.js, metro.config.js, etc.)
+- Entry points (index.js)
+- Documentation (README.md, .gitignore, .eslintrc.js, etc.)
+- Test files (src/__tests__/App.test.js, etc.)
+
+CRITICAL: Count the TOTAL number of files in tech_stack.md.
+If tech_stack.md shows 15 files, you MUST create ALL 15 files!
+
+Example file structure from tech_stack.md:
+```
+calculator-app/
+├── src/
+│   ├── App.js                    # CREATE THIS
+│   ├── components/
+│   │   ├── Display.js           # CREATE THIS
+│   │   ├── Button.js            # CREATE THIS
+│   │   └── Keyboard.js          # CREATE THIS
+│   └── __tests__/
+│       ├── App.test.js          # CREATE THIS
+│       └── components/
+│           ├── Display.test.js  # CREATE THIS
+│           └── Button.test.js   # CREATE THIS
+├── index.js                     # CREATE THIS (root level)
+├── package.json                 # CREATE THIS (root level)
+├── babel.config.js              # CREATE THIS (root level)
+├── metro.config.js              # CREATE THIS (root level)
+├── README.md                    # CREATE THIS (root level)
+├── .gitignore                   # CREATE THIS (root level)
+└── .eslintrc.js                 # CREATE THIS (root level)
+```
+^ This is 14 files. You MUST create ALL 14!
+
+NOTE:
+- Root-level files (package.json, index.js, babel.config.js, etc.) go at project root (NOT under src/)
+- Source files (App.js, components/, __tests__/) go under src/
+- Match EXACT casing from tech_stack.md (App.js vs app.js)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+STEP 2: CREATE ROOT-LEVEL CONFIG FILES FIRST
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+**START WITH CONFIG FILES - THIS IS MANDATORY**
+
+For React Native, create IN THIS ORDER:
+1. file_writer(file_path='package.json', content='...')
+   - Include dependencies: react, react-native, jest, @testing-library/react-native
+   - Include scripts: "start", "android", "ios", "test"
+
+2. file_writer(file_path='index.js', content='...')
+   - React Native entry point: import App, AppRegistry.registerComponent
+
+3. file_writer(file_path='babel.config.js', content='...')
+   - Standard React Native Babel config
+
+4. file_writer(file_path='metro.config.js', content='...')
+   - Standard Metro bundler config
+
+5. file_writer(file_path='.gitignore', content='...')
+   - Standard React Native ignores (node_modules/, android/, ios/, *.log)
+
+6. file_writer(file_path='README.md', content='...')
+   - Setup instructions, npm install, npm run android
+
+7. file_writer(file_path='.eslintrc.js', content='...')
+   - ESLint config (if in tech_stack.md)
+
+WAIT FOR "✅ Successfully wrote" for EACH file before continuing!
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+STEP 3: CREATE APP ENTRY POINT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+file_writer(file_path='src/App.js', content='<complete calculator component>')
+
+WAIT FOR: "✅ Successfully wrote to src/App.js"
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+STEP 4: CREATE ALL COMPONENTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+For EACH component in tech_stack.md:
+- file_writer(file_path='src/components/Display.js', content='...')
+- file_writer(file_path='src/components/Button.js', content='...')
+- file_writer(file_path='src/components/Keyboard.js', content='...')
+
+WAIT FOR "✅ Successfully wrote" for EACH component!
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+STEP 5: CREATE ALL TEST FILES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+For EACH test file in tech_stack.md:
+- file_writer(file_path='src/__tests__/App.test.js', content='...')
+- file_writer(file_path='src/__tests__/components/Display.test.js', content='...')
+- file_writer(file_path='src/__tests__/components/Button.test.js', content='...')
+
+WAIT FOR "✅ Successfully wrote" for EACH test!
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+STEP 6: VERIFICATION BEFORE FINAL ANSWER
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1. Count files in tech_stack.md: If 15 files listed → you MUST call file_writer 15 times
+2. Call file_lister(directory='.') to see root-level files (package.json, index.js, etc.)
+3. Call file_lister(directory='src') to see src/ files (App.js, components/, __tests__/)
+
+CHECKLIST (ALL must be ✅):
+- ✅ Created package.json at root
+- ✅ Created index.js at root
+- ✅ Created babel.config.js at root
+- ✅ Created metro.config.js at root (if in tech_stack)
+- ✅ Created .gitignore at root
+- ✅ Created README.md at root
+- ✅ Created .eslintrc.js at root (if in tech_stack)
+- ✅ Created src/App.js
+- ✅ Created ALL src/components/*.js files
+- ✅ Created ALL src/__tests__/*.js files
+
+❌ FAILURE if you created 2 files when tech_stack specifies 15 files
+❌ FAILURE if package.json or index.js are missing (app won't build!)
+❌ FAILURE if any src/ file from tech_stack is missing
+✅ SUCCESS if file count matches tech_stack.md EXACTLY
+
+Your final answer MUST list ALL files created with their CORRECT paths:
+"✅ Created package.json
+✅ Created index.js
+✅ Created babel.config.js
+✅ Created metro.config.js
+✅ Created .gitignore
+✅ Created README.md
+✅ Created .eslintrc.js
+✅ Created src/App.js
+✅ Created src/components/Display.js
+✅ Created src/components/Button.js
+✅ Created src/components/Keyboard.js
+✅ Created src/__tests__/App.test.js
+✅ Created src/__tests__/components/Display.test.js
+✅ Created src/__tests__/components/Button.test.js"
+
+DO NOT give your final answer until ALL files from tech_stack.md are created!
+

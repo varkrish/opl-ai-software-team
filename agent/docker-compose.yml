@@ -1,0 +1,70 @@
+version: '3.8'
+
+services:
+  # Dragonfly - Redis-compatible cache
+  cache:
+    image: docker.dragonflydb.io/dragonflydb/dragonfly:latest
+    container_name: ai-dev-cache
+    ports:
+      - "6379:6379"
+    volumes:
+      - dragonfly-data:/data
+    command: >
+      --requirepass ${REDIS_PASSWORD:-}
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - ai-dev-network
+
+  # RabbitMQ - Message queue (for future distributed setup)
+  rabbitmq:
+    image: rabbitmq:3-management
+    container_name: ai-dev-rabbitmq
+    ports:
+      - "5672:5672"
+      - "15672:15672"  # Management UI
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-guest}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-guest}
+    volumes:
+      - rabbitmq-data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - ai-dev-network
+
+  # PostgreSQL - Persistent storage (for future distributed setup)
+  postgres:
+    image: postgres:16-alpine
+    container_name: ai-dev-postgres
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-ai_dev_crew}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres}"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - ai-dev-network
+
+volumes:
+  dragonfly-data:
+  rabbitmq-data:
+  postgres-data:
+
+networks:
+  ai-dev-network:
+    driver: bridge
+

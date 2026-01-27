@@ -1,0 +1,7 @@
+# Agent configuration file
+# This file is optional - agents can be configured via code or this YAML file
+# If you want to customize agent configurations, add them here
+# Format: See CrewAI documentation for agent configuration
+
+agents: {}
+

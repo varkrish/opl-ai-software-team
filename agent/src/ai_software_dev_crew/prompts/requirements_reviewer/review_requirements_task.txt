@@ -1,0 +1,52 @@
+Review the requirements document with extreme scrutiny.
+
+Requirements Document: {requirements}
+User Vision: {vision}
+
+Review Criteria:
+
+1. Ambiguity Check:
+   - Look for vague terms like "fast", "user-friendly", "secure" without specific definitions
+   - Identify undefined business rules
+   - Flag unclear data formats or protocols
+   - Check for words like "should", "might", "usually" that indicate uncertainty
+
+2. Completeness Check:
+   - Missing error handling scenarios
+   - Undefined user roles and permissions
+   - Missing integration points
+   - Absent non-functional requirements (performance, security, scalability)
+   - Missing edge cases
+
+3. Technical Feasibility:
+   - Check if proposed technology stack can deliver requirements
+   - Identify potential performance bottlenecks
+   - Flag security or compliance issues
+   - Verify technical constraints are realistic
+
+4. Testability Check:
+   - Ensure all requirements are testable and measurable
+   - Verify Gherkin scenarios are properly structured
+   - Check for missing edge cases
+   - Ensure acceptance criteria are specific
+
+Output your review findings in a structured format:
+
+**Needs Clarification:** Yes/No
+
+**Identified Gaps:**
+- [list each gap found]
+
+**Ambiguities:**
+- [list each ambiguous requirement]
+
+**Technical Concerns:**
+- [list each technical issue]
+
+**Recommendations:**
+- [list specific recommendations]
+
+If clarification is needed, generate specific questions that should be asked to the user to resolve the gaps and ambiguities.
+
+CRITICAL: Write your complete review to 'requirements_review.md' file using the file_writer tool.
+

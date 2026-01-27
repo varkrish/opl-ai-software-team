@@ -1,0 +1,131 @@
+Define the COMPLETE technology stack and FILE STRUCTURE for this project.
+
+Design Specification: {design_spec}
+Project Context: {context_digest}
+
+**PROJECT VISION (READ THIS CAREFULLY)**: {vision}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+STEP 1: EXTRACT TECHNOLOGY FROM VISION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+READ the vision and IDENTIFY the technology mentioned:
+- "React Native" → You MUST use React Native
+- "Python" → You MUST use Python
+- "mobile app" → You MUST use a mobile framework (React Native, Flutter, etc.)
+- "web app" → You MUST use HTML/CSS/JS or a web framework
+
+**CRITICAL**: Do NOT substitute a different technology! If vision says React Native, use React Native.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+STEP 2: DESIGN COMPLETE BUILDABLE FILE STRUCTURE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+You MUST specify a COMPLETE, BUILDABLE file structure that includes:
+
+**FOR REACT NATIVE APPS:**
+- Source files (components, logic, tests)
+- Config files (package.json, babel.config.js, metro.config.js)
+- Entry points (index.js)
+- Build files (app.json for Expo, or android/ios folders)
+- Documentation (README.md)
+
+**FOR PYTHON APPS:**
+- Source files (modules, classes, functions)
+- Dependencies (requirements.txt or pyproject.toml)
+- Entry points (main.py, __init__.py)
+- Tests (test_*.py files)
+- Documentation (README.md)
+
+**CRITICAL**: The file structure must allow someone to clone the repo and run:
+- React Native: `npm install && npx react-native run-android`
+- Python: `pip install -r requirements.txt && python main.py`
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+STEP 3: WRITE COMPLETE tech_stack.md
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ACTION REQUIRED: Call file_writer(file_path='tech_stack.md', content='[your complete tech stack]')
+WAIT FOR: "✅ Successfully wrote to tech_stack.md"
+
+Example for React Native calculator (COMPLETE structure):
+```
+# Technology Stack for React Native Calculator
+
+## Core Technology
+**Framework**: React Native 0.72+
+**Language**: JavaScript
+**State Management**: React Hooks (useState)
+**UI Components**: React Native core (View, Text, TouchableOpacity)
+
+## Build & Development Tools
+**Build Tool**: React Native CLI
+**Package Manager**: npm
+**Testing**: Jest + React Native Testing Library
+
+## File Structure (COMPLETE BUILDABLE APP)
+```
+calculator-app/
+├── src/
+│   ├── App.js                    # Main calculator component
+│   ├── components/
+│   │   ├── Display.js           # Number display component
+│   │   └── NumberPad.js         # Button grid component
+│   └── __tests__/
+│       ├── App.test.js          # Main app tests
+│       └── components/
+│           └── Display.test.js  # Component tests
+├── index.js                     # React Native entry point
+├── package.json                 # Dependencies and scripts
+├── babel.config.js              # Babel transpiler config
+├── metro.config.js              # Metro bundler config
+├── android/                     # Android build files
+├── ios/                         # iOS build files
+├── README.md                    # Setup and run instructions
+└── .gitignore                   # Git ignore rules
+```
+
+## Infrastructure Requirements
+- Node.js 18+
+- Android Studio (for Android builds)
+- Xcode (for iOS builds)
+
+This structure allows: `npm install && npx react-native run-android`
+```
+
+Example for Python CLI (COMPLETE structure):
+```
+# Technology Stack for Python Calculator
+
+## Core Technology
+**Language**: Python 3.10+
+**CLI Framework**: Click
+**Testing**: pytest
+
+## File Structure (COMPLETE BUILDABLE APP)
+```
+calculator-cli/
+├── src/
+│   ├── calculator/
+│   │   ├── __init__.py
+│   │   ├── cli.py              # CLI entry point
+│   │   ├── operations.py       # Math operations
+│   │   └── display.py          # Output formatting
+│   └── tests/
+│       ├── test_operations.py
+│       └── test_cli.py
+├── pyproject.toml               # Project dependencies
+├── README.md                    # Usage instructions
+└── .gitignore                   # Git ignore rules
+```
+
+This structure allows: `pip install . && calculator-cli`
+```
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+CRITICAL RULES:
+1. You MUST use the technology mentioned in the vision
+2. You MUST specify a COMPLETE, BUILDABLE file structure (not just source files)
+3. Include ALL necessary config files, entry points, and build files
+4. The structure must allow `npm install && npx react-native run-android` or equivalent
+5. You MUST call file_writer to create tech_stack.md
+
+Your response should be: "✅ Created complete tech_stack.md with buildable [technology] structure"

@@ -1,0 +1,55 @@
+[project]
+name = "ai_software_dev_crew"
+version = "0.1.0"
+description = "ai-software-dev-crew using LlamaIndex"
+authors = [{ name = "Your Name", email = "you@example.com" }]
+requires-python = ">=3.10,<3.14"
+dependencies = [
+    "llama-index>=0.10.0",
+    "llama-index-core>=0.10.0",
+    "llama-index-agent-openai>=0.2.0",
+    "llama-index-llms-openai>=0.1.0",
+    "llama-index-llms-anthropic>=0.1.0",
+    "llama-index-llms-ollama>=0.1.0",  # For local Ollama support
+    "llama-index-embeddings-openai>=0.1.0",
+    "gitpython>=3.1.43",
+    "PyYAML>=6.0.2",
+    "rich>=13.9.4",
+    "python-dotenv>=1.0.1",
+    "requests>=2.32.3",
+    "flask>=3.0.0",
+    "flask-cors>=4.0.0",
+    "jsonschema[format]>=4.0.0",
+    "litellm>=1.0.0",  # For OpenRouter support
+    "cryptography>=41.0.0",  # For encryption support
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=8.3.3",
+    "pytest-cov>=4.1.0",
+    "pytest-asyncio>=0.24.0",
+    "pytest-mock>=3.14.0",
+    "pytest-benchmark>=4.0.0",
+    "pytest-timeout>=2.3.1",
+    "httpx>=0.27.0",
+    "playwright>=1.48.0",
+    "faker>=24.0.0",
+]
+
+[project.scripts]
+ai_software_dev_crew = "ai_software_dev_crew.main:run"
+run_crew = "ai_software_dev_crew.main:run"
+web_gui = "ai_software_dev_crew.main:web"
+train = "ai_software_dev_crew.main:train"
+replay = "ai_software_dev_crew.main:replay"
+test = "ai_software_dev_crew.main:test"
+run_with_trigger = "ai_software_dev_crew.main:run_with_trigger"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ai_software_dev_crew"]
+

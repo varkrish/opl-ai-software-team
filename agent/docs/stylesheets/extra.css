@@ -1,0 +1,276 @@
+/* Red Hat Theme for MkDocs Material */
+
+/* Import Red Hat fonts */
+@import url('https://fonts.googleapis.com/css2?family=Red+Hat+Display:wght@300;400;500;600;700;900&family=Red+Hat+Text:wght@300;400;500;600;700&family=Red+Hat+Mono:wght@300;400;500;600;700&display=swap');
+
+/* Red Hat Color Palette */
+:root {
+    --rh-red: #EE0000;
+    --rh-red-dark: #A30000;
+    --rh-red-darker: #820000;
+    --rh-black: #151515;
+    --rh-gray-dark: #3C3F42;
+    --rh-gray: #6A6E73;
+    --rh-gray-light: #D2D3D5;
+    --rh-white: #FFFFFF;
+}
+
+/* Override primary colors with Red Hat red */
+[data-md-color-scheme="default"] {
+    --md-primary-fg-color: var(--rh-red);
+    --md-primary-fg-color--light: #FF0000;
+    --md-primary-fg-color--dark: var(--rh-red-dark);
+    --md-accent-fg-color: var(--rh-red);
+}
+
+[data-md-color-scheme="slate"] {
+    --md-primary-fg-color: var(--rh-red);
+    --md-primary-bg-color: var(--rh-black);
+    --md-accent-fg-color: var(--rh-red);
+}
+
+/* Typography - Red Hat fonts */
+body {
+    font-family: 'Red Hat Text', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+}
+
+h1, h2, h3, h4, h5, h6 {
+    font-family: 'Red Hat Display', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    font-weight: 600;
+}
+
+code, pre, .md-typeset code {
+    font-family: 'Red Hat Mono', 'Courier New', monospace;
+}
+
+/* Code block enhancements with Red Hat styling */
+.highlight {
+    border-radius: 0.5rem;
+    border-left: 4px solid var(--rh-red);
+}
+
+/* Card grid for feature highlights */
+.grid.cards {
+    grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+    gap: 1rem;
+}
+
+/* Button styling - Red Hat style */
+.md-button {
+    margin: 0.5rem;
+    font-family: 'Red Hat Display', sans-serif;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.md-button--primary {
+    background-color: var(--rh-red);
+    border-color: var(--rh-red);
+}
+
+.md-button--primary:hover {
+    background-color: var(--rh-red-dark);
+    border-color: var(--rh-red-dark);
+}
+
+/* Admonition custom colors - Red Hat palette */
+.admonition.success {
+    border-left-color: #3E8635;
+}
+
+.admonition.info {
+    border-left-color: #0066CC;
+}
+
+.admonition.warning {
+    border-left-color: #F0AB00;
+}
+
+.admonition.danger {
+    border-left-color: var(--rh-red);
+}
+
+/* Table styling - Red Hat theme */
+table {
+    width: 100%;
+    border-collapse: collapse;
+}
+
+table th {
+    background-color: var(--rh-red);
+    color: var(--rh-white);
+    font-family: 'Red Hat Display', sans-serif;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    padding: 12px;
+}
+
+table td {
+    padding: 10px 12px;
+}
+
+table tr:nth-child(even) {
+    background-color: rgba(238, 0, 0, 0.03);
+}
+
+/* Mermaid diagram styling */
+.mermaid {
+    text-align: center;
+    margin: 2rem 0;
+}
+
+/* Code copy button enhancement */
+.md-clipboard {
+    opacity: 0.7;
+}
+
+.md-clipboard:hover {
+    opacity: 1;
+    color: var(--rh-red);
+}
+
+/* Navigation enhancement - Red Hat style */
+.md-nav__item--active > .md-nav__link {
+    font-weight: 600;
+    color: var(--rh-red);
+    border-left: 3px solid var(--rh-red);
+    padding-left: 12px;
+}
+
+.md-nav__link:hover {
+    color: var(--rh-red);
+}
+
+/* Search enhancement */
+.md-search__input::placeholder {
+    opacity: 0.6;
+}
+
+.md-search__input:focus {
+    border-color: var(--rh-red);
+}
+
+/* Header customization - Red Hat style */
+.md-header {
+    background-color: var(--rh-black);
+}
+
+.md-header__button {
+    color: var(--rh-white);
+}
+
+.md-header__button:hover {
+    color: var(--rh-red);
+}
+
+/* Footer customization - Red Hat branding */
+.md-footer {
+    background-color: var(--rh-black);
+}
+
+.md-footer-meta {
+    background-color: var(--rh-black);
+}
+
+.md-footer__link:hover {
+    color: var(--rh-red);
+}
+
+/* Logo and branding */
+.md-logo img {
+    filter: brightness(0) invert(1);
+}
+
+/* Links - Red Hat red */
+a {
+    color: var(--rh-red);
+}
+
+a:hover {
+    color: var(--rh-red-dark);
+}
+
+/* Badges and labels */
+.md-typeset .badge {
+    background-color: var(--rh-red);
+    color: var(--rh-white);
+    font-family: 'Red Hat Display', sans-serif;
+    font-weight: 600;
+    padding: 2px 8px;
+    border-radius: 3px;
+}
+
+/* Tabs - Red Hat style */
+.md-tabs {
+    background-color: var(--rh-red);
+}
+
+.md-tabs__link {
+    font-family: 'Red Hat Display', sans-serif;
+    font-weight: 600;
+}
+
+.md-tabs__link--active {
+    color: var(--rh-white);
+}
+
+/* Scrollbar - Red Hat theme */
+::-webkit-scrollbar-thumb {
+    background-color: var(--rh-red);
+}
+
+::-webkit-scrollbar-thumb:hover {
+    background-color: var(--rh-red-dark);
+}
+
+/* Custom Red Hat banner (optional) */
+.rh-banner {
+    background: linear-gradient(135deg, var(--rh-red) 0%, var(--rh-red-darker) 100%);
+    color: var(--rh-white);
+    padding: 2rem;
+    border-radius: 0.5rem;
+    margin: 1rem 0;
+}
+
+/* Red Hat inspired separators */
+hr {
+    border-color: var(--rh-red);
+    border-width: 2px;
+}
+
+/* Focus states - Red Hat red */
+button:focus,
+input:focus,
+textarea:focus,
+select:focus {
+    outline-color: var(--rh-red);
+    outline-width: 2px;
+}
+
+/* Code inline - Red Hat styling */
+.md-typeset code {
+    background-color: rgba(238, 0, 0, 0.05);
+    border: 1px solid rgba(238, 0, 0, 0.1);
+    padding: 0.1em 0.3em;
+}
+
+/* Blockquotes - Red Hat style */
+blockquote {
+    border-left: 4px solid var(--rh-red);
+    padding-left: 1rem;
+    margin-left: 0;
+    color: var(--rh-gray-dark);
+}
+
+/* Selection color - Red Hat red */
+::selection {
+    background-color: var(--rh-red);
+    color: var(--rh-white);
+}
+
+::-moz-selection {
+    background-color: var(--rh-red);
+    color: var(--rh-white);
+}

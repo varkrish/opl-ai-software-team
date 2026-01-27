@@ -1,0 +1,62 @@
+# AI Software Development Crew - Secure Configuration
+# 
+# Security: This file contains sensitive credentials
+# Required file permissions: chmod 600 config.yaml
+# Required ownership: chown your_user:your_group config.yaml
+#
+# Usage:
+#   1. Copy this file: cp config.example.yaml ~/.crew-ai/config.yaml
+#   2. Set permissions: chmod 600 ~/.crew-ai/config.yaml
+#   3. Edit with your values
+#   4. Run: python -m llamaindex_crew.main --config ~/.crew-ai/config.yaml "your vision"
+
+# LLM Configuration
+llm:
+  # API key for your LLM provider (REQUIRED)
+  api_key: "your_api_key_here"
+  
+  # Base URL for API endpoint (optional, defaults to OpenAI)
+  # Examples:
+  #   Red Hat MaaS: "https://litellm-prod.apps.maas.redhatworkshops.io"
+  #   OpenRouter:   "https://openrouter.ai/api/v1"
+  #   Azure OpenAI: "https://YOUR_RESOURCE.openai.azure.com"
+  #   OpenAI:       (leave unset for default)
+  api_base_url: "https://litellm-prod.apps.maas.redhatworkshops.io"
+  
+  # Environment: "production" or "local" (Ollama)
+  environment: "production"
+  
+  # Model configuration
+  model_manager: "gpt-4o-mini"
+  model_worker: "gpt-4o-mini"
+  model_reviewer: "gpt-4o-mini"
+  
+  # LLM parameters
+  max_tokens: 2048
+  temperature: 0.7
+  embedding_model: "text-embedding-3-small"
+  
+  # Ollama configuration (when environment: local)
+  ollama_base_url: "http://localhost:11434"
+  ollama_model: "llama3.2:latest"
+
+# Budget Configuration
+budget:
+  # Maximum cost per project in USD
+  max_cost_per_project: 100.0
+  
+  # Maximum cost per hour in USD
+  max_cost_per_hour: 10.0
+  
+  # Alert when budget reaches this threshold (0.0 - 1.0)
+  alert_threshold: 0.8
+
+# Workspace Configuration
+workspace:
+  # Base path for generated code
+  path: "./workspace"
+
+# Logging Configuration
+logging:
+  # Log level: DEBUG, INFO, WARNING, ERROR, CRITICAL
+  level: "INFO"

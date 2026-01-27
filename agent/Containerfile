@@ -1,0 +1,53 @@
+# Containerfile for AI Software Development Crew
+FROM python:3.11-slim
+
+# Set working directory
+WORKDIR /app
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    git \
+    curl \
+    ca-certificates \
+    build-essential \
+    gcc \
+    g++ \
+    make \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy project files
+COPY pyproject.toml ./
+COPY src/ ./src/
+
+# Install Python dependencies
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir -e .
+
+# Create workspace directory
+RUN mkdir -p /app/workspace
+
+# Set environment variables
+ENV PYTHONPATH=/app
+ENV WORKSPACE_PATH=/app/workspace
+ENV FLASK_APP=crew_studio.web_app
+ENV FLASK_ENV=production
+
+# Support for config file mounting
+# Option 1: Docker secrets (recommended)
+#   docker secret create crew_config config.yaml
+#   docker service create --secret crew_config ...
+# Option 2: Volume mount (also secure)
+#   docker run -v /secure/path/config.yaml:/app/config.yaml:ro \
+#              -e CONFIG_FILE_PATH=/app/config.yaml ...
+ENV CONFIG_FILE_PATH=/run/secrets/crew_config
+
+# Expose web UI port
+EXPOSE 8080
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
+    CMD curl -f http://localhost:8080/health/ready || exit 1
+
+# Default command: run web UI
+CMD ["python", "-m", "ai_software_dev_crew.main", "web", "--port", "8080"]
+

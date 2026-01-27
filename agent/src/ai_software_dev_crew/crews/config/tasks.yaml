@@ -1,0 +1,7 @@
+# Task configuration file
+# This file is optional - tasks can be configured via code or this YAML file
+# If you want to customize task configurations, add them here
+# Format: See CrewAI documentation for task configuration
+
+tasks: {}
+

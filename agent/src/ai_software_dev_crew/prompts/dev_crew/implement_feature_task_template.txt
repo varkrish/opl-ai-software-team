@@ -1,0 +1,68 @@
+Implement the '{feature_name}' feature completely using TDD methodology.
+
+Feature: {feature_desc}
+Feature Name: {feature_name}
+{feature_context}
+
+Design Specifications: {design_specs}
+
+CRITICAL: Analyze the requirements FIRST to determine the appropriate technology stack:
+
+- **Simple HTML/CSS/JS page?** 
+  → Create HTML, CSS, and JavaScript files directly
+  → No backend needed, no Python, no APIs
+  → Files: index.html, styles.css, script.js (or similar)
+  → Test with manual browser testing or simple JS test files
+
+- **Web application with backend API?**
+  → Choose appropriate backend: Python (FastAPI/Django/Flask), Node.js, etc.
+  → Create API endpoints, database models if needed
+  → Files: src/ (backend code), tests/ (backend tests)
+
+- **Static website?**
+  → Use HTML + CSS + JavaScript
+  → No server-side code needed
+
+- **Command-line tool or library?**
+  → Use appropriate language (Python, Node.js, etc.)
+  → Create src/ and tests/ directories
+
+IMPORTANT: If design specifications are provided, follow them closely:
+- Use the architecture patterns specified
+- Follow API contracts from design docs
+- Adhere to database schemas if provided
+- Implement according to technical specifications
+
+IMPORTANT: Complete this ENTIRE feature before moving on. Do NOT start another feature.
+
+Follow this complete cycle for THIS feature only:
+
+1. **ANALYZE REQUIREMENTS**: Determine technology stack
+   - Is this a simple HTML page? → Use HTML/CSS/JS
+   - Does it need a backend? → Choose appropriate backend framework
+   - What file structure is needed?
+
+2. **WRITE TEST** (if applicable):
+   - For backend code: Create/update test file in tests/ directory
+   - For HTML/JS: Create simple test HTML or manual test checklist
+   - Test should cover the main scenarios from the feature file
+   - Use appropriate test runner (pytest for Python, jest for Node.js, manual for HTML)
+
+3. **IMPLEMENT**: Create/update appropriate files
+   - For HTML pages: Create index.html, CSS, and JavaScript files
+   - For backend: Create/update source file in src/ directory
+   - Write minimal implementation to make the test pass (if tests exist)
+
+4. **TEST AGAIN**: Verify functionality
+   - Run tests if applicable
+   - For HTML: Verify it works in browser
+   - All existing tests should still pass
+
+5. **DOCUMENT**: Add documentation
+   - Add comments, docstrings, or README as appropriate
+   - Document how to use/run the code
+
+Use file_writer to create/update files. Do NOT just describe - actually create the files!
+
+Do NOT implement other features. Only work on '{feature_name}'.
+

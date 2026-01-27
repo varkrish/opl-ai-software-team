@@ -1,0 +1,158 @@
+site_name: AI Software Development Crew
+site_description: Multi-agent AI software development system with LlamaIndex
+site_author: AI Software Dev Team
+site_url: https://varkrish.github.io/crew-coding-bots
+
+repo_name: varkrish/crew-coding-bots
+repo_url: https://github.com/varkrish/varkrish-crewai-opl-coder
+edit_uri: edit/main/docs/
+
+theme:
+  name: material
+  palette:
+    # Light mode - Red Hat theme
+    - scheme: default
+      primary: red
+      accent: red
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    # Dark mode - Red Hat theme
+    - scheme: slate
+      primary: red
+      accent: red
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  
+  font:
+    text: Red Hat Text
+    code: Red Hat Mono
+  
+  features:
+    - navigation.instant
+    - navigation.tracking
+    - navigation.tabs
+    - navigation.sections
+    - navigation.expand
+    - navigation.top
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+    - content.code.annotate
+    - content.tabs.link
+  
+  icon:
+    repo: fontawesome/brands/github
+    logo: material/robot
+
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          options:
+            docstring_style: google
+            show_source: true
+            show_root_heading: true
+  - mermaid2
+
+markdown_extensions:
+  - admonition
+  - pymdownx.details
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:mermaid2.fence_mermaid
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.tasklist:
+      custom_checkbox: true
+  - attr_list
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/varkrish
+    - icon: fontawesome/brands/python
+      link: https://pypi.org/project/ai-software-dev-crew/
+    - icon: fontawesome/brands/redhat
+      link: https://www.redhat.com/
+  
+  version:
+    provider: mike
+  
+  # Red Hat branding
+  generator: false
+
+nav:
+  - Home: index.md
+  
+  - Getting Started:
+    - Quick Start: getting-started/quickstart.md
+    - Configuration: getting-started/configuration.md
+    - Using Ollama: getting-started/ollama.md
+    - Installation: getting-started/installation.md
+    - First Project: getting-started/first-project.md
+  
+  - User Guide:
+    - Overview: guide/overview.md
+    - LLM Configuration: guide/llm-configuration.md
+    - LlamaIndex Migration: guide/llamaindex-migration.md
+    - Agents: guide/agents.md
+    - Workflows: guide/workflows.md
+    - Tools: guide/tools.md
+    - Budget Tracking: guide/budget.md
+    - Web UI: guide/web-ui.md
+  
+  - Testing:
+    - Overview: testing/overview.md
+    - Unit Tests: testing/unit-tests.md
+    - Integration Tests: testing/integration-tests.md
+    - E2E Tests: testing/e2e-tests.md
+    - Running Tests: testing/running-tests.md
+  
+  - Architecture:
+    - System Design: architecture/design.md
+    - State Machine: architecture/state-machine.md
+    - Task Manager: architecture/task-manager.md
+    - Agents: architecture/agents.md
+    - Workflows: architecture/workflows.md
+  
+  - API Reference:
+    - Overview: api/overview.md
+    - Main: api/main.md
+    - Agents: api/agents.md
+    - Workflows: api/workflows.md
+    - Tools: api/tools.md
+    - Utils: api/utils.md
+  
+  - Development:
+    - Contributing: development/contributing.md
+    - Code Style: development/code-style.md
+    - Testing Guide: development/testing.md
+    - Release Process: development/releases.md
+  
+  - Deployment:
+    - Docker: deployment/docker.md
+    - Kubernetes: deployment/kubernetes.md
+    - CI/CD: deployment/cicd.md
+    - Health Checks: deployment/health-checks.md
+    - Secure Configuration: deployment/secure-config-patterns.md
+    - GitHub Pages: deployment/github-pages.md
+  
+  - FAQ: faq.md
+  - Changelog: changelog.md
+  - License: license.md
+
+extra_css:
+  - stylesheets/extra.css

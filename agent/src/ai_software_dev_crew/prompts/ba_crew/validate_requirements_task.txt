@@ -1,0 +1,14 @@
+Review and validate the requirements document for quality.
+
+Check for:
+1. Completeness - Are all aspects covered?
+2. Clarity - Are requirements unambiguous?
+3. Testability - Can each requirement be tested?
+4. Gherkin syntax correctness in both requirements.md and .feature files
+5. Missing edge cases or error scenarios
+6. Feature files exist in features/ directory and are properly formatted
+
+IMPORTANT: Use the file_writer tool to save your validation report to 'validation_report.md'
+
+Provide specific feedback and improvements.
+

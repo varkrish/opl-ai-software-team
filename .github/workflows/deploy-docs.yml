@@ -1,0 +1,56 @@
+# Documentation Deployment Workflow
+# Deploys to GitHub Pages on every push to main
+
+name: Deploy Docs
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'docs/**'
+      - 'mkdocs.yml'
+      - '.github/workflows/deploy-docs.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+jobs:
+  deploy:
+    name: Deploy Documentation to GitHub Pages
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Fetch all history for git info
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+      
+      - name: Install MkDocs and dependencies
+        run: |
+          pip install mkdocs mkdocs-material mkdocstrings[python] mkdocs-mermaid2-plugin
+      
+      - name: Configure Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+      
+      - name: Build and deploy to GitHub Pages
+        run: |
+          mkdocs gh-deploy --force --clean --verbose
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      
+      - name: Deployment summary
+        run: |
+          echo "✅ Documentation deployed successfully!"
+          echo "📖 Available at: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/"
