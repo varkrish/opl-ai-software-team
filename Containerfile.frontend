@@ -1,0 +1,130 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# AI Crew Studio — Frontend (React + PatternFly → Nginx)
+# Podman / Docker compatible · Multi-stage build
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── Stage 1: Build ───────────────────────────────────────────────────────────
+FROM registry.access.redhat.com/ubi9/nodejs-20:latest AS builder
+
+LABEL org.opencontainers.image.title="AI Crew Studio — Frontend"
+LABEL org.opencontainers.image.description="React PatternFly UI for AI Software Development Crew"
+LABEL org.opencontainers.image.vendor="Red Hat"
+
+USER root
+WORKDIR /build
+
+# Copy package files first for layer caching
+COPY studio-ui/package.json studio-ui/package-lock.json* ./
+
+# Install dependencies
+RUN npm ci --ignore-scripts 2>/dev/null || npm install
+
+# Copy source
+COPY studio-ui/ ./
+
+# Build for production
+# The VITE_API_URL is empty so the frontend uses relative paths (same origin)
+# In production, Nginx proxies /api/* → backend:8080
+ENV VITE_API_URL=""
+RUN npm run build
+
+
+# ── Stage 2: Serve with Nginx ────────────────────────────────────────────────
+FROM registry.access.redhat.com/ubi9/nginx-122:latest
+
+LABEL org.opencontainers.image.title="AI Crew Studio — Frontend"
+LABEL org.opencontainers.image.description="React PatternFly UI served by Nginx"
+LABEL org.opencontainers.image.vendor="Red Hat"
+
+USER root
+
+# Copy built assets
+COPY --from=builder /build/dist /opt/app-root/src
+
+# Nginx config: SPA routing + API reverse proxy
+RUN cat > /etc/nginx/nginx.conf <<'NGINX'
+worker_processes auto;
+error_log /var/log/nginx/error.log warn;
+pid /tmp/nginx.pid;
+
+events {
+    worker_connections 1024;
+}
+
+http {
+    include       /etc/nginx/mime.types;
+    default_type  application/octet-stream;
+
+    log_format main '$remote_addr - $remote_user [$time_local] "$request" '
+                    '$status $body_bytes_sent "$http_referer" '
+                    '"$http_user_agent"';
+
+    access_log  /var/log/nginx/access.log main;
+    sendfile    on;
+    tcp_nopush  on;
+    keepalive_timeout 65;
+    gzip on;
+    gzip_types text/plain text/css application/json application/javascript
+               text/xml application/xml application/xml+rss text/javascript
+               image/svg+xml;
+    gzip_min_length 256;
+
+    # Temp paths for non-root operation
+    client_body_temp_path /tmp/client_body;
+    proxy_temp_path       /tmp/proxy;
+    fastcgi_temp_path     /tmp/fastcgi;
+    uwsgi_temp_path       /tmp/uwsgi;
+    scgi_temp_path        /tmp/scgi;
+
+    server {
+        listen 8080;
+        server_name _;
+        root /opt/app-root/src;
+        index index.html;
+
+        # API and health requests → backend
+        location /api/ {
+            proxy_pass http://backend:8080;
+            proxy_http_version 1.1;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+            proxy_read_timeout 600s;
+            proxy_send_timeout 600s;
+            client_max_body_size 50m;
+        }
+
+        location /health {
+            proxy_pass http://backend:8080;
+            proxy_http_version 1.1;
+            proxy_set_header Host $host;
+        }
+
+        # Static assets with caching
+        location /assets/ {
+            expires 1y;
+            add_header Cache-Control "public, immutable";
+        }
+
+        # SPA fallback: serve index.html for all other routes
+        location / {
+            try_files $uri $uri/ /index.html;
+        }
+    }
+}
+NGINX
+
+# Ensure writable dirs for non-root Nginx
+RUN mkdir -p /tmp/client_body /tmp/proxy /tmp/fastcgi /tmp/uwsgi /tmp/scgi && \
+    chown -R 1001:0 /opt/app-root/src /var/log/nginx /tmp && \
+    chmod -R g=u /opt/app-root/src /var/log/nginx /tmp
+
+USER 1001
+
+EXPOSE 8080
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD curl -sf http://localhost:8080/ || exit 1
+
+CMD ["nginx", "-g", "daemon off;"]

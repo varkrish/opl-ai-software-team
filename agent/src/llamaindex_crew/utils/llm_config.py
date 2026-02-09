@@ -118,25 +118,39 @@ class GenericLlamaLLM(LLM):
             **api_kwargs
         }
         
-        max_retries = 3
-        retry_delay = 5
+        max_retries = 5
+        base_delay = 5
+        max_delay = 120
+        import random
+        
+        # Transient errors: connection/transport and timeouts (catch all timeout variants)
+        retryable_exceptions = (httpx.RemoteProtocolError, httpx.ConnectError, httpx.ReadTimeout)
+        if getattr(httpx, "TimeoutException", None) is not None:
+            retryable_exceptions = retryable_exceptions + (httpx.TimeoutException,)
         
         for attempt in range(max_retries):
             try:
                 with httpx.Client(timeout=120.0) as client:
                     logger.debug(f"Sending request to {url} with model {self.model} (Attempt {attempt + 1}/{max_retries})")
-                    logger.debug(f"Messages: {formatted_messages}")
                     response = client.post(url, headers=headers, json=payload)
                     
                     if response.status_code != 200:
-                        logger.error(f"LLM API Error: {response.status_code} - {response.text}")
+                        # Retry on server errors (5xx) and rate limit (429)
+                        if response.status_code in (429, 502, 503, 504) and attempt < max_retries - 1:
+                            delay = min(base_delay * (2 ** attempt) + random.uniform(0, 3), max_delay)
+                            logger.warning(
+                                f"⚠️ LLM API returned {response.status_code}. Retrying in {delay:.1f}s... (attempt {attempt + 1}/{max_retries})"
+                            )
+                            time.sleep(delay)
+                            continue
+                        logger.error(f"LLM API Error: {response.status_code} - {response.text[:500]}")
                     
                     response.raise_for_status()
                     data = response.json()
                     
                     choice = data["choices"][0]
                     content = choice["message"]["content"]
-                    logger.debug(f"LLM Response: {content}")
+                    logger.debug(f"LLM Response: {content[:200]}...")
                     
                     return ChatResponse(
                         message=ChatMessage(
@@ -145,11 +159,13 @@ class GenericLlamaLLM(LLM):
                         ),
                         raw=data
                     )
-            except (httpx.RemoteProtocolError, httpx.ReadTimeout, httpx.ConnectError) as e:
+            except retryable_exceptions as e:
                 if attempt < max_retries - 1:
-                    logger.warning(f"⚠️ LLM API connection error: {e}. Retrying in {retry_delay}s...")
-                    time.sleep(retry_delay)
-                    retry_delay *= 2 # Exponential backoff
+                    delay = min(base_delay * (2 ** attempt) + random.uniform(0, 3), max_delay)
+                    logger.warning(
+                        f"⚠️ LLM API connection error ({type(e).__name__}): {e}. Retrying in {delay:.1f}s... (attempt {attempt + 1}/{max_retries})"
+                    )
+                    time.sleep(delay)
                 else:
                     logger.error(f"❌ LLM API failed after {max_retries} attempts: {e}")
                     raise
@@ -188,6 +204,8 @@ class GenericLlamaLLM(LLM):
 
     def complete(self, prompt: str, **kwargs) -> CompletionResponse:
         import httpx
+        import time
+        import random
         from llama_index.core.llms import CompletionResponse
         
         url = f"{self.api_base.rstrip('/')}/completions"
@@ -204,15 +222,35 @@ class GenericLlamaLLM(LLM):
             **kwargs
         }
         
-        with httpx.Client(timeout=120.0) as client:
-            response = client.post(url, headers=headers, json=payload)
-            response.raise_for_status()
-            data = response.json()
-            
-            return CompletionResponse(
-                text=data["choices"][0]["text"],
-                raw=data
-            )
+        max_retries = 5
+        base_delay = 5
+        max_delay = 120
+        retryable = (httpx.RemoteProtocolError, httpx.ConnectError, httpx.ReadTimeout)
+        if getattr(httpx, "TimeoutException", None) is not None:
+            retryable = retryable + (httpx.TimeoutException,)
+        
+        for attempt in range(max_retries):
+            try:
+                with httpx.Client(timeout=120.0) as client:
+                    response = client.post(url, headers=headers, json=payload)
+                    if response.status_code in (429, 502, 503, 504) and attempt < max_retries - 1:
+                        delay = min(base_delay * (2 ** attempt) + random.uniform(0, 3), max_delay)
+                        logger.warning(f"⚠️ LLM complete() got {response.status_code}, retrying in {delay:.1f}s...")
+                        time.sleep(delay)
+                        continue
+                    response.raise_for_status()
+                    data = response.json()
+                    return CompletionResponse(
+                        text=data["choices"][0]["text"],
+                        raw=data
+                    )
+            except retryable as e:
+                if attempt < max_retries - 1:
+                    delay = min(base_delay * (2 ** attempt) + random.uniform(0, 3), max_delay)
+                    logger.warning(f"⚠️ LLM complete() connection error: {e}. Retrying in {delay:.1f}s...")
+                    time.sleep(delay)
+                else:
+                    raise
 
     async def acomplete(self, prompt: str, **kwargs) -> CompletionResponse:
         import httpx

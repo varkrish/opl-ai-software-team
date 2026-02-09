@@ -1,0 +1,98 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# AI Crew Studio — Backend (Flask + LlamaIndex)
+# Podman / Docker compatible
+# ─────────────────────────────────────────────────────────────────────────────
+FROM registry.access.redhat.com/ubi9/python-311:latest AS base
+
+# Labels (OCI standard)
+LABEL org.opencontainers.image.title="AI Crew Studio — Backend"
+LABEL org.opencontainers.image.description="Flask API backend for AI Software Development Crew"
+LABEL org.opencontainers.image.vendor="Red Hat"
+LABEL org.opencontainers.image.licenses="MIT"
+
+# Switch to root for system packages
+USER root
+
+# Install system deps (git needed by gitpython, Node.js for Repomix)
+RUN dnf install -y --nodocs \
+        git \
+        curl \
+        gcc \
+        gcc-c++ \
+        make \
+        nodejs \
+        npm \
+    && dnf clean all \
+    && rm -rf /var/cache/dnf
+
+WORKDIR /app
+
+# ── Python dependencies ──────────────────────────────────────────────────────
+COPY agent/pyproject.toml /app/agent/pyproject.toml
+
+# Install dependencies first (layer cache)
+RUN cd /app/agent && \
+    pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir -e . 2>/dev/null || \
+    pip install --no-cache-dir \
+        "llama-index>=0.10.0" \
+        "llama-index-core>=0.10.0" \
+        "llama-index-agent-openai>=0.2.0" \
+        "llama-index-llms-openai>=0.1.0" \
+        "llama-index-llms-anthropic>=0.1.0" \
+        "llama-index-llms-ollama>=0.1.0" \
+        "llama-index-embeddings-openai>=0.1.0" \
+        "gitpython>=3.1.43" \
+        "PyYAML>=6.0.2" \
+        "rich>=13.9.4" \
+        "python-dotenv>=1.0.1" \
+        "requests>=2.32.3" \
+        "flask>=3.0.0" \
+        "flask-cors>=4.0.0" \
+        "jsonschema[format]>=4.0.0" \
+        "litellm>=1.0.0" \
+        "cryptography>=41.0.0"
+
+# ── Copy application source ──────────────────────────────────────────────────
+COPY agent/src/ /app/agent/src/
+
+# Only copy the backend Python modules from crew_studio
+# (skip legacy static/, templates/, and old web_app.py)
+COPY crew_studio/__init__.py       /app/crew_studio/__init__.py
+COPY crew_studio/job_database.py   /app/crew_studio/job_database.py
+COPY crew_studio/llamaindex_web_app.py /app/crew_studio/llamaindex_web_app.py
+
+# Make agent package importable
+RUN cd /app/agent && pip install --no-cache-dir -e . 2>/dev/null || true
+
+# ── Create directories ───────────────────────────────────────────────────────
+RUN mkdir -p /app/workspace /app/data && \
+    chown -R 1001:0 /app && \
+    chmod -R g=u /app
+
+# ── Environment ──────────────────────────────────────────────────────────────
+ENV PYTHONPATH=/app/agent:/app/agent/src:/app \
+    PYTHONUNBUFFERED=1 \
+    WORKSPACE_PATH=/app/workspace \
+    JOB_DB_PATH=/app/data/crew_jobs.db \
+    FLASK_ENV=production \
+    PORT=8080
+
+# Run as non-root (OpenShift compatible)
+USER 1001
+
+EXPOSE 8080
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+    CMD curl -sf http://localhost:8080/health || exit 1
+
+# ── Entrypoint ───────────────────────────────────────────────────────────────
+CMD ["python", "-c", "\
+import sys; \
+sys.path.insert(0, './agent'); \
+sys.path.insert(0, './agent/src'); \
+sys.path.insert(0, '.'); \
+from crew_studio.llamaindex_web_app import app; \
+app.run(host='0.0.0.0', port=8080, debug=False, use_reloader=False) \
+"]

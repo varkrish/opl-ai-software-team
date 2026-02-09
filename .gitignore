@@ -16,3 +16,7 @@ dist/
 agent/build/
 agent/scripts/build/
 agent/scripts/dist/
+# Runtime / generated
+crew_jobs.db
+agent/crew_jobs.db
+repomix-output.xml

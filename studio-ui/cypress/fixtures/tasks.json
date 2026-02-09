@@ -1,0 +1,18 @@
+{
+  "total_tasks": 8,
+  "phase_stats": {
+    "meta": { "total": 2, "completed": 2, "in_progress": 0 },
+    "product_owner": { "total": 2, "completed": 2, "in_progress": 0 },
+    "architecture": { "total": 2, "completed": 0, "in_progress": 1 }
+  },
+  "tasks": [
+    { "task_id": "t1", "phase": "meta", "task_type": "initialization", "description": "Initialize project workspace", "status": "completed" },
+    { "task_id": "t2", "phase": "meta", "task_type": "analysis", "description": "Analyze project vision", "status": "completed" },
+    { "task_id": "t3", "phase": "product_owner", "task_type": "user_stories", "description": "Create user stories for auth module", "status": "completed" },
+    { "task_id": "t4", "phase": "product_owner", "task_type": "validation", "description": "Validate requirements", "status": "skipped" },
+    { "task_id": "t5", "phase": "architecture", "task_type": "schema", "description": "Design database schema", "status": "in_progress" },
+    { "task_id": "t6", "phase": "architecture", "task_type": "api_design", "description": "Define REST API endpoints", "status": "registered" },
+    { "task_id": "t7", "phase": "development", "task_type": "implementation", "description": "Implement user service", "status": "created" },
+    { "task_id": "t8", "phase": "frontend", "task_type": "ui", "description": "Build login page", "status": "registered" }
+  ]
+}

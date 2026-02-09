@@ -1,0 +1,10 @@
+{
+  "agents": [
+    { "name": "Meta Agent", "role": "Orchestrator", "model": "deepseek-r1-distill-qwen-14b", "status": "completed", "phase": "meta", "last_activity": "Project initialized successfully", "last_activity_at": "2025-02-06T10:01:00" },
+    { "name": "Product Owner", "role": "Requirements", "model": "qwen3-14b", "status": "completed", "phase": "product_owner", "last_activity": "User stories created", "last_activity_at": "2025-02-06T10:05:00" },
+    { "name": "Designer", "role": "UX/UI", "model": "granite-3-2-8b-instruct", "status": "completed", "phase": "design", "last_activity": "Design specs generated", "last_activity_at": "2025-02-06T10:10:00" },
+    { "name": "Tech Architect", "role": "System Design", "model": "qwen3-14b", "status": "working", "phase": "architecture", "last_activity": "Generating SQL schema...", "last_activity_at": "2025-02-06T10:15:00" },
+    { "name": "Dev Crew", "role": "Implementation", "model": "qwen3-14b", "status": "idle", "phase": "development", "last_activity": null, "last_activity_at": null },
+    { "name": "Frontend Crew", "role": "UI Implementation", "model": "granite-3-2-8b-instruct", "status": "idle", "phase": "frontend", "last_activity": null, "last_activity_at": null }
+  ]
+}

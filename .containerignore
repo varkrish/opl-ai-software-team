@@ -1,0 +1,99 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# .containerignore — Shared by all Containerfile.* builds
+# Keeps build context small & prevents secrets from leaking into images
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Git
+.git
+.gitignore
+.github
+
+# IDE / editor
+.vscode
+.idea
+.cursor
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Python caches
+__pycache__
+*.py[cod]
+*$py.class
+*.so
+.Python
+.pytest_cache
+.coverage
+htmlcov
+*.egg-info
+*.egg
+
+# Virtual envs
+env/
+venv/
+.venv/
+ENV/
+
+# Build artifacts
+build/
+dist/
+*.spec
+
+# Node (frontend has its own stage — no need in backend context)
+studio-ui/node_modules/
+Red-Hat-Studio/node_modules/
+node_modules/
+
+# Documentation (not needed at runtime)
+docs/
+site/
+mkdocs.yml
+*.md
+!README.md
+
+# Test artifacts
+test_workspace_*/
+pytest-results.xml
+coverage.xml
+.coverage.*
+tests/
+
+# Workspace / runtime data
+workspace/
+*.db
+*.log
+
+# Secrets — NEVER bake into images
+.env
+.env.*
+!.env.example
+config.yaml
+config.encrypted.yaml
+*.key
+*.pem
+*.cert
+
+# Container files themselves
+Containerfile
+Containerfile.*
+compose.yaml
+compose.*.yaml
+docker-compose.yml
+docker-compose.*.yml
+.dockerignore
+.containerignore
+
+# CI/CD
+Makefile
+
+# ── Legacy / prototype code (not used by new stack) ──────────────────────────
+Red-Hat-Studio/
+crew_studio/static/
+crew_studio/templates/
+crew_studio/web_app.py
+
+# Miscellaneous
+hooks/
+run_app.py
+pyinstaller.spec

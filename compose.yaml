@@ -1,0 +1,114 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# AI Crew Studio — Full Stack Compose
+# Compatible with: podman-compose, docker compose
+#
+# Usage:
+#   podman-compose up -d              # start all services
+#   podman-compose up -d --build      # rebuild and start
+#   podman-compose logs -f            # follow all logs
+#   podman-compose logs -f backend    # follow backend only
+#   podman-compose down               # stop all
+#   podman-compose down -v            # stop + remove volumes
+#
+# Environment:
+#   Copy .env.example → .env and fill in API keys before starting.
+# ─────────────────────────────────────────────────────────────────────────────
+version: "3.9"
+
+services:
+  # ── Backend: Flask API + AI Agents ───────────────────────────────────────
+  backend:
+    container_name: crew-backend
+    build:
+      context: .
+      dockerfile: Containerfile.backend
+    ports:
+      - "${BACKEND_PORT:-8080}:8080"
+    volumes:
+      - crew-workspace:/app/workspace
+      - crew-data:/app/data
+      # Mount config/secrets (read-only)
+      - ${CONFIG_FILE:-./config.yaml}:/app/config.yaml:ro,z
+    environment:
+      # LLM provider (OpenAI, Anthropic, Ollama, OpenRouter)
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
+      # Ollama (if using local models)
+      - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://ollama:11434}
+      # App config
+      - WORKSPACE_PATH=/app/workspace
+      - JOB_DB_PATH=/app/data/crew_jobs.db
+      - CONFIG_FILE_PATH=/app/config.yaml
+      - FLASK_ENV=${FLASK_ENV:-production}
+      - PYTHONUNBUFFERED=1
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      start_period: 60s
+      retries: 3
+    networks:
+      - crew-net
+
+  # ── Frontend: React + PatternFly (Nginx) ─────────────────────────────────
+  frontend:
+    container_name: crew-frontend
+    build:
+      context: .
+      dockerfile: Containerfile.frontend
+    ports:
+      - "${FRONTEND_PORT:-3000}:8080"
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8080/"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+    networks:
+      - crew-net
+
+  # ── Ollama (optional): Local LLM inference ──────────────────────────────
+  # Uncomment to run models locally instead of using cloud APIs
+  #
+  # ollama:
+  #   container_name: crew-ollama
+  #   image: docker.io/ollama/ollama:latest
+  #   ports:
+  #     - "${OLLAMA_PORT:-11434}:11434"
+  #   volumes:
+  #     - ollama-models:/root/.ollama
+  #   # GPU passthrough (NVIDIA)
+  #   # deploy:
+  #   #   resources:
+  #   #     reservations:
+  #   #       devices:
+  #   #         - driver: nvidia
+  #   #           count: all
+  #   #           capabilities: [gpu]
+  #   restart: unless-stopped
+  #   healthcheck:
+  #     test: ["CMD", "curl", "-sf", "http://localhost:11434/api/tags"]
+  #     interval: 30s
+  #     timeout: 10s
+  #     start_period: 30s
+  #     retries: 3
+  #   networks:
+  #     - crew-net
+
+volumes:
+  crew-workspace:
+    driver: local
+  crew-data:
+    driver: local
+  # ollama-models:
+  #   driver: local
+
+networks:
+  crew-net:
+    driver: bridge

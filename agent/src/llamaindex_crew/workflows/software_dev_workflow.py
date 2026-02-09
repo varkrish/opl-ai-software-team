@@ -4,8 +4,9 @@ Sequential workflow orchestrating all agents
 """
 import logging
 import os
+import time
 from pathlib import Path
-from typing import Dict, Optional, Any
+from typing import Dict, Optional, Any, Callable
 from ..agents import (
     MetaAgent, ProductOwnerAgent, DesignerAgent,
     TechArchitectAgent, DevAgent, FrontendAgent
@@ -19,6 +20,32 @@ from ..utils.document_indexer import DocumentIndexer
 
 logger = logging.getLogger(__name__)
 
+# Number of times to retry a phase on transient LLM/network errors
+PHASE_RETRY_ATTEMPTS = 3
+PHASE_RETRY_DELAY_SEC = 10
+
+
+def _is_transient_llm_error(e: Exception) -> bool:
+    """True if the error is a transient LLM/network error we should retry."""
+    try:
+        import httpx
+        if isinstance(e, (httpx.RemoteProtocolError, httpx.ConnectError, httpx.ReadTimeout)):
+            return True
+        if getattr(httpx, "TimeoutException", None) is not None and isinstance(e, httpx.TimeoutException):
+            return True
+    except ImportError:
+        pass
+    msg = str(e).lower()
+    return (
+        "server disconnected" in msg
+        or "connection" in msg
+        or "timeout" in msg
+        or "503" in msg
+        or "502" in msg
+        or "504" in msg
+        or "remoteprotocolerror" in msg
+    )
+
 
 class SoftwareDevWorkflow:
     """Main workflow orchestrating all development phases"""
@@ -28,7 +55,8 @@ class SoftwareDevWorkflow:
         project_id: str,
         workspace_path: Path,
         vision: str,
-        config: Optional[Any] = None
+        config: Optional[Any] = None,
+        progress_callback: Optional[callable] = None
     ):
         """
         Initialize workflow
@@ -38,11 +66,13 @@ class SoftwareDevWorkflow:
             workspace_path: Path to workspace directory
             vision: Project vision/idea
             config: Optional configuration instance
+            progress_callback: Optional callback function(phase: str, progress: int, message: str)
         """
         self.project_id = project_id
         self.workspace_path = workspace_path
         self.vision = vision
         self.config = config
+        self.progress_callback = progress_callback
         
         # Initialize components
         self.state_machine = ProjectStateMachine(workspace_path, project_id)
@@ -65,6 +95,14 @@ class SoftwareDevWorkflow:
         # Store phase outputs
         self.project_context = None
         self.agent_backstories = {}
+    
+    def _report_progress(self, phase: str, progress: int, message: str = None):
+        """Report progress via callback if available"""
+        if self.progress_callback:
+            try:
+                self.progress_callback(phase, progress, message)
+            except Exception as e:
+                logger.warning(f"Progress callback failed: {e}")
         self.user_stories = None
         self.design_spec = None
         self.tech_stack = None
@@ -72,6 +110,7 @@ class SoftwareDevWorkflow:
     def run_meta_phase(self, retry_count: int = 0) -> Dict[str, str]:
         """Run Meta phase to generate agent backstories"""
         logger.info("🚀 Starting Meta phase...")
+        self._report_progress('meta', 10, "Starting Meta phase...")
         
         try:
             # Only transition if not already in META state (initial state)
@@ -113,6 +152,7 @@ class SoftwareDevWorkflow:
     def run_product_owner_phase(self) -> str:
         """Run Product Owner phase to create user stories"""
         logger.info("🚀 Starting Product Owner phase...")
+        self._report_progress('product_owner', 30, "Creating user stories...")
         
         # Ensure state is correct (meta phase should have already transitioned us here)
         if self.state_machine.get_current_state() != ProjectState.PRODUCT_OWNER:
@@ -147,6 +187,7 @@ class SoftwareDevWorkflow:
     def run_designer_phase(self) -> str:
         """Run Designer phase to create design specification"""
         logger.info("🚀 Starting Designer phase...")
+        self._report_progress('designer', 45, "Creating design specification...")
         
         # Ensure state is correct
         if self.state_machine.get_current_state() != ProjectState.DESIGNER:
@@ -183,6 +224,7 @@ class SoftwareDevWorkflow:
     def run_tech_architect_phase(self) -> str:
         """Run Tech Architect phase to define tech stack"""
         logger.info("🚀 Starting Tech Architect phase...")
+        self._report_progress('tech_architect', 60, "Defining technical architecture...")
         
         # Ensure state is correct
         if self.state_machine.get_current_state() != ProjectState.TECH_ARCHITECT:
@@ -223,6 +265,7 @@ class SoftwareDevWorkflow:
     def run_development_phase(self) -> str:
         """Run Development phase to implement features"""
         logger.info("🚀 Starting Development phase...")
+        self._report_progress('development', 75, "Implementing application logic...")
         
         # Ensure state is correct
         if self.state_machine.get_current_state() != ProjectState.DEVELOPMENT:
@@ -278,6 +321,7 @@ class SoftwareDevWorkflow:
     def run_frontend_phase(self) -> str:
         """Run Frontend phase to implement UI"""
         logger.info("🚀 Starting Frontend phase...")
+        self._report_progress('frontend', 90, "Building user interface...")
         
         # Ensure state is correct
         if self.state_machine.get_current_state() != ProjectState.FRONTEND:
@@ -317,6 +361,25 @@ class SoftwareDevWorkflow:
         logger.info("✅ Frontend phase completed")
         return result
     
+    def _run_phase_with_retry(self, phase_name: str, phase_fn: Callable[[], Any]) -> Any:
+        """Run a phase with retries on transient LLM/network errors."""
+        last_error = None
+        for attempt in range(PHASE_RETRY_ATTEMPTS):
+            try:
+                return phase_fn()
+            except Exception as e:
+                last_error = e
+                if _is_transient_llm_error(e) and attempt < PHASE_RETRY_ATTEMPTS - 1:
+                    logger.warning(
+                        f"⚠️ Phase '{phase_name}' failed (transient): {e}. "
+                        f"Retrying in {PHASE_RETRY_DELAY_SEC}s... (attempt {attempt + 1}/{PHASE_RETRY_ATTEMPTS})"
+                    )
+                    time.sleep(PHASE_RETRY_DELAY_SEC)
+                    continue
+                raise
+        if last_error is not None:
+            raise last_error
+
     def run(self) -> Dict[str, Any]:
         """
         Run complete workflow
@@ -325,33 +388,25 @@ class SoftwareDevWorkflow:
             Dictionary with workflow results
         """
         try:
-            # Phase 1: Meta
+            # Phase 1: Meta (has its own retry logic)
             backstories = self.run_meta_phase()
-            
-            # Phase 2: Product Owner
-            self.run_product_owner_phase()
-            
-            # Phase 3: Designer
-            self.run_designer_phase()
-            
-            # Phase 4: Tech Architect
-            self.run_tech_architect_phase()
-            
-            # Phase 5: Development
-            self.run_development_phase()
-            
-            # Phase 6: Frontend
-            self.run_frontend_phase()
-            
+
+            # Phases 2–6: run with retry on transient LLM/network errors
+            self._run_phase_with_retry("product_owner", self.run_product_owner_phase)
+            self._run_phase_with_retry("designer", self.run_designer_phase)
+            self._run_phase_with_retry("tech_architect", self.run_tech_architect_phase)
+            self._run_phase_with_retry("development", self.run_development_phase)
+            self._run_phase_with_retry("frontend", self.run_frontend_phase)
+
             # Transition to completed
             self.state_machine.transition(
                 ProjectState.COMPLETED,
                 TransitionContext(phase="completed", data={})
             )
-            
+
             # Final task validation
             completed_check = self.task_manager.validate_all_tasks_completed()
-            
+
             return {
                 "status": "completed",
                 "project_id": self.project_id,

@@ -1,4 +1,1 @@
-"""
-E2E Test Package
-Contains end-to-end tests for the AI Software Development Crew
-"""
+# E2E Tests for Job Execution
