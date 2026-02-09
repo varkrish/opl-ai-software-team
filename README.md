@@ -16,6 +16,9 @@ An intelligent software development crew that transforms your vision into produc
 
 ## 🚀 Quick Start
 
+**Start the full system (local):** run the backend with `make studio-run`, then in another terminal run `make studio-dev`, and open http://localhost:3000.  
+**Or use containers:** `cp .env.example .env` then `make compose-up` — UI at http://localhost:3000.
+
 ### Prerequisites
 
 - **Python 3.10+**
@@ -94,29 +97,29 @@ cd agent
 python -m src.llamaindex_crew.main "Create a TODO app"
 ```
 
-### Option 4: Containerized Deployment with Podman
+### Option 4: Containerized Deployment (Podman / Docker)
 
 ```bash
-# 1. Build the container image
-podman build -t crew-ai-software:latest -f Containerfile .
+# 1. Copy environment file and set API keys
+cp .env.example .env
+# Edit .env with your OPENAI_API_KEY, ANTHROPIC_API_KEY, or OPENROUTER_API_KEY
 
-# 2. Run with Web UI (accessible at http://localhost:8080)
-podman run -d \
-  --name crew-studio \
-  -p 8080:8080 \
-  -v ~/.crew-ai:/root/.crew-ai:ro \
-  crew-ai-software:latest
+# 2. Optional: mount LLM config (e.g. for Red Hat MaaS)
+# Set CONFIG_FILE in .env to your config path; it will be mounted into the backend.
 
-# 3. Or run CLI commands directly
-podman run --rm \
-  -v ~/.crew-ai:/root/.crew-ai:ro \
-  crew-ai-software:latest \
-  python -m src.llamaindex_crew.main "Build a calculator"
+# 3. Start the full stack (backend + frontend)
+make compose-up
+# Or: podman-compose up -d --build
+
+# Frontend: http://localhost:3000
+# Backend API: http://localhost:8080
 ```
 
-## 📊 Professional Dashboard
+To stop: `make compose-down` (or `podman-compose down`).
 
-Access the web UI at `http://localhost:8080` to:
+## 📊 Professional Dashboard (Crew Studio)
+
+The Crew Studio UI gives you:
 
 - ✅ Monitor task completion percentages in real-time
 - 📈 Track phase-by-phase progress (Meta → Product Owner → Designer → Tech Architect → Dev → Frontend)
@@ -124,16 +127,24 @@ Access the web UI at `http://localhost:8080` to:
 - 📁 Browse generated files and code
 - 💰 Monitor budget and API costs
 
-**Start the UI:**
+**Start the system:**
+
+*Option A — Local development (backend + React dev server):*
 ```bash
-# From the root directory
+# Terminal 1: start backend (Flask API on port 8080)
 make studio-run
 
-# Or manually
-cd crew_studio
-export PYTHONPATH=$(pwd)/../agent:$(pwd)/../agent/src:$PYTHONPATH
-python3 llamaindex_web_app.py
+# Terminal 2: start frontend (Vite on port 3000)
+make studio-dev
 ```
+Then open **http://localhost:3000** in your browser.
+
+*Option B — Containers (single command):*
+```bash
+cp .env.example .env   # edit .env with API keys if needed
+make compose-up
+```
+Then open **http://localhost:3000** (frontend) and **http://localhost:8080** (backend API/health).
 
 ## 📚 Documentation
 
@@ -151,17 +162,23 @@ python3 llamaindex_web_app.py
 │   ├── src/
 │   │   └── llamaindex_crew/   # LlamaIndex-based implementation
 │   │       ├── agents/        # AI Agents (Meta, PO, Designer, etc.)
+│   │       ├── backends/      # Pluggable backends (OPL crew, Aider)
 │   │       ├── workflows/     # Software development workflow
 │   │       ├── orchestrator/  # State machine & task manager
 │   │       ├── tools/         # File, Git, Test runner tools
 │   │       └── config/        # Secure configuration module
 │   ├── docs/                  # Documentation (MkDocs)
 │   └── tests/                 # Comprehensive test suite
-├── crew_studio/               # Web UI Dashboard
-│   ├── static/               # React-based frontend
-│   └── templates/            # HTML templates
-├── Containerfile             # Podman/OCI container definition
-└── Makefile                  # Build & run automation
+├── crew_studio/               # Backend: Flask API + job DB
+│   └── llamaindex_web_app.py  # Serves API and (in prod) static frontend
+├── studio-ui/                 # Frontend: React + PatternFly (Vite)
+│   ├── src/                   # Pages, components, API client
+│   └── public/
+├── compose.yaml               # Full stack (backend + frontend)
+├── Containerfile.backend      # Backend container
+├── Containerfile.frontend    # Frontend container (Nginx)
+├── .env.example               # Environment template
+└── Makefile                   # Build & run (setup, studio-run, studio-dev, compose-up)
 ```
 
 ## 🔌 Supported LLM Providers
@@ -205,38 +222,31 @@ pytest tests/e2e/ -m e2e    # E2E tests
 
 ## 🐳 Deployment
 
-### Podman Compose (Multi-Service)
+### Podman / Docker Compose (Full Stack)
 
 ```bash
-# Start all services
-cd agent
-podman-compose up -d
+# From repo root: start backend + frontend
+make compose-up
+# or: podman-compose up -d --build
 
 # Services:
-# - Crew Studio UI: http://localhost:8080
-# - PostgreSQL: localhost:5432
-# - Redis (Dragonfly): localhost:6379
-# - RabbitMQ: localhost:5672, UI at http://localhost:15672
+# - Frontend (Crew Studio UI): http://localhost:3000
+# - Backend API: http://localhost:8080
+# - Health: http://localhost:8080/health
 ```
 
-### OpenShift/Kubernetes
+### OpenShift / Kubernetes
 
 ```bash
-# Build and push to registry
-podman build -t quay.io/youruser/crew-ai-software:latest -f Containerfile .
-podman push quay.io/youruser/crew-ai-software:latest
+# Build and push both images
+make container-build
+podman push quay.io/youruser/crew-backend:latest
+podman push quay.io/youruser/crew-frontend:latest
 
-# Deploy to OpenShift
-oc new-app quay.io/youruser/crew-ai-software:latest \
-  --name=crew-ai \
-  -e CONFIG_FILE_PATH=/config/crew.config.yaml
+# Or use the Makefile target (builds and pushes)
+make oc-deploy
 
-# Create config from secret
-oc create secret generic crew-config --from-file=crew.config.yaml
-oc set volume deployment/crew-ai --add \
-  --type=secret \
-  --secret-name=crew-config \
-  --mount-path=/config
+# Manual deploy: create backend and frontend from images, expose routes as needed.
 ```
 
 See [Secure Config Patterns](agent/docs/deployment/secure-config-patterns.md) for production deployment.
