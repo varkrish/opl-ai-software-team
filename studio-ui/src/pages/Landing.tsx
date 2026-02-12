@@ -361,64 +361,100 @@ const Landing: React.FC = () => {
   }
 
   /* ═══════════════════════════════════════════════════════════════════════ */
-  /* IDLE MODE: centered input (original landing page)                     */
+  /* IDLE MODE: side-by-side — left: prompt input, right: features (100vh) */
   /* ═══════════════════════════════════════════════════════════════════════ */
   return (
     <div style={{
-      minHeight: '100vh',
-      background: 'linear-gradient(180deg, #F0F0F0 0%, #FAFAFA 100%)',
-      display: 'flex', flexDirection: 'column',
+      height: '100vh', overflow: 'hidden',
+      display: 'flex',
     }}>
-      {/* Hero */}
+      {/* Animations for right pane */}
+      <style>{`
+        @keyframes landingFadeInRight {
+          from { opacity: 0; transform: translateX(16px); }
+          to { opacity: 1; transform: translateX(0); }
+        }
+        @keyframes landingFadeIn {
+          from { opacity: 0; }
+          to { opacity: 1; }
+        }
+        @keyframes landingIconPulse {
+          0%, 100% { transform: scale(1); }
+          50% { transform: scale(1.05); }
+        }
+        .landing-right-panel { animation: landingFadeInRight 0.5s ease-out forwards; }
+        .landing-right-row { opacity: 0; animation: landingFadeInRight 0.4s ease-out forwards; }
+        .landing-left-hero { animation: landingFadeIn 0.4s ease-out; }
+        .landing-right-icon:hover { transform: scale(1.08); }
+      `}</style>
+
+      {/* ── LEFT: white panel — prompt input ───────────────────────────────── */}
       <div style={{
-        flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center',
-        padding: '3rem 2rem',
+        flex: '1 1 75%', display: 'flex', flexDirection: 'column',
+        background: '#FAFAFA', overflow: 'auto',
       }}>
-        <div style={{ maxWidth: '900px', width: '100%' }}>
-          {/* Heading */}
-          <div style={{ textAlign: 'center', marginBottom: '2rem' }}>
-            <h1 style={{
-              fontSize: '3rem', fontWeight: 700,
-              fontFamily: '"Red Hat Display", sans-serif',
-              color: '#151515', marginBottom: '0.75rem', lineHeight: 1.1,
-            }}>
-              Describe it.{' '}
-              <span style={{
-                background: 'linear-gradient(135deg, #EE0000 0%, #CC0000 100%)',
-                WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent',
-                backgroundClip: 'text',
-              }}>
-                We'll build it.
-              </span>
-            </h1>
-
-            <p style={{
-              fontSize: '1.125rem', color: '#72767B', maxWidth: '560px',
-              margin: '0 auto', lineHeight: 1.5, fontWeight: 400,
-            }}>
-              AI-powered software development. From idea to production-ready code.
-            </p>
+        {/* Top bar */}
+        <div style={{
+          display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+          padding: '0.75rem 1.5rem', borderBottom: '1px solid #E7E7E7',
+          flexShrink: 0,
+        }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+            <img src="/redhat-logo.svg" alt="Red Hat" style={{ height: '20px' }}
+              onError={(e) => { e.currentTarget.style.display = 'none'; }} />
+            <span style={{ fontSize: '0.9375rem', fontWeight: 700, color: '#151515', fontFamily: '"Red Hat Display", sans-serif' }}>
+              AI Crew
+            </span>
           </div>
+          <Button variant="link" onClick={() => navigate('/dashboard')}
+            style={{ color: '#72767B', fontSize: '0.8125rem' }}
+            icon={<ArrowRightIcon />} iconPosition="end">
+            Dashboard
+          </Button>
+        </div>
 
-          {/* Error */}
+        {/* Main content — vertically centered */}
+        <div className="landing-left-hero" style={{
+          flex: 1, display: 'flex', flexDirection: 'column',
+          justifyContent: 'center', padding: '2rem 2.5rem',
+          maxWidth: '640px', width: '100%', margin: '0 auto',
+        }}>
+          <h1 style={{
+            fontSize: '2.25rem', fontWeight: 700,
+            fontFamily: '"Red Hat Display", sans-serif',
+            color: '#151515', marginBottom: '0.5rem', lineHeight: 1.15,
+          }}>
+            Describe it.{' '}
+            <span style={{
+              background: 'linear-gradient(135deg, #EE0000, #CC0000)',
+              WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent',
+              backgroundClip: 'text',
+            }}>
+              We build it.
+            </span>
+          </h1>
+          <p style={{ fontSize: '0.9375rem', color: '#72767B', marginBottom: '1.25rem', lineHeight: 1.5 }}>
+            From idea to production-ready code, powered by 6 AI agents.
+          </p>
+
           {error && (
-            <Alert variant="danger" title={error} style={{ marginBottom: '1.5rem' }} isInline
+            <Alert variant="danger" title={error} style={{ marginBottom: '1rem' }} isInline isPlain
               actionClose={<Button variant="plain" onClick={() => setError(null)}>×</Button>} />
           )}
 
-          {/* Main Input Card */}
+          {/* Input card */}
           <div style={{
-            background: 'white', borderRadius: '20px', padding: '2rem',
-            boxShadow: '0 4px 24px rgba(0,0,0,0.06)', border: '1px solid #E7E7E7',
+            background: 'white', borderRadius: '16px', padding: '1.25rem',
+            boxShadow: '0 2px 16px rgba(0,0,0,0.06)', border: '1px solid #E7E7E7',
           }}>
             <TextArea
               value={vision}
               onChange={(_e, v) => setVision(v)}
-              placeholder="Describe your project vision in plain English..."
+              placeholder="Describe your project vision..."
               style={{
-                minHeight: '180px', fontSize: '1.0625rem',
+                minHeight: '120px', fontSize: '0.9375rem',
                 fontFamily: '"Red Hat Text", sans-serif',
-                border: 'none', padding: '0', resize: 'vertical',
+                border: 'none', padding: '0', resize: 'none',
                 lineHeight: 1.6, color: '#151515',
               }}
               aria-label="Project description"
@@ -427,68 +463,40 @@ const Landing: React.FC = () => {
               }}
             />
 
-            {/* Backend selector - right below text area */}
             <div style={{
               display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-              marginTop: '1.5rem', paddingTop: '1.5rem',
+              marginTop: '0.75rem', paddingTop: '0.75rem',
               borderTop: '1px solid #F0F0F0',
             }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
-                <span style={{ fontSize: '0.875rem', color: '#72767B', fontWeight: 500 }}>
-                  Agentic Framework:
-                </span>
-                <Select
-                  toggle={(toggleRef) => (
-                    <MenuToggle
-                      ref={toggleRef}
-                      onClick={() => setBackendSelectOpen(!backendSelectOpen)}
-                      isExpanded={backendSelectOpen}
-                      style={{
-                        fontSize: '0.875rem',
-                        padding: '0.375rem 0.875rem',
-                        minWidth: '160px',
-                        border: '1px solid #D2D2D2',
-                        borderRadius: '8px',
-                      }}
-                    >
-                      {backends.find((b) => b.name === selectedBackend)?.display_name || 'OPL AI Team'}
-                    </MenuToggle>
-                  )}
-                  onSelect={(_event, selection) => {
-                    setSelectedBackend(selection as string);
-                    setBackendSelectOpen(false);
-                  }}
-                  selected={selectedBackend}
-                  isOpen={backendSelectOpen}
-                  onOpenChange={(isOpen) => setBackendSelectOpen(isOpen)}
-                  aria-label="Select agentic system"
-                >
-                  <SelectList>
-                    {backends.map((backend) => (
-                      <SelectOption
-                        key={backend.name}
-                        value={backend.name}
-                        isDisabled={!backend.available}
-                      >
-                        {backend.display_name}
-                        {!backend.available && (
-                          <span style={{ color: '#8A8D90', fontSize: '0.75rem', marginLeft: '0.5rem' }}>
-                            (not installed)
-                          </span>
-                        )}
-                      </SelectOption>
-                    ))}
-                  </SelectList>
-                </Select>
-              </div>
-
-              <Button variant="primary" size="lg" onClick={handleCreateProject}
+              <Select
+                toggle={(toggleRef) => (
+                  <MenuToggle ref={toggleRef}
+                    onClick={() => setBackendSelectOpen(!backendSelectOpen)}
+                    isExpanded={backendSelectOpen}
+                    style={{ fontSize: '0.8125rem', padding: '0.3rem 0.75rem', minWidth: '150px', border: '1px solid #D2D2D2', borderRadius: '8px' }}
+                  >
+                    {backends.find((b) => b.name === selectedBackend)?.display_name || 'OPL AI Team'}
+                  </MenuToggle>
+                )}
+                onSelect={(_e, s) => { setSelectedBackend(s as string); setBackendSelectOpen(false); }}
+                selected={selectedBackend}
+                isOpen={backendSelectOpen}
+                onOpenChange={setBackendSelectOpen}
+                aria-label="Select agentic system"
+              >
+                <SelectList>
+                  {backends.map((b) => (
+                    <SelectOption key={b.name} value={b.name} isDisabled={!b.available}>
+                      {b.display_name}{!b.available && <span style={{ color: '#8A8D90', fontSize: '0.7rem', marginLeft: '0.4rem' }}>(N/A)</span>}
+                    </SelectOption>
+                  ))}
+                </SelectList>
+              </Select>
+              <Button variant="primary" onClick={handleCreateProject}
                 isLoading={creating} isDisabled={!vision.trim() || creating}
                 style={{
-                  backgroundColor: '#EE0000', border: 'none',
-                  fontWeight: 600, padding: '0.625rem 2rem',
-                  fontSize: '0.9375rem', borderRadius: '10px',
-                  color: 'white',
+                  backgroundColor: '#EE0000', border: 'none', fontWeight: 600,
+                  padding: '0.5rem 1.75rem', fontSize: '0.875rem', borderRadius: '10px', color: 'white',
                 }}
                 icon={creating ? <Spinner size="sm" /> : <RocketIcon />} iconPosition="end">
                 {creating ? 'Creating...' : 'Start Building'}
@@ -496,214 +504,170 @@ const Landing: React.FC = () => {
             </div>
           </div>
 
-          {/* Quick links and context hint */}
-          <div style={{
-            display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-            marginTop: '1rem', padding: '0 0.25rem',
-          }}>
-            <span style={{ fontSize: '0.8125rem', color: '#8A8D90' }}>
-              {contextCount > 0
-                ? `${contextCount} reference${contextCount > 1 ? 's' : ''} attached`
-                : 'Tip: ⌘+Enter to submit'}
-            </span>
-            <Button variant="link" onClick={() => navigate('/dashboard')}
-              style={{ color: '#72767B', fontSize: '0.875rem', padding: '0.375rem 0.75rem' }}
-              icon={<ArrowRightIcon />} iconPosition="end">
-              View Past Projects
-            </Button>
+          {/* Example prompt pills */}
+          <div style={{ marginTop: '0.875rem', display: 'flex', flexWrap: 'wrap', gap: '0.4rem' }}>
+            {examplePrompts.map((p) => (
+              <button key={p} onClick={() => setVision(p)} style={{
+                background: 'rgba(238,0,0,0.04)', border: '1px solid rgba(238,0,0,0.12)',
+                borderRadius: '999px', padding: '0.3rem 0.75rem',
+                fontSize: '0.75rem', color: '#CC0000', cursor: 'pointer',
+                fontFamily: '"Red Hat Text", sans-serif', transition: 'all 0.15s', lineHeight: 1.4,
+              }}
+              onMouseOver={(e) => { e.currentTarget.style.background = 'rgba(238,0,0,0.10)'; }}
+              onMouseOut={(e) => { e.currentTarget.style.background = 'rgba(238,0,0,0.04)'; }}
+              >
+                {p}
+              </button>
+            ))}
           </div>
 
-          {/* Collapsible Context Section */}
+          {/* Context attachments — compact */}
           <details style={{
-            background: 'white', borderRadius: '12px',
-            boxShadow: '0 2px 12px rgba(0,0,0,0.04)',
-            border: '1px solid #E7E7E7', marginTop: '1.5rem',
+            background: 'white', borderRadius: '10px', border: '1px solid #E7E7E7',
+            marginTop: '1rem',
           }}>
             <summary style={{
-              padding: '1rem 1.25rem', cursor: 'pointer',
-              fontSize: '0.875rem', fontWeight: 600, color: '#151515',
-              listStyle: 'none', display: 'flex', alignItems: 'center',
-              justifyContent: 'space-between',
+              padding: '0.625rem 1rem', cursor: 'pointer',
+              fontSize: '0.8125rem', fontWeight: 600, color: '#151515',
+              listStyle: 'none', display: 'flex', alignItems: 'center', justifyContent: 'space-between',
             }}>
-              <span>+ Add Reference Context (optional)</span>
+              <span>+ Add Context (GitHub repos, files)</span>
               {contextCount > 0 && (
-                <span style={{
-                  background: '#EE0000', color: 'white',
-                  borderRadius: '12px', padding: '0.125rem 0.5rem',
-                  fontSize: '0.75rem', fontWeight: 600,
-                }}>{contextCount}</span>
+                <span style={{ background: '#EE0000', color: 'white', borderRadius: '12px', padding: '0.1rem 0.45rem', fontSize: '0.7rem', fontWeight: 600 }}>{contextCount}</span>
               )}
             </summary>
-
-            <div style={{ padding: '0 1.25rem 1.25rem' }}>
-
-              {/* GitHub URL input */}
-              <div style={{
-                display: 'flex', gap: '0.5rem', alignItems: 'flex-start',
-                marginBottom: '0.75rem',
-              }}>
-                <div style={{ flex: 1 }}>
-                  <div style={{
-                    display: 'flex', alignItems: 'center', gap: '0.5rem',
-                    background: '#FAFAFA', border: '1px solid #D2D2D2',
-                    borderRadius: '8px', padding: '0.125rem 0.75rem',
-                  }}>
-                    <GithubIcon style={{ color: '#151515', flexShrink: 0, fontSize: '0.875rem' }} />
-                    <TextInput
-                      value={githubInput}
-                      onChange={(_e, v) => { setGithubInput(v); setGithubError(null); }}
-                      placeholder="https://github.com/user/repo"
-                      aria-label="GitHub repository URL"
-                      style={{
-                        border: 'none', background: 'transparent',
-                        fontSize: '0.875rem', padding: '0.5rem 0',
-                      }}
-                      onKeyDown={(e) => {
-                        if (e.key === 'Enter') { e.preventDefault(); addGithubUrl(); }
-                      }}
-                    />
-                  </div>
-                  {githubError && (
-                    <span style={{ fontSize: '0.75rem', color: '#C9190B', marginTop: '0.25rem', display: 'block' }}>
-                      {githubError}
-                    </span>
-                  )}
+            <div style={{ padding: '0 1rem 1rem' }}>
+              <div style={{ display: 'flex', gap: '0.4rem', marginBottom: '0.5rem' }}>
+                <div style={{ flex: 1, display: 'flex', alignItems: 'center', gap: '0.4rem', background: '#FAFAFA', border: '1px solid #D2D2D2', borderRadius: '8px', padding: '0.1rem 0.6rem' }}>
+                  <GithubIcon style={{ color: '#151515', fontSize: '0.8rem', flexShrink: 0 }} />
+                  <TextInput value={githubInput} onChange={(_e, v) => { setGithubInput(v); setGithubError(null); }}
+                    placeholder="https://github.com/user/repo" aria-label="GitHub URL"
+                    style={{ border: 'none', background: 'transparent', fontSize: '0.8125rem', padding: '0.35rem 0' }}
+                    onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); addGithubUrl(); } }} />
                 </div>
-                <Button variant="secondary" onClick={addGithubUrl}
-                  isDisabled={!githubInput.trim()} style={{ whiteSpace: 'nowrap' }}
-                  icon={<PlusCircleIcon />}>
-                  Add
-                </Button>
+                <Button variant="secondary" size="sm" onClick={addGithubUrl} isDisabled={!githubInput.trim()} icon={<PlusCircleIcon />}>Add</Button>
               </div>
-
-              {/* GitHub URLs list */}
+              {githubError && <span style={{ fontSize: '0.7rem', color: '#C9190B', display: 'block', marginBottom: '0.4rem' }}>{githubError}</span>}
               {githubUrls.length > 0 && (
-                <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.5rem', marginBottom: '0.875rem' }}>
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.35rem', marginBottom: '0.5rem' }}>
                   {githubUrls.map((url) => (
-                    <div key={url} style={{
-                      display: 'inline-flex', alignItems: 'center', gap: '0.5rem',
-                      background: '#F0F7FF', border: '1px solid #BEE1F4',
-                      borderRadius: '8px', padding: '0.375rem 0.75rem',
-                      fontSize: '0.8125rem', color: '#151515',
-                    }}>
-                      <GithubIcon style={{ color: '#0066CC', fontSize: '0.875rem' }} />
-                      <span style={{ maxWidth: '280px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                        {extractRepoName(url)}
-                      </span>
-                      <button onClick={() => removeGithubUrl(url)}
-                        style={{ background: 'none', border: 'none', cursor: 'pointer', padding: '2px', display: 'flex', color: '#6A6E73' }}
-                        aria-label={`Remove ${url}`}>
-                        <TimesIcon />
-                      </button>
-                    </div>
+                    <span key={url} style={{ display: 'inline-flex', alignItems: 'center', gap: '0.3rem', background: '#F0F7FF', border: '1px solid #BEE1F4', borderRadius: '6px', padding: '0.2rem 0.5rem', fontSize: '0.75rem' }}>
+                      <GithubIcon style={{ fontSize: '0.7rem', color: '#0066CC' }} />{extractRepoName(url)}
+                      <button onClick={() => removeGithubUrl(url)} style={{ background: 'none', border: 'none', cursor: 'pointer', padding: '1px', display: 'flex', color: '#6A6E73' }}><TimesIcon style={{ fontSize: '0.65rem' }} /></button>
+                    </span>
                   ))}
                 </div>
               )}
-
-              {/* File upload */}
-              <div
-                onDragEnter={handleDrag} onDragLeave={handleDrag}
-                onDragOver={handleDrag} onDrop={handleDrop}
+              <div onDragEnter={handleDrag} onDragLeave={handleDrag} onDragOver={handleDrag} onDrop={handleDrop}
                 onClick={() => fileInputRef.current?.click()}
-                style={{
-                  padding: '1rem',
-                  border: `2px dashed ${dragActive ? '#EE0000' : '#D2D2D2'}`,
-                  borderRadius: '10px',
-                  background: dragActive ? 'rgba(238,0,0,0.02)' : '#FAFAFA',
-                  cursor: 'pointer', transition: 'all 0.2s', textAlign: 'center',
-                }}
-              >
+                style={{ padding: '0.6rem', border: `2px dashed ${dragActive ? '#EE0000' : '#D2D2D2'}`, borderRadius: '8px', background: dragActive ? 'rgba(238,0,0,0.02)' : '#FAFAFA', cursor: 'pointer', textAlign: 'center' }}>
                 <input ref={fileInputRef} type="file" multiple style={{ display: 'none' }}
                   accept={Array.from(ALLOWED_EXT).map((e) => `.${e}`).join(',')}
                   onChange={(e) => { if (e.target.files) addFiles(e.target.files); e.target.value = ''; }} />
-                <UploadIcon style={{ marginRight: '0.5rem', color: '#72767B' }} />
-                <span style={{ fontSize: '0.875rem', color: '#72767B' }}>
-                  Drag files or click to upload
-                </span>
-                <span style={{ display: 'block', fontSize: '0.75rem', color: '#A0A0A0', marginTop: '0.25rem' }}>
-                  Docs, specs, code files — up to 10 MB each
-                </span>
+                <UploadIcon style={{ marginRight: '0.4rem', color: '#72767B', fontSize: '0.8rem' }} />
+                <span style={{ fontSize: '0.8125rem', color: '#72767B' }}>Drop files or click</span>
               </div>
-
-              {/* Attached files */}
               {files.length > 0 && (
-                <div style={{ marginTop: '0.75rem', display: 'flex', flexWrap: 'wrap', gap: '0.5rem' }}>
+                <div style={{ marginTop: '0.5rem', display: 'flex', flexWrap: 'wrap', gap: '0.35rem' }}>
                   {files.map((f) => (
-                    <div key={f.name} style={{
-                      display: 'inline-flex', alignItems: 'center', gap: '0.5rem',
-                      background: '#F5F5F5', borderRadius: '8px',
-                      padding: '0.375rem 0.75rem', fontSize: '0.8125rem', color: '#151515',
-                      border: '1px solid #E7E7E7',
-                    }}>
-                      {getFileIcon(f.name)}
-                      <span style={{ maxWidth: '180px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                        {f.name}
-                      </span>
-                      <span style={{ fontSize: '0.6875rem', color: '#8A8D90' }}>{formatSize(f.size)}</span>
-                      <button onClick={(e) => { e.stopPropagation(); removeFile(f.name); }}
-                        style={{ background: 'none', border: 'none', cursor: 'pointer', padding: '2px', display: 'flex', color: '#6A6E73' }}
-                        aria-label={`Remove ${f.name}`}>
-                        <TimesIcon />
-                      </button>
-                    </div>
+                    <span key={f.name} style={{ display: 'inline-flex', alignItems: 'center', gap: '0.3rem', background: '#F5F5F5', borderRadius: '6px', padding: '0.2rem 0.5rem', fontSize: '0.75rem', border: '1px solid #E7E7E7' }}>
+                      {getFileIcon(f.name)}{f.name} <span style={{ color: '#8A8D90', fontSize: '0.65rem' }}>{formatSize(f.size)}</span>
+                      <button onClick={(e) => { e.stopPropagation(); removeFile(f.name); }} style={{ background: 'none', border: 'none', cursor: 'pointer', padding: '1px', display: 'flex', color: '#6A6E73' }}><TimesIcon style={{ fontSize: '0.65rem' }} /></button>
+                    </span>
                   ))}
                 </div>
               )}
             </div>
           </details>
+
+          <div style={{ marginTop: '0.75rem', fontSize: '0.75rem', color: '#8A8D90' }}>
+            {contextCount > 0 ? `${contextCount} reference${contextCount > 1 ? 's' : ''} attached  ·  ` : ''}
+            ⌘+Enter to submit
+          </div>
         </div>
       </div>
 
-      {/* Features */}
-      <div style={{ background: 'white', borderTop: '1px solid #E0E0E0', padding: '3rem 2rem' }}>
-        <div style={{ maxWidth: '1200px', margin: '0 auto' }}>
-          <div style={{
-            display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: '2rem',
-          }}>
-            <div style={{ textAlign: 'center' }}>
-              <div style={{
-                width: '64px', height: '64px',
-                background: 'linear-gradient(135deg, #4A90E2 0%, #357ABD 100%)',
-                borderRadius: '16px', display: 'flex', alignItems: 'center',
-                justifyContent: 'center', margin: '0 auto 1rem',
-              }}><CubesIcon color="white" /></div>
-              <h3 style={{ fontSize: '1.125rem', fontWeight: 600, color: '#151515', marginBottom: '0.5rem', fontFamily: '"Red Hat Display", sans-serif' }}>
-                Multi-Agent Crew
-              </h3>
-              <p style={{ fontSize: '0.875rem', color: '#6A6E73', lineHeight: 1.6 }}>
-                6 specialized AI agents work together — from planning to deployment
-              </p>
+      {/* ── RIGHT: dark panel — features (25%) with animations ──────────────── */}
+      <div
+        className="landing-right-panel"
+        style={{
+          flex: '0 0 25%', minWidth: '240px', maxWidth: '320px',
+          background: 'linear-gradient(160deg, #1A1A1A 0%, #0C0C0C 100%)',
+          display: 'flex', flexDirection: 'column', justifyContent: 'center',
+          padding: '1.5rem 1.25rem',
+          borderLeft: '3px solid #EE0000',
+          overflow: 'auto',
+        }}
+      >
+        <h2 style={{
+          fontSize: '1.25rem', fontWeight: 700, color: '#FFFFFF',
+          fontFamily: '"Red Hat Display", sans-serif',
+          marginBottom: '0.25rem', letterSpacing: '-0.02em',
+        }}>
+          Ship <span style={{ color: '#EE0000' }}>faster</span> with AI
+        </h2>
+        <p style={{ fontSize: '0.8125rem', color: 'rgba(255,255,255,0.45)', marginBottom: '1rem', lineHeight: 1.45 }}>
+          A full dev crew — architecture to tests — no boilerplate.
+        </p>
+
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '0.6rem' }}>
+          {[
+            { icon: <CubesIcon />,     gradient: 'linear-gradient(135deg, #4A90E2, #357ABD)', title: 'Multi-Agent Crew',   desc: '6 AI agents: PM, Architect, Dev, QA, Frontend, DevOps.' },
+            { icon: <CodeIcon />,       gradient: 'linear-gradient(135deg, #A855F7, #7C3AED)', title: 'Production Ready',   desc: 'TDD, code review, security checks — tested & deployable.' },
+            { icon: <RocketIcon />,     gradient: 'linear-gradient(135deg, #EE0000, #CC0000)', title: 'Lightning Fast',     desc: 'Idea to prototype in minutes with real-time tracking.' },
+            { icon: <LightbulbIcon />,  gradient: 'linear-gradient(135deg, #F59E0B, #D97706)', title: 'Prompt-to-Refine',   desc: 'Describe edits in English — add, delete, restructure.' },
+            { icon: <GithubIcon />,     gradient: 'linear-gradient(135deg, #6EE7B7, #10B981)', title: 'Context-Aware',      desc: 'Attach repos & docs — no hallucinated APIs.' },
+            { icon: <ArrowRightIcon />, gradient: 'linear-gradient(135deg, #38BDF8, #0EA5E9)', title: 'Pluggable LLMs',     desc: 'Red Hat MaaS, OpenRouter, Ollama — swap from the UI.' },
+          ].map((c, i) => (
+            <div
+              key={c.title}
+              className="landing-right-row"
+              style={{
+                display: 'flex', alignItems: 'flex-start', gap: '0.6rem',
+                padding: '0.6rem 0.75rem', borderRadius: '10px',
+                background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.06)',
+                transition: 'transform 0.2s ease, background 0.2s, border-color 0.2s',
+                animationDelay: `${0.1 + i * 0.06}s`,
+              } as React.CSSProperties}
+              onMouseOver={(e) => {
+                e.currentTarget.style.background = 'rgba(255,255,255,0.07)';
+                e.currentTarget.style.borderColor = 'rgba(238,0,0,0.3)';
+                e.currentTarget.style.transform = 'translateX(4px)';
+              }}
+              onMouseOut={(e) => {
+                e.currentTarget.style.background = 'rgba(255,255,255,0.03)';
+                e.currentTarget.style.borderColor = 'rgba(255,255,255,0.06)';
+                e.currentTarget.style.transform = 'translateX(0)';
+              }}
+            >
+              <div
+                className="landing-right-icon"
+                style={{
+                  width: '32px', height: '32px', borderRadius: '8px',
+                  background: c.gradient, display: 'flex', alignItems: 'center', justifyContent: 'center',
+                  color: 'white', fontSize: '0.9rem', flexShrink: 0,
+                  transition: 'transform 0.25s ease',
+                }}
+                onMouseEnter={(e) => { e.currentTarget.style.transform = 'scale(1.08)'; }}
+                onMouseLeave={(e) => { e.currentTarget.style.transform = 'scale(1)'; }}
+              >
+                {c.icon}
+              </div>
+              <div style={{ minWidth: 0 }}>
+                <div style={{ fontSize: '0.8125rem', fontWeight: 700, color: '#FFFFFF', fontFamily: '"Red Hat Display", sans-serif', marginBottom: '0.1rem' }}>{c.title}</div>
+                <div style={{ fontSize: '0.75rem', color: 'rgba(255,255,255,0.45)', lineHeight: 1.4 }}>{c.desc}</div>
+              </div>
             </div>
-            <div style={{ textAlign: 'center' }}>
-              <div style={{
-                width: '64px', height: '64px',
-                background: 'linear-gradient(135deg, #7B68EE 0%, #6A5ACD 100%)',
-                borderRadius: '16px', display: 'flex', alignItems: 'center',
-                justifyContent: 'center', margin: '0 auto 1rem',
-              }}><CodeIcon color="white" /></div>
-              <h3 style={{ fontSize: '1.125rem', fontWeight: 600, color: '#151515', marginBottom: '0.5rem', fontFamily: '"Red Hat Display", sans-serif' }}>
-                Production Ready
-              </h3>
-              <p style={{ fontSize: '0.875rem', color: '#6A6E73', lineHeight: 1.6 }}>
-                Generate clean, tested, documented code with best practices
-              </p>
-            </div>
-            <div style={{ textAlign: 'center' }}>
-              <div style={{
-                width: '64px', height: '64px',
-                background: 'linear-gradient(135deg, #50C878 0%, #3E8635 100%)',
-                borderRadius: '16px', display: 'flex', alignItems: 'center',
-                justifyContent: 'center', margin: '0 auto 1rem',
-              }}><RocketIcon color="white" /></div>
-              <h3 style={{ fontSize: '1.125rem', fontWeight: 600, color: '#151515', marginBottom: '0.5rem', fontFamily: '"Red Hat Display", sans-serif' }}>
-                Lightning Fast
-              </h3>
-              <p style={{ fontSize: '0.875rem', color: '#6A6E73', lineHeight: 1.6 }}>
-                From idea to working prototype in minutes, not hours
-              </p>
-            </div>
-          </div>
+          ))}
         </div>
+
+        <p style={{
+          marginTop: '1rem', fontSize: '0.7rem',
+          color: 'rgba(255,255,255,0.2)',
+          fontFamily: '"Red Hat Text", sans-serif',
+        }}>
+          Built with LlamaIndex &middot; Powered by Red Hat &middot; Open Source
+        </p>
       </div>
     </div>
   );

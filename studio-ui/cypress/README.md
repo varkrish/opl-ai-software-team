@@ -15,7 +15,8 @@ When you add or change UI behaviour, add or update tests here so we don’t regr
 - Files heading and Project Explorer
 - File tree shows files from the **selected project**
 - **Project dropdown:** changing the selected project **reloads the file tree** for that project (different project → different files)
-- File click loads content; Refine button and panel; HTML preview iframe
+- File click loads content; Refine button and panel
+- **HTML preview:** for `.html`/`.htm` files, iframe with sandbox is shown and `/api/jobs/<id>/preview/<path>` is requested
 
 ### AppLayout (`component/AppLayout.cy.tsx`)
 

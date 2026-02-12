@@ -1,4 +1,4 @@
-.PHONY: setup agent-test studio-run studio-dev studio-build studio-test-component studio-test-e2e studio-test-open backend-test-api backend-test-e2e backend-test-e2e-quick backend-test-all reset-db compose-up compose-down compose-logs compose-clean container-build container-build-backend container-build-frontend container-run container-stop help
+.PHONY: setup agent-test studio-run studio-dev studio-build studio-test-component studio-test-e2e studio-test-open backend-test-api backend-test-e2e backend-test-e2e-quick backend-test-all refine-test refine-test-e2e reset-db compose-up compose-down compose-logs compose-clean container-build container-build-backend container-build-frontend container-run container-stop help
 
 ROOT_DIR := $(shell pwd)
 
@@ -21,6 +21,8 @@ help:
 	@echo "  backend-test-e2e       - Run backend E2E tests (job execution)"
 	@echo "  backend-test-e2e-quick - Run quick E2E smoke test"
 	@echo "  backend-test-all       - Run all backend tests"
+	@echo "  refine-test            - Run refinement unit + API tests"
+	@echo "  refine-test-e2e        - Run refinement E2E test (slow)"
 	@echo "  reset-db               - Clear job DB and workspace (start from scratch)"
 	@echo ""
 	@echo "Container Operations (Podman / Docker):"
@@ -95,9 +97,23 @@ backend-test-e2e-quick:
 	export PYTHONPATH=$(ROOT_DIR):$(ROOT_DIR)/agent:$(ROOT_DIR)/agent/src:$(PYTHONPATH) && \
 	cd agent && pytest tests/e2e/test_job_execution.py::test_job_starts_within_timeout -v
 
+refine-test:
+	@echo "Running refinement unit + API tests..."
+	@rm -rf agent/src/llamaindex_crew/web
+	@ln -sfn $(ROOT_DIR)/crew_studio agent/src/llamaindex_crew/web
+	export PYTHONPATH=$(ROOT_DIR):$(ROOT_DIR)/agent:$(ROOT_DIR)/agent/src:$(PYTHONPATH) && \
+	cd agent && pytest tests/unit/test_refinement_agent.py tests/api/test_refine_endpoint.py -v
+
+refine-test-e2e:
+	@echo "Running refinement E2E test..."
+	@rm -rf agent/src/llamaindex_crew/web
+	@ln -sfn $(ROOT_DIR)/crew_studio agent/src/llamaindex_crew/web
+	export PYTHONPATH=$(ROOT_DIR):$(ROOT_DIR)/agent:$(ROOT_DIR)/agent/src:$(PYTHONPATH) && \
+	cd agent && pytest tests/e2e/test_refine_e2e.py -v -s
+
 backend-test-all:
 	@echo "Running all backend tests..."
-	@make backend-test-api && make backend-test-e2e
+	@make backend-test-api && make refine-test && make backend-test-e2e
 
 reset-db:
 	@echo "Resetting DB and workspace..."

@@ -34,6 +34,9 @@ jobs:
       - name: Run quick tests
         run: make test-quick
       
+      - name: Run refinement tests
+        run: make refine-test
+      
       - name: Upload test results
         if: always()
         uses: actions/upload-artifact@v4

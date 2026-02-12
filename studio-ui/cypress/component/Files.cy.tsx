@@ -70,10 +70,19 @@ describe('Files Page', () => {
     cy.intercept('GET', '/api/workspace/files/index.html*', {
       body: { path: 'index.html', content: '<html><body>Hello</body></html>' },
     }).as('getHtmlFile');
+    cy.intercept('GET', '/api/jobs/*/preview/*', {
+      statusCode: 200,
+      body: '<html><body>Preview content</body></html>',
+      headers: { 'Content-Type': 'text/html' },
+    }).as('getPreview');
     cy.wait('@getFiles');
     cy.contains('index.html').click();
     cy.wait('@getHtmlFile');
-    cy.get('iframe[title="HTML preview"]').should('exist').and('have.attr', 'sandbox', 'allow-scripts');
+    cy.get('iframe[title="HTML preview"]')
+      .should('exist')
+      .and('have.attr', 'sandbox', 'allow-scripts');
+    cy.get('iframe[title="HTML preview"]').invoke('attr', 'src').should('include', '/preview/');
+    cy.wait('@getPreview');
   });
 
   it('should reload file tree when selecting a different project from the dropdown', () => {
@@ -95,5 +104,35 @@ describe('Files Page', () => {
     // Old project-only files must be gone
     cy.contains('README.md').should('not.exist');
     cy.contains('requirements.txt').should('not.exist');
+  });
+
+  it('should show Download project button and call download endpoint when clicked', () => {
+    cy.intercept('GET', '/api/jobs/*/download', {
+      statusCode: 200,
+      body: new Uint8Array(0),
+      headers: { 'Content-Type': 'application/zip' },
+    }).as('getDownload');
+
+    cy.wait('@getJobs');
+    cy.wait('@getFiles');
+    cy.get('[data-testid="files-download-project"]')
+      .should('be.visible')
+      .and('contain', 'Download project')
+      .click();
+
+    cy.wait('@getDownload');
+    cy.get('[data-testid="files-download-project"]').should('be.visible').and('contain', 'Download project');
+  });
+
+  it('should show error alert when download returns 404', () => {
+    cy.intercept('GET', '/api/jobs/*/download', { statusCode: 404, body: { error: 'Workspace not found' } }).as(
+      'getDownloadFail'
+    );
+
+    cy.wait('@getJobs');
+    cy.wait('@getFiles');
+    cy.get('[data-testid="files-download-project"]').click();
+    cy.wait('@getDownloadFail');
+    cy.contains('Project or workspace not found.').should('be.visible');
   });
 });

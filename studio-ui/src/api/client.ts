@@ -183,6 +183,27 @@ export function getPreviewUrl(jobId: string, filePath: string): string {
   return `${base}/api/jobs/${jobId}/preview/${encoded}`;
 }
 
+/** URL to download the job workspace as a ZIP file (for direct links). */
+export function getJobDownloadUrl(jobId: string): string {
+  const base = import.meta.env.VITE_API_URL || '';
+  return `${base}/api/jobs/${jobId}/download`;
+}
+
+/** Fetch job workspace as ZIP and trigger browser download. Uses same origin/proxy as other API calls. */
+export async function downloadJobWorkspace(jobId: string): Promise<void> {
+  const { data } = await api.get<Blob>(`/api/jobs/${jobId}/download`, {
+    responseType: 'blob',
+  });
+  const url = URL.createObjectURL(data);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `project-${jobId.slice(0, 8)}.zip`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
 // ── Workspace Files ─────────────────────────────────────────────────────────
 export async function getWorkspaceFiles(jobId?: string): Promise<WorkspaceFile[]> {
   const params = jobId ? { job_id: jobId } : {};

@@ -28,6 +28,16 @@ def _create_completed_job():
     return job_id
 
 
+def _create_job_with_html_file():
+    """Helper: create a completed job with an index.html in workspace. Returns (job_id, workspace_path)."""
+    job_id = str(uuid.uuid4())
+    ws = tempfile.mkdtemp()
+    job_db.create_job(job_id, "Preview test", ws)
+    job_db.update_job(job_id, {"status": "completed", "current_phase": "completed"})
+    (Path(ws) / "index.html").write_text("<html><body>Hello Preview</body></html>", encoding="utf-8")
+    return job_id, ws
+
+
 def test_refine_job_not_found():
     """404 for missing job_id"""
     with app.test_client() as client:
@@ -171,3 +181,52 @@ def test_preview_invalid_path():
     with app.test_client() as client:
         response = client.get(f"/api/jobs/{job_id}/preview/../../../etc/passwd")
         assert response.status_code == 400
+
+
+def test_preview_returns_html_with_correct_content_type():
+    """Preview serves existing HTML file with 200 and text/html"""
+    job_id, ws = _create_job_with_html_file()
+    with app.test_client() as client:
+        response = client.get(f"/api/jobs/{job_id}/preview/index.html")
+    assert response.status_code == 200
+    assert response.content_type and "text/html" in response.content_type
+    assert b"Hello Preview" in response.data
+
+
+def test_preview_accepts_url_encoded_path():
+    """Preview with encoded path (e.g. src%2Findex.html) serves file from subdirectory"""
+    import os
+    import shutil
+    job_id = str(uuid.uuid4())
+    ws = tempfile.mkdtemp()
+    try:
+        (Path(ws) / "src").mkdir(exist_ok=True)
+        (Path(ws) / "src" / "index.html").write_text("<html><body>Subdir</body></html>", encoding="utf-8")
+        job_db.create_job(job_id, "Preview test", ws)
+        job_db.update_job(job_id, {"status": "completed", "current_phase": "completed"})
+        with app.test_client() as client:
+            response = client.get(f"/api/jobs/{job_id}/preview/src%2Findex.html")
+        assert response.status_code == 200
+        assert response.content_type and "text/html" in response.content_type
+        assert b"Subdir" in response.data
+    finally:
+        if os.path.exists(ws):
+            shutil.rmtree(ws, ignore_errors=True)
+
+
+def test_preview_404_when_file_missing():
+    """404 when requested file does not exist in workspace"""
+    job_id = _create_completed_job()
+    with app.test_client() as client:
+        response = client.get(f"/api/jobs/{job_id}/preview/nonexistent.html")
+    assert response.status_code == 404
+
+
+def test_preview_404_when_workspace_missing():
+    """404 when job exists but workspace directory was removed"""
+    job_id = str(uuid.uuid4())
+    job_db.create_job(job_id, "Orphan", "/nonexistent/workspace/path")
+    job_db.update_job(job_id, {"status": "completed"})
+    with app.test_client() as client:
+        response = client.get(f"/api/jobs/{job_id}/preview/index.html")
+    assert response.status_code == 404

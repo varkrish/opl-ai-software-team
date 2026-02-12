@@ -2,15 +2,19 @@
 Web GUI Application for AI Software Development Crew (LlamaIndex)
 Provides a web interface to trigger and monitor build jobs
 """
+import fnmatch
+import io
 import os
 import json
 import uuid
+import zipfile
 import threading
 import time
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, Optional
-from flask import Flask, render_template, request, jsonify, send_from_directory
+from urllib.parse import unquote
+from flask import Flask, render_template, request, jsonify, send_from_directory, send_file
 from flask_cors import CORS
 from dotenv import load_dotenv
 
@@ -1113,8 +1117,8 @@ def list_workspace_files():
         if job_id:
             job = job_db.get_job(job_id)
             if job:
-                # List files for specific job
-                job_workspace = Path(job['workspace_path'])
+                # List files for specific job (resolve in case stored path is relative)
+                job_workspace = _resolve_job_workspace(job_id, job['workspace_path']) or Path(job['workspace_path'])
             else:
                 # Job not found, default to base workspace
                 job_workspace = base_workspace_path
@@ -1123,7 +1127,7 @@ def list_workspace_files():
             job_workspace = base_workspace_path
         
         files = []
-        if job_workspace.exists():
+        if job_workspace and job_workspace.exists():
             for root, dirs, filenames in os.walk(job_workspace):
                 for filename in filenames:
                     file_path = Path(root) / filename
@@ -1136,6 +1140,86 @@ def list_workspace_files():
         return jsonify({'files': files, 'workspace': str(job_workspace)})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
+
+
+def _resolve_job_workspace(job_id: str, stored_path: str) -> Optional[Path]:
+    """Resolve job workspace path. Tries stored path, then base_workspace_path/job-{id}."""
+    p = Path(stored_path)
+    if p.is_absolute() and p.exists() and p.is_dir():
+        return p
+    if p.exists() and p.is_dir():
+        return p
+    # Stored path may be relative to a different cwd; use canonical location
+    canonical = base_workspace_path / f"job-{job_id}"
+    if canonical.exists() and canonical.is_dir():
+        return canonical
+    return None
+
+
+# Files/dirs to exclude from project download (internal agent/crew artifacts)
+_DOWNLOAD_EXCLUDE_NAMES = frozenset({
+    'agent_prompts.json',
+    'agents_prompt.json',
+    'crew_errors.log',
+})
+_DOWNLOAD_EXCLUDE_PATTERNS = ('state_*.json', 'tasks_*.db')
+
+
+def _should_exclude_from_download(rel_path_str: str, name: str) -> bool:
+    """Return True if this path should be omitted from the download ZIP."""
+    if name in _DOWNLOAD_EXCLUDE_NAMES:
+        return True
+    for pattern in _DOWNLOAD_EXCLUDE_PATTERNS:
+        if fnmatch.fnmatch(name, pattern):
+            return True
+    # Skip .git directory and its contents
+    parts = rel_path_str.replace('\\', '/').split('/')
+    if '.git' in parts:
+        return True
+    return False
+
+
+@app.route('/api/jobs/<job_id>/download', methods=['GET'])
+def download_job_workspace(job_id):
+    """Return the job workspace as a ZIP file for download (excludes internal agent files)."""
+    job = job_db.get_job(job_id)
+    if not job:
+        return jsonify({'error': 'Job not found'}), 404
+    workspace_path = _resolve_job_workspace(job_id, job['workspace_path'])
+    if not workspace_path:
+        return jsonify({'error': 'Workspace not found'}), 404
+    buf = io.BytesIO()
+    workspace_resolved = workspace_path.resolve()
+    with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as zf:
+        for root, dirs, filenames in os.walk(workspace_path):
+            dirs[:] = [d for d in dirs if d != '.git']
+            for name in filenames:
+                full = Path(root) / name
+                try:
+                    rel = full.resolve().relative_to(workspace_resolved)
+                except ValueError:
+                    continue
+                arcname = str(rel).replace('\\', '/')
+                if _should_exclude_from_download(arcname, name):
+                    continue
+                zf.write(full, arcname)
+    buf.seek(0)
+    safe_name = f"project-{job_id[:8]}.zip"
+    try:
+        return send_file(
+            buf,
+            mimetype='application/zip',
+            as_attachment=True,
+            download_name=safe_name,
+        )
+    except TypeError:
+        # Flask < 2.0 used attachment_filename
+        return send_file(
+            buf,
+            mimetype='application/zip',
+            as_attachment=True,
+            attachment_filename=safe_name,
+        )
 
 
 @app.route('/api/workspace/files/<path:file_path>', methods=['GET'])
@@ -1248,18 +1332,24 @@ def get_job_refinements(job_id):
 @app.route('/api/jobs/<job_id>/preview/<path:file_path>', methods=['GET'])
 def serve_job_preview(job_id, file_path):
     """Serve a file from the job workspace for HTML preview (correct Content-Type)."""
+    # URL-decode so paths like src%2Findex.html become src/index.html
+    file_path = unquote(file_path)
     job = job_db.get_job(job_id)
     if not job:
         return jsonify({'error': 'Job not found'}), 404
     if not _is_safe_relative_path(file_path):
         return jsonify({'error': 'Invalid path'}), 400
     workspace = Path(job['workspace_path'])
-    full_path = workspace / file_path
+    if not workspace.exists():
+        return jsonify({'error': 'Workspace not found'}), 404
+    full_path = (workspace / file_path).resolve()
+    workspace_resolved = workspace.resolve()
+    try:
+        full_path.relative_to(workspace_resolved)
+    except ValueError:
+        return jsonify({'error': 'Invalid path'}), 400
     if not full_path.exists() or not full_path.is_file():
         return jsonify({'error': 'File not found'}), 404
-    full_path = full_path.resolve()
-    if not str(full_path).startswith(str(workspace.resolve())):
-        return jsonify({'error': 'Invalid path'}), 400
     ext = full_path.suffix.lower()
     content_types = {
         '.html': 'text/html', '.htm': 'text/html',
@@ -1270,7 +1360,7 @@ def serve_job_preview(job_id, file_path):
         '.woff': 'font/woff', '.woff2': 'font/woff2',
     }
     mimetype = content_types.get(ext, 'application/octet-stream')
-    return send_from_directory(workspace, file_path, mimetype=mimetype)
+    return send_from_directory(str(workspace), file_path, mimetype=mimetype)
 
 
 @app.route('/api/jobs/<job_id>/cancel', methods=['POST'])
