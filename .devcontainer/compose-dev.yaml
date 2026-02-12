@@ -1,0 +1,58 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# AI Crew Studio — Dev Container Compose (two services, no image build here)
+# Backend: uses pre-built image + mount agent only. Frontend: Node image + mount studio-ui.
+#
+# Build backend image first (once): podman compose build backend
+# Then: podman compose -f .devcontainer/compose-dev.yaml up -d
+# ─────────────────────────────────────────────────────────────────────────────
+
+services:
+  backend:
+    image: crew-coding-bots-backend:latest
+    container_name: crew-backend-dev
+    command: sleep infinity
+    volumes:
+      - ../agent:/app/agent:cached
+      - crew-workspace-dev:/app/workspace
+      - crew-data-dev:/app/data
+    environment:
+      - FLASK_ENV=development
+      - FLASK_DEBUG=1
+      - PYTHONPATH=/app/agent:/app/agent/src:/app
+      - PYTHONUNBUFFERED=1
+      - WORKSPACE_PATH=/app/workspace
+      - JOB_DB_PATH=/app/data/crew_jobs.db
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
+      - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://host.containers.internal:11434}
+    ports:
+      - "8080:8080"
+    networks:
+      - crew-dev-net
+    user: root
+
+  frontend:
+    image: node:20
+    container_name: crew-frontend-dev
+    working_dir: /app/studio-ui
+    command: sh -c "npm install && npm run dev -- --host 0.0.0.0"
+    volumes:
+      - ../studio-ui:/app/studio-ui:cached
+      - crew-node-modules:/app/studio-ui/node_modules
+    ports:
+      - "3000:3000"
+    networks:
+      - crew-dev-net
+
+volumes:
+  crew-workspace-dev:
+    driver: local
+  crew-data-dev:
+    driver: local
+  crew-node-modules:
+    driver: local
+
+networks:
+  crew-dev-net:
+    driver: bridge

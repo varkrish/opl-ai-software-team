@@ -1,0 +1,57 @@
+{
+  "name": "AI Crew Studio",
+
+  // ── Compose-only spec (no native image/build) ────────────────────────────
+  "dockerComposeFile": "compose-dev.yaml",
+  "service": "backend",
+  "workspaceFolder": "/app",
+
+  // Run as root inside the dev container for full tool access
+  "remoteUser": "root",
+
+  // ── Ports ────────────────────────────────────────────────────────────────
+  "forwardPorts": [8080, 3000],
+  "portsAttributes": {
+    "8080": { "label": "Backend (Flask)", "onAutoForward": "notify" },
+    "3000": { "label": "Frontend (Vite)",  "onAutoForward": "openBrowser" }
+  },
+
+  "postCreateCommand": "cd /app/agent && pip install -e . 2>/dev/null || true",
+
+  // ── IDE customizations ───────────────────────────────────────────────────
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-python.python",
+        "ms-python.vscode-pylance",
+        "ms-python.debugpy",
+        "charliermarsh.ruff",
+        "dbaeumer.vscode-eslint",
+        "esbenp.prettier-vscode",
+        "bradlc.vscode-tailwindcss",
+        "eamodio.gitlens",
+        "redhat.vscode-yaml"
+      ],
+      "settings": {
+        "python.defaultInterpreterPath": "/opt/app-root/bin/python",
+        "python.analysis.typeCheckingMode": "basic",
+        "editor.formatOnSave": true,
+        "editor.defaultFormatter": "esbenp.prettier-vscode",
+        "[python]": {
+          "editor.defaultFormatter": "charliermarsh.ruff"
+        },
+        "files.watcherExclude": {
+          "**/node_modules/**": true,
+          "**/workspace/**": true,
+          "**/.git/**": true
+        },
+        "terminal.integrated.defaultProfile.linux": "bash"
+      }
+    }
+  },
+
+  // ── Features ─────────────────────────────────────────────────────────────
+  "features": {
+    "ghcr.io/devcontainers/features/git:1": {}
+  }
+}

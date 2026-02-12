@@ -14,9 +14,9 @@ LABEL org.opencontainers.image.licenses="MIT"
 USER root
 
 # Install system deps (git needed by gitpython, Node.js for Repomix)
+# Note: curl-minimal is pre-installed on UBI9; do NOT install curl (conflicts)
 RUN dnf install -y --nodocs \
         git \
-        curl \
         gcc \
         gcc-c++ \
         make \
@@ -56,11 +56,8 @@ RUN cd /app/agent && \
 # ── Copy application source ──────────────────────────────────────────────────
 COPY agent/src/ /app/agent/src/
 
-# Only copy the backend Python modules from crew_studio
-# (skip legacy static/, templates/, and old web_app.py)
-COPY crew_studio/__init__.py       /app/crew_studio/__init__.py
-COPY crew_studio/job_database.py   /app/crew_studio/job_database.py
-COPY crew_studio/llamaindex_web_app.py /app/crew_studio/llamaindex_web_app.py
+# Copy the entire crew_studio package (web app, job DB, refinement runner, etc.)
+COPY crew_studio/ /app/crew_studio/
 
 # Make agent package importable
 RUN cd /app/agent && pip install --no-cache-dir -e . 2>/dev/null || true

@@ -3,17 +3,16 @@
 # Compatible with: podman-compose, docker compose
 #
 # Usage:
-#   podman-compose up -d              # start all services
-#   podman-compose up -d --build      # rebuild and start
-#   podman-compose logs -f            # follow all logs
-#   podman-compose logs -f backend    # follow backend only
-#   podman-compose down               # stop all
-#   podman-compose down -v            # stop + remove volumes
+#   podman compose up -d              # start all services
+#   podman compose up -d --build      # rebuild and start
+#   podman compose logs -f            # follow all logs
+#   podman compose logs -f backend    # follow backend only
+#   podman compose down               # stop all
+#   podman compose down -v            # stop + remove volumes
 #
 # Environment:
 #   Copy .env.example → .env and fill in API keys before starting.
 # ─────────────────────────────────────────────────────────────────────────────
-version: "3.9"
 
 services:
   # ── Backend: Flask API + AI Agents ───────────────────────────────────────

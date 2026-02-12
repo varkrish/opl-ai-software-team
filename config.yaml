@@ -1,0 +1,13 @@
+# AI Crew Studio — LLM Configuration
+# This file is mounted into the backend container.
+# Set API keys here or via environment variables in .env.
+llm:
+  api_key: ""
+  api_base_url: ""
+  environment: "production"
+  models:
+    manager: "gpt-4o-mini"
+    worker: "gpt-4o-mini"
+    reviewer: "gpt-4o-mini"
+budget:
+  max_cost_per_project: 100.0
