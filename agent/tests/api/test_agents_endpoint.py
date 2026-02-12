@@ -14,17 +14,18 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent / "src"))
 @pytest.fixture
 def client():
     """Create test client for the LlamaIndex web app"""
-    from llamaindex_crew.web.llamaindex_web_app import app, jobs
+    from llamaindex_crew.web.llamaindex_web_app import app, job_db
     app.config['TESTING'] = True
     with app.test_client() as client:
         yield client
-    jobs.clear()
+    for job in job_db.get_all_jobs():
+        job_db.delete_job(job['id'])
 
 
 @pytest.fixture
 def job_with_progress(client):
     """Create a job and simulate progress to a specific phase"""
-    from llamaindex_crew.web.llamaindex_web_app import jobs
+    from llamaindex_crew.web.llamaindex_web_app import job_db
 
     # Create job via API
     response = client.post('/api/jobs', json={'vision': 'Test project'})
@@ -32,31 +33,19 @@ def job_with_progress(client):
     job_id = data['job_id']
 
     # Manually set job state to simulate progress (bypass actual workflow)
-    jobs[job_id]['status'] = 'running'
-    jobs[job_id]['current_phase'] = 'architecture'
-    jobs[job_id]['progress'] = 50
-    jobs[job_id]['last_message'] = [
-        {
-            'timestamp': datetime.now().isoformat(),
-            'phase': 'meta',
-            'message': 'Project initialized successfully',
-        },
-        {
-            'timestamp': datetime.now().isoformat(),
-            'phase': 'product_owner',
-            'message': 'User stories created',
-        },
-        {
-            'timestamp': datetime.now().isoformat(),
-            'phase': 'design',
-            'message': 'Design specs generated',
-        },
-        {
-            'timestamp': datetime.now().isoformat(),
-            'phase': 'architecture',
-            'message': 'Generating SQL schema...',
-        },
+    # Phase names must match AGENT_DEFINITIONS: meta, product_owner, designer, tech_architect, development, frontend
+    last_message = [
+        {'timestamp': datetime.now().isoformat(), 'phase': 'meta', 'message': 'Project initialized successfully'},
+        {'timestamp': datetime.now().isoformat(), 'phase': 'product_owner', 'message': 'User stories created'},
+        {'timestamp': datetime.now().isoformat(), 'phase': 'designer', 'message': 'Design specs generated'},
+        {'timestamp': datetime.now().isoformat(), 'phase': 'tech_architect', 'message': 'Generating SQL schema...'},
     ]
+    job_db.update_job(job_id, {
+        'status': 'running',
+        'current_phase': 'tech_architect',
+        'progress': 50,
+        'last_message': json.dumps(last_message),
+    })
 
     return job_id
 
@@ -88,9 +77,9 @@ def test_agents_endpoint_agent_fields(client, job_with_progress):
 
 def test_agents_status_derivation(client, job_with_progress):
     """Test that agent statuses are correctly derived from current_phase.
-    Job is in 'architecture' phase, so:
-    - meta, product_owner, design -> completed
-    - architecture -> working
+    Job is in 'tech_architect' phase, so:
+    - meta, product_owner, designer -> completed
+    - tech_architect -> working
     - development, frontend -> idle
     """
     response = client.get(f'/api/jobs/{job_with_progress}/agents')
@@ -100,8 +89,8 @@ def test_agents_status_derivation(client, job_with_progress):
 
     assert agent_statuses['meta'] == 'completed'
     assert agent_statuses['product_owner'] == 'completed'
-    assert agent_statuses['design'] == 'completed'
-    assert agent_statuses['architecture'] == 'working'
+    assert agent_statuses['designer'] == 'completed'
+    assert agent_statuses['tech_architect'] == 'working'
     assert agent_statuses['development'] == 'idle'
     assert agent_statuses['frontend'] == 'idle'
 
@@ -114,7 +103,7 @@ def test_agents_last_activity(client, job_with_progress):
     meta_agent = next(a for a in data['agents'] if a['phase'] == 'meta')
     assert meta_agent['last_activity'] == 'Project initialized successfully'
 
-    arch_agent = next(a for a in data['agents'] if a['phase'] == 'architecture')
+    arch_agent = next(a for a in data['agents'] if a['phase'] == 'tech_architect')
     assert arch_agent['last_activity'] == 'Generating SQL schema...'
 
 
@@ -139,15 +128,13 @@ def test_agents_endpoint_idle_when_queued(client):
 
 def test_agents_all_completed_when_job_completed(client):
     """Test that all agents show completed when job is done"""
-    from llamaindex_crew.web.llamaindex_web_app import jobs
+    from llamaindex_crew.web.llamaindex_web_app import job_db
 
     response = client.post('/api/jobs', json={'vision': 'Test project'})
     data = json.loads(response.data)
     job_id = data['job_id']
 
-    jobs[job_id]['status'] = 'completed'
-    jobs[job_id]['current_phase'] = 'completed'
-    jobs[job_id]['progress'] = 100
+    job_db.update_job(job_id, {'status': 'completed', 'current_phase': 'completed', 'progress': 100})
 
     response = client.get(f'/api/jobs/{job_id}/agents')
     data = json.loads(response.data)

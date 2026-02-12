@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useEffect } from 'react';
+import React, { useState, useCallback } from 'react';
 import {
   Card,
   CardTitle,
@@ -26,9 +26,15 @@ import { FolderIcon, FolderOpenIcon, FileIcon, FileCodeIcon, CubeIcon } from '@p
 import { useSearchParams } from 'react-router-dom';
 import Editor, { type Monaco } from '@monaco-editor/react';
 import { usePolling } from '../hooks/usePolling';
-import { getJobs, getWorkspaceFiles, getFileContent } from '../api/client';
+import {
+  getJobs,
+  getWorkspaceFiles,
+  getFileContent,
+  getPreviewUrl,
+} from '../api/client';
 import { buildFileTree } from '../utils/fileTree';
 import type { JobSummary, FileTreeNode } from '../types';
+import RefineChat from '../components/RefineChat';
 
 /** Red Hat brand colors for Monaco theme */
 const REDHAT = {
@@ -94,6 +100,8 @@ function getFileIcon(name: string): React.ReactNode {
   return <FileIcon />;
 }
 
+/* Refine polling constants moved into RefineChat component */
+
 const Files: React.FC = () => {
   const [searchParams] = useSearchParams();
   const [jobs, setJobs] = useState<JobSummary[]>([]);
@@ -103,31 +111,27 @@ const Files: React.FC = () => {
   const [loadingFile, setLoadingFile] = useState(false);
   const [loading, setLoading] = useState(true);
   const [isSelectOpen, setIsSelectOpen] = useState(false);
+  /* Refine state now lives in RefineChat component */
 
-  const loadData = useCallback(async () => {
+  /** Load jobs list and file tree. Pass jobId to immediately load files for that project (e.g. after dropdown change). */
+  const loadData = useCallback(async (overrideJobId?: string) => {
     try {
       const j = await getJobs();
       setJobs(j);
 
-      // Priority order for job selection:
-      // 1. URL parameter (if present and not yet applied)
-      // 2. Current selection (if valid)
-      // 3. First running job
-      // 4. Most recent job
-      
-      let jobId = selectedJobId;
-      
-      // Check if URL param should override current selection
-      const urlJobId = searchParams.get('job');
-      if (urlJobId && urlJobId !== selectedJobId) {
-        // URL param exists and differs from current selection - use it
-        jobId = urlJobId;
-        setSelectedJobId(jobId);
-      } else if (!jobId || !j.find((job) => job.id === jobId)) {
-        // No valid selection - auto-select
-        const running = j.find((job) => job.status === 'running');
-        jobId = running?.id || j[0]?.id || null;
-        setSelectedJobId(jobId);
+      let jobId: string | null = overrideJobId ?? selectedJobId;
+
+      if (overrideJobId === undefined) {
+        // No override: apply URL and auto-selection rules
+        const urlJobId = searchParams.get('job');
+        if (urlJobId && urlJobId !== selectedJobId) {
+          jobId = urlJobId;
+          setSelectedJobId(jobId);
+        } else if (!jobId || !j.find((job) => job.id === jobId)) {
+          const running = j.find((job) => job.status === 'running');
+          jobId = running?.id ?? j[0]?.id ?? null;
+          setSelectedJobId(jobId);
+        }
       }
 
       if (jobId) {
@@ -145,6 +149,17 @@ const Files: React.FC = () => {
   }, [selectedJobId, searchParams]);
 
   usePolling(loadData, 5000);
+
+  /** Called by RefineChat after a successful refinement to reload tree + file */
+  const handleRefineComplete = useCallback(async () => {
+    await loadData();
+    if (selectedFile && selectedJobId) {
+      try {
+        const result = await getFileContent(selectedFile.path, selectedJobId);
+        setSelectedFile(result);
+      } catch { /* ignore */ }
+    }
+  }, [loadData, selectedFile, selectedJobId]);
 
   const handleFileSelect = async (_event: React.MouseEvent, item: TreeViewDataItem) => {
     // Only handle file clicks (items without children)
@@ -164,9 +179,12 @@ const Files: React.FC = () => {
   };
 
   const handleJobSelect = (_event: React.MouseEvent | undefined, value: string | number | undefined) => {
-    setSelectedJobId(value as string);
+    const newJobId = value as string;
+    setSelectedJobId(newJobId);
     setSelectedFile(null);
     setIsSelectOpen(false);
+    // Reload file tree immediately for the selected project
+    loadData(newJobId);
   };
 
   if (loading) {
@@ -196,6 +214,7 @@ const Files: React.FC = () => {
               toggle={(toggleRef: React.Ref<MenuToggleElement>) => (
                 <MenuToggle
                   ref={toggleRef}
+                  data-testid="files-project-select-toggle"
                   onClick={() => setIsSelectOpen(!isSelectOpen)}
                   isExpanded={isSelectOpen}
                   style={{ minWidth: 200 }}
@@ -261,17 +280,17 @@ const Files: React.FC = () => {
                   {selectedFile.path}
                 </CardTitle>
               </CardHeader>
-              <CardBody style={{ overflow: 'hidden', flex: 1, padding: 0, backgroundColor: REDHAT.bg }}>
+              <CardBody style={{ overflow: 'hidden', flex: 1, padding: 0, backgroundColor: REDHAT.bg, display: 'flex', flexDirection: 'column' }}>
                 <div
                   style={{
-                    height: '100%',
-                    minHeight: 360,
+                    flex: 1,
+                    minHeight: 240,
                     borderTop: `1px solid ${REDHAT.border}`,
                     boxSizing: 'border-box',
                   }}
                 >
                   <Editor
-                    height="100%"
+                    height={selectedFile.path.toLowerCase().endsWith('.html') || selectedFile.path.toLowerCase().endsWith('.htm') ? '50%' : '100%'}
                     language={getLanguage(selectedFile.path)}
                     value={selectedFile.content}
                     theme="redhat-light"
@@ -293,6 +312,17 @@ const Files: React.FC = () => {
                     beforeMount={defineRedHatTheme}
                   />
                 </div>
+                {(selectedFile.path.toLowerCase().endsWith('.html') || selectedFile.path.toLowerCase().endsWith('.htm')) && selectedJobId && (
+                  <div style={{ borderTop: `1px solid ${REDHAT.border}`, flex: '1 1 280px', minHeight: 280 }}>
+                    <div style={{ padding: '8px 12px', fontSize: '0.875rem', color: REDHAT.textMuted }}>Preview</div>
+                    <iframe
+                      title="HTML preview"
+                      src={getPreviewUrl(selectedJobId, selectedFile.path)}
+                      sandbox="allow-scripts"
+                      style={{ width: '100%', height: 'calc(100% - 32px)', border: 'none', display: 'block' }}
+                    />
+                  </div>
+                )}
               </CardBody>
             </>
           ) : (
@@ -310,6 +340,14 @@ const Files: React.FC = () => {
           )}
         </Card>
       </div>
+
+      {/* Floating refine button + slide-out chat panel */}
+      <RefineChat
+        selectedJobId={selectedJobId}
+        selectedFile={selectedFile}
+        jobVision={jobs.find((j) => j.id === selectedJobId)?.vision || null}
+        onRefineComplete={handleRefineComplete}
+      />
     </>
   );
 };

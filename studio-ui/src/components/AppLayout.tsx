@@ -3,10 +3,6 @@ import { useNavigate, useLocation, Outlet } from 'react-router-dom';
 import {
   Brand,
   Masthead,
-  MastheadBrand,
-  MastheadContent,
-  MastheadMain,
-  MastheadToggle,
   Nav,
   NavItem,
   NavList,
@@ -55,18 +51,27 @@ const AppLayout: React.FC = () => {
     <Toolbar id="toolbar" isFullHeight isStatic>
       <ToolbarContent>
         <ToolbarItem>
-          <span style={{ color: 'white', fontSize: '0.875rem', opacity: 0.8 }}>
+          <span style={{ color: 'rgba(255,255,255,0.85)', fontSize: '0.875rem' }}>
             Project /{' '}
-            <strong style={{ opacity: 1 }}>opl-ai-software-team</strong>
+            <strong style={{ color: '#ffffff' }}>opl-ai-software-team</strong>
           </span>
         </ToolbarItem>
-        <ToolbarItem variant="separator" />
+        <ToolbarItem variant="separator" style={{ '--pf-v5-c-divider--BackgroundColor': 'rgba(255,255,255,0.3)' } as React.CSSProperties} />
         <ToolbarItem>
           <SearchInput
             placeholder="Search tasks..."
             value={searchValue}
             onChange={(_event, value) => setSearchValue(value)}
             onClear={() => setSearchValue('')}
+            style={{
+              '--pf-v5-c-search-input--BackgroundColor': 'rgba(255,255,255,0.15)',
+              '--pf-v5-c-search-input--BorderTopColor': 'transparent',
+              '--pf-v5-c-search-input--BorderRightColor': 'transparent',
+              '--pf-v5-c-search-input--BorderBottomColor': 'rgba(255,255,255,0.3)',
+              '--pf-v5-c-search-input--BorderLeftColor': 'transparent',
+              '--pf-v5-c-search-input__text-input--Color': '#ffffff',
+              color: '#ffffff',
+            } as React.CSSProperties}
           />
         </ToolbarItem>
         <ToolbarItem>
@@ -74,6 +79,7 @@ const AppLayout: React.FC = () => {
             variant="attention"
             onClick={() => {}}
             aria-label="Notifications"
+            style={{ color: 'white' }}
           >
             <BellIcon />
           </NotificationBadge>
@@ -82,54 +88,68 @@ const AppLayout: React.FC = () => {
     </Toolbar>
   );
 
+  const mastheadMinHeight = '4.375rem'; // PatternFly masthead default
+
   const masthead = (
     <Masthead style={{
-      '--pf-v5-c-masthead--BackgroundColor': '#EE0000',
+      '--pf-v5-c-masthead--BackgroundColor': 'transparent',
       '--pf-v5-c-masthead__main--before--BorderBottomColor': 'transparent',
-      '--pf-v5-c-masthead--item-border-color--base': 'rgba(255,255,255,0.3)',
+      '--pf-v5-c-masthead--item-border-color--base': 'transparent',
+      padding: 0,
+      display: 'flex',
+      alignItems: 'stretch',
+      minHeight: mastheadMinHeight,
     } as React.CSSProperties}>
-      <MastheadToggle>
+      {/* ── Left section: white background with logo ── */}
+      <div style={{
+        display: 'flex',
+        alignItems: 'center',
+        minHeight: mastheadMinHeight,
+        background: '#ffffff',
+        padding: '0 1.25rem',
+        gap: '0.75rem',
+        borderBottom: '1px solid #e0e0e0',
+        flexShrink: 0,
+      }}>
         <PageToggleButton
           variant="plain"
           aria-label="Global navigation"
           isSidebarOpen={isSidebarOpen}
           onSidebarToggle={() => setIsSidebarOpen(!isSidebarOpen)}
-          style={{ color: 'white' }}
+          style={{ color: '#151515' }}
         >
           <BarsIcon />
         </PageToggleButton>
-      </MastheadToggle>
-      <MastheadMain>
-        <MastheadBrand>
-          <Flex
-            alignItems={{ default: 'alignItemsCenter' }}
-            gap={{ default: 'gapSm' }}
-          >
-            <FlexItem>
-              <Brand
-                src="/redhat-logo.svg"
-                alt="Red Hat"
-                heights={{ default: '36px' }}
-                style={{ filter: 'brightness(0) invert(1)' }}
-              />
-            </FlexItem>
-            <FlexItem>
-              <span
-                style={{
-                  color: 'white',
-                  fontFamily: '"Red Hat Display", sans-serif',
-                  fontWeight: 700,
-                  fontSize: '1.25rem',
-                  letterSpacing: '-0.01em',
-                }}
-              >
-                AI Crew
-              </span>
-            </FlexItem>
-          </Flex>
-        </MastheadBrand>
-      </MastheadMain>
-      <MastheadContent>{headerToolbar}</MastheadContent>
+        <Brand
+          src="/redhat-logo.svg"
+          alt="Red Hat"
+          heights={{ default: '36px' }}
+        />
+        <span
+          style={{
+            color: '#151515',
+            fontFamily: '"Red Hat Display", sans-serif',
+            fontWeight: 700,
+            fontSize: '1.25rem',
+            letterSpacing: '-0.01em',
+            whiteSpace: 'nowrap',
+          }}
+        >
+          AI Crew
+        </span>
+      </div>
+      {/* ── Right section: red background with toolbar ── */}
+      <div style={{
+        display: 'flex',
+        alignItems: 'center',
+        minHeight: mastheadMinHeight,
+        background: '#EE0000',
+        flex: 1,
+        padding: '0 1.25rem',
+        borderBottom: '1px solid #cc0000',
+      }}>
+        {headerToolbar}
+      </div>
     </Masthead>
   );
 
@@ -157,7 +177,11 @@ const AppLayout: React.FC = () => {
           gap={{ default: 'gapSm' }}
         >
           <FlexItem>
-            <Avatar src="" alt="Admin User" size="md" />
+            <Avatar
+              src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='48' height='48'%3E%3Ccircle cx='24' cy='24' r='24' fill='%23EE0000'/%3E%3Ctext x='24' y='24' dy='.35em' text-anchor='middle' fill='white' font-family='Red Hat Display,sans-serif' font-size='18' font-weight='700'%3EA%3C/text%3E%3C/svg%3E"
+              alt="Admin User"
+              size="md"
+            />
           </FlexItem>
           <FlexItem>
             <div style={{ lineHeight: 1.3 }}>

@@ -1,30 +1,39 @@
 """
 File operation tools for AI agents
 Migrated from CrewAI BaseTool to LlamaIndex FunctionTool
+Supports explicit workspace_path for thread-safe use (e.g. refinement runner).
 """
 import os
 import logging
 from pathlib import Path
+from typing import Optional
+from functools import partial
 from llama_index.core.tools import FunctionTool
 from ..utils.code_safety import CodeSafetyChecker
 
 logger = logging.getLogger(__name__)
 
 
-def file_writer(file_path: str, content: str) -> str:
+def _resolve_workspace(workspace_path: Optional[str] = None) -> Path:
+    """Resolve workspace path: explicit path takes precedence over env (thread-safe)."""
+    if workspace_path is not None:
+        return Path(workspace_path)
+    return Path(os.getenv("WORKSPACE_PATH", "./workspace"))
+
+
+def file_writer(file_path: str, content: str, workspace_path: Optional[str] = None) -> str:
     """Write content to a file. Creates parent directories if needed. Use this tool to create or update any file in the workspace.
     
     Args:
         file_path: Path to the file to write (relative to workspace root). Example: 'index.html' or 'src/main.py'
         content: The content to write to the file.
+        workspace_path: Optional workspace root (for thread-safe use). If not set, uses WORKSPACE_PATH env.
     
     Returns:
         Success or error message
     """
     try:
-        # Get workspace path from environment
-        workspace_path = os.getenv("WORKSPACE_PATH", "./workspace")
-        workspace = Path(workspace_path)
+        workspace = _resolve_workspace(workspace_path)
         workspace.mkdir(parents=True, exist_ok=True)
         
         # Create full path
@@ -72,19 +81,18 @@ def file_writer(file_path: str, content: str) -> str:
         return f"❌ Error writing to {file_path}: {str(e)}"
 
 
-def file_reader(file_path: str) -> str:
+def file_reader(file_path: str, workspace_path: Optional[str] = None) -> str:
     """Read content from a file in the workspace.
     
     Args:
         file_path: Path to the file to read (relative to workspace root). Example: 'requirements.md' or 'src/main.py'
+        workspace_path: Optional workspace root (for thread-safe use). If not set, uses WORKSPACE_PATH env.
     
     Returns:
         File content or error message
     """
     try:
-        # Get workspace path from environment
-        workspace_path = os.getenv("WORKSPACE_PATH", "./workspace")
-        workspace = Path(workspace_path)
+        workspace = _resolve_workspace(workspace_path)
         full_path = workspace / file_path
         
         if not full_path.exists():
@@ -98,19 +106,18 @@ def file_reader(file_path: str) -> str:
         return f"❌ Error reading {file_path}: {str(e)}"
 
 
-def file_lister(directory: str = ".") -> str:
-    """List files in a directory. Returns file names and sizes.
+def file_lister(directory: str = ".", workspace_path: Optional[str] = None) -> str:
+    """List all files in a directory recursively. Returns file paths relative to workspace and sizes.
     
     Args:
         directory: Directory path to list (relative to workspace root). Default is '.' (workspace root).
+        workspace_path: Optional workspace root (for thread-safe use). If not set, uses WORKSPACE_PATH env.
     
     Returns:
-        List of files or error message
+        Recursive list of all files or error message
     """
     try:
-        # Get workspace path from environment
-        workspace_path = os.getenv("WORKSPACE_PATH", "./workspace")
-        workspace = Path(workspace_path)
+        workspace = _resolve_workspace(workspace_path)
         full_path = workspace / directory
         
         if not full_path.exists():
@@ -119,23 +126,61 @@ def file_lister(directory: str = ".") -> str:
         if not full_path.is_dir():
             return f"❌ Not a directory: {directory}"
         
+        # Skip hidden dirs, __pycache__, node_modules, .git, etc.
+        _skip_dirs = {'.git', '__pycache__', 'node_modules', '.pytest_cache', 'htmlcov', '.tox', 'venv', '.venv'}
+        
         files = []
-        for item in sorted(full_path.iterdir()):
+        for item in sorted(full_path.rglob("*")):
+            # Skip files inside ignored directories
+            if any(part in _skip_dirs for part in item.parts):
+                continue
             if item.is_file():
+                rel = item.relative_to(workspace)
                 size = item.stat().st_size
-                files.append(f"  - {item.name} ({size} bytes)")
-            elif item.is_dir():
-                files.append(f"  📁 {item.name}/")
+                files.append(f"  {rel} ({size} bytes)")
         
         if not files:
             return f"Directory {directory} is empty"
         
-        return f"Files in {directory}:\n" + "\n".join(files)
+        return f"All files under {directory}:\n" + "\n".join(files)
     except Exception as e:
         return f"❌ Error listing {directory}: {str(e)}"
 
 
-# Create FunctionTool instances
+def file_deleter(file_path: str, workspace_path: Optional[str] = None) -> str:
+    """Delete a file in the workspace. Use this when the user asks to remove or delete a file.
+    Do NOT empty the file with file_writer — call file_deleter to remove the file from the filesystem.
+
+    Args:
+        file_path: Path to the file to delete (relative to workspace root). Example: 'src/unused.js'
+        workspace_path: Optional workspace root (for thread-safe use). If not set, uses WORKSPACE_PATH env.
+
+    Returns:
+        Success or error message
+    """
+    try:
+        workspace = _resolve_workspace(workspace_path)
+        full_path = (workspace / file_path).resolve()
+        workspace_resolved = workspace.resolve()
+        try:
+            full_path.relative_to(workspace_resolved)
+        except ValueError:
+            return f"❌ Refused: {file_path} is outside the workspace."
+        if ".." in file_path or file_path.startswith("/"):
+            return f"❌ Refused: invalid path {file_path}."
+        if not full_path.exists():
+            return f"❌ File not found: {file_path}"
+        if full_path.is_dir():
+            return f"❌ Refused: {file_path} is a directory. file_deleter only removes files."
+
+        full_path.unlink()
+        return f"✅ Deleted file: {file_path}"
+    except Exception as e:
+        logger.error(f"Error deleting {file_path}: {e}")
+        return f"❌ Error deleting {file_path}: {str(e)}"
+
+
+# Create FunctionTool instances (use env WORKSPACE_PATH when called by agent)
 FileWriterTool = FunctionTool.from_defaults(
     fn=file_writer,
     name="file_writer",
@@ -151,5 +196,39 @@ FileReaderTool = FunctionTool.from_defaults(
 FileListTool = FunctionTool.from_defaults(
     fn=file_lister,
     name="file_lister",
-    description="List files in a directory. Returns file names and sizes."
+    description="Recursively list all files in a directory. Returns file paths relative to workspace and sizes."
 )
+
+FileDeleterTool = FunctionTool.from_defaults(
+    fn=file_deleter,
+    name="file_deleter",
+    description="Delete a file from the workspace. Use when the user asks to remove or delete a file. Do NOT empty the file with file_writer — use file_deleter to remove it from the filesystem."
+)
+
+
+def create_workspace_file_tools(workspace_path: Path):
+    """Create file tools bound to a specific workspace path (thread-safe, no env).
+    Returns (FileWriterTool, FileReaderTool, FileListTool, FileDeleterTool) for use in RefinementAgent."""
+    ws = str(workspace_path)
+    return [
+        FunctionTool.from_defaults(
+            fn=partial(file_writer, workspace_path=ws),
+            name="file_writer",
+            description="Write content to a file. Creates parent directories if needed. Use this tool to create or update any file in the workspace."
+        ),
+        FunctionTool.from_defaults(
+            fn=partial(file_reader, workspace_path=ws),
+            name="file_reader",
+            description="Read content from a file in the workspace."
+        ),
+        FunctionTool.from_defaults(
+            fn=partial(file_lister, workspace_path=ws),
+            name="file_lister",
+            description="Recursively list all files in a directory. Returns file paths relative to workspace and sizes."
+        ),
+        FunctionTool.from_defaults(
+            fn=partial(file_deleter, workspace_path=ws),
+            name="file_deleter",
+            description="Delete a file from the workspace. Use when the user asks to remove or delete a file. Do NOT empty the file with file_writer — use file_deleter to remove it from the filesystem."
+        ),
+    ]

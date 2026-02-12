@@ -68,6 +68,21 @@ class JobDatabase:
             conn.execute("CREATE INDEX IF NOT EXISTS idx_status ON jobs(status)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_created_at ON jobs(created_at DESC)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_doc_job ON documents(job_id)")
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS refinements (
+                    id TEXT PRIMARY KEY,
+                    job_id TEXT NOT NULL,
+                    prompt TEXT NOT NULL,
+                    file_path TEXT,
+                    status TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    completed_at TEXT,
+                    error TEXT,
+                    FOREIGN KEY (job_id) REFERENCES jobs(id)
+                )
+            """)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_refinements_job ON refinements(job_id)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_refinements_status ON refinements(status)")
     
     def create_job(self, job_id: str, vision: str, workspace_path: str) -> Dict[str, Any]:
         """Create a new job record."""
@@ -129,7 +144,15 @@ class JobDatabase:
                 values
             )
             return cursor.rowcount > 0
-    
+
+    def delete_job(self, job_id: str) -> bool:
+        """Delete a job and its related records. Returns True if job was found and deleted."""
+        with self._get_conn() as conn:
+            conn.execute("DELETE FROM refinements WHERE job_id = ?", (job_id,))
+            conn.execute("DELETE FROM documents WHERE job_id = ?", (job_id,))
+            cursor = conn.execute("DELETE FROM jobs WHERE id = ?", (job_id,))
+            return cursor.rowcount > 0
+
     def update_progress(self, job_id: str, phase: str, progress: int, message: str = None):
         """Update job progress and optionally append a message."""
         job = self.get_job(job_id)
@@ -254,6 +277,73 @@ class JobDatabase:
         with self._get_conn() as conn:
             cursor = conn.execute("DELETE FROM documents WHERE id = ?", (doc_id,))
             return cursor.rowcount > 0
+
+    # ── Refinement methods ─────────────────────────────────────────────────────
+
+    def create_refinement(
+        self,
+        refinement_id: str,
+        job_id: str,
+        prompt: str,
+        file_path: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Create a new refinement record (status=running)."""
+        now = datetime.now().isoformat()
+        with self._get_conn() as conn:
+            conn.execute("""
+                INSERT INTO refinements (id, job_id, prompt, file_path, status, created_at)
+                VALUES (?, ?, ?, ?, 'running', ?)
+            """, (refinement_id, job_id, prompt, file_path, now))
+        return {
+            'id': refinement_id,
+            'job_id': job_id,
+            'prompt': prompt,
+            'file_path': file_path,
+            'status': 'running',
+            'created_at': now,
+            'completed_at': None,
+            'error': None,
+        }
+
+    def complete_refinement(self, refinement_id: str) -> bool:
+        """Mark refinement as completed."""
+        now = datetime.now().isoformat()
+        with self._get_conn() as conn:
+            cursor = conn.execute(
+                "UPDATE refinements SET status = 'completed', completed_at = ? WHERE id = ?",
+                (now, refinement_id)
+            )
+            return cursor.rowcount > 0
+
+    def fail_refinement(self, refinement_id: str, error: str) -> bool:
+        """Mark refinement as failed with error message."""
+        now = datetime.now().isoformat()
+        with self._get_conn() as conn:
+            cursor = conn.execute(
+                "UPDATE refinements SET status = 'failed', completed_at = ?, error = ? WHERE id = ?",
+                (now, error, refinement_id)
+            )
+            return cursor.rowcount > 0
+
+    def get_running_refinement(self, job_id: str) -> Optional[Dict[str, Any]]:
+        """Return the running refinement for this job, if any."""
+        with self._get_conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM refinements WHERE job_id = ? AND status = 'running' ORDER BY created_at DESC LIMIT 1",
+                (job_id,)
+            ).fetchone()
+            if not row:
+                return None
+            return dict(row)
+
+    def get_refinement_history(self, job_id: str, limit: int = 20) -> List[Dict[str, Any]]:
+        """Return past refinements for this job (newest first)."""
+        with self._get_conn() as conn:
+            rows = conn.execute(
+                "SELECT * FROM refinements WHERE job_id = ? ORDER BY created_at DESC LIMIT ?",
+                (job_id, limit)
+            ).fetchall()
+            return [dict(r) for r in rows]
 
     def _row_to_dict(self, row: sqlite3.Row) -> Dict[str, Any]:
         """Convert SQLite row to dictionary, parsing JSON fields."""

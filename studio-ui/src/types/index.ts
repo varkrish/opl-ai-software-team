@@ -5,7 +5,20 @@ export type JobStatus =
   | 'completed'
   | 'failed'
   | 'cancelled'
-  | 'quota_exhausted';
+  | 'quota_exhausted'
+  | 'refinement_failed';
+
+/** Refinement record from GET /api/jobs/<id>/refinements */
+export interface Refinement {
+  id: string;
+  job_id: string;
+  prompt: string;
+  file_path: string | null;
+  status: 'running' | 'completed' | 'failed';
+  created_at: string;
+  completed_at: string | null;
+  error: string | null;
+}
 
 /** A progress message emitted during job execution */
 export interface ProgressMessage {

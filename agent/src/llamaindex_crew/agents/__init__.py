@@ -8,6 +8,7 @@ from .designer_agent import DesignerAgent
 from .tech_architect_agent import TechArchitectAgent
 from .dev_agent import DevAgent
 from .frontend_agent import FrontendAgent
+from .refinement_agent import RefinementAgent
 
 __all__ = [
     "BaseLlamaIndexAgent",
@@ -17,4 +18,5 @@ __all__ = [
     "TechArchitectAgent",
     "DevAgent",
     "FrontendAgent",
+    "RefinementAgent",
 ]

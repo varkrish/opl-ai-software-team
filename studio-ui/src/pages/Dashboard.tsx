@@ -32,7 +32,7 @@ import {
   ExclamationTriangleIcon,
   FolderOpenIcon,
 } from '@patternfly/react-icons';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, Link } from 'react-router-dom';
 import { usePolling } from '../hooks/usePolling';
 import { getStats, getJobs, getHealth, getJobProgress } from '../api/client';
 import type { Stats, JobSummary, HealthCheck, ProgressMessage } from '../types';
@@ -433,15 +433,20 @@ const Dashboard: React.FC = () => {
                       {new Date(job.created_at).toLocaleString()}
                     </td>
                     <td style={{ padding: '0.625rem 1rem' }}>
-                      <Button
-                        variant="link"
-                        size="sm"
-                        icon={<FolderOpenIcon />}
-                        onClick={() => navigate(`/files?job=${job.id}`)}
-                        style={{ padding: 0, fontSize: '0.8rem' }}
+                      <Link
+                        to={`/files?job=${job.id}`}
+                        style={{
+                          display: 'inline-flex',
+                          alignItems: 'center',
+                          gap: '0.35rem',
+                          fontSize: '0.875rem',
+                          color: 'var(--pf-v5-global--link--Color, #0066cc)',
+                          textDecoration: 'underline',
+                        }}
                       >
-                        Files
-                      </Button>
+                        <FolderOpenIcon />
+                        {job.status === 'completed' ? 'View files & refine' : 'View files'}
+                      </Link>
                     </td>
                   </tr>
                 ))}

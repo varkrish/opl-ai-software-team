@@ -407,7 +407,7 @@ def health_ready():
     
     # Check 4: Job storage
     try:
-        job_count = len(jobs)
+        job_count = len(job_db.get_all_jobs())
         health_status['checks']['job_storage'] = {
             'status': 'healthy',
             'message': 'Job storage accessible',
@@ -1179,6 +1179,98 @@ def get_file_content(file_path):
         })
     except Exception as e:
         return jsonify({'error': str(e)}), 500
+
+
+def _is_safe_relative_path(path: str) -> bool:
+    """Reject path escape: no '..', no absolute path, no null bytes."""
+    if not path or path.startswith('/') or '..' in path or '\x00' in path:
+        return False
+    # Only allow simple relative paths (letters, digits, slashes, dots, hyphens, underscores)
+    return all(c.isalnum() or c in '/._ -' for c in path)
+
+
+@app.route('/api/jobs/<job_id>/refine', methods=['POST'])
+def refine_job(job_id):
+    """Start a refinement run for a completed/failed job. Returns 202 or 409 if already refining."""
+    job = job_db.get_job(job_id)
+    if not job:
+        return jsonify({'error': 'Job not found'}), 404
+    if job['status'] == 'running':
+        return jsonify({'error': 'Job is still running'}), 400
+    if job.get('current_phase') == 'refining':
+        return jsonify({'error': 'Refinement already in progress'}), 409
+    data = request.get_json() or {}
+    prompt = (data.get('prompt') or '').strip()
+    if not prompt:
+        return jsonify({'error': 'prompt is required'}), 400
+    file_path = data.get('file_path')
+    if file_path is not None:
+        file_path = file_path.strip() if isinstance(file_path, str) else None
+        if file_path and not _is_safe_relative_path(file_path):
+            return jsonify({'error': 'Invalid file_path'}), 400
+    refinement_id = str(uuid.uuid4())
+    job_db.create_refinement(refinement_id, job_id, prompt, file_path)
+    # Mark job as running so dashboard shows it as running and tracks refinement progress
+    previous_status = job.get('status') or 'completed'
+    job_db.update_job(job_id, {'status': 'running'})
+    job_db.update_progress(job_id, 'refining', 0, 'Refinement started.')
+    def progress_cb(phase: str, progress: int, message: Optional[str] = None):
+        job_db.update_progress(job_id, phase, progress, message or '')
+
+    def run():
+        from crew_studio.refinement_runner import run_refinement
+        run_refinement(
+            job_id=job_id,
+            workspace_path=Path(job['workspace_path']),
+            prompt=prompt,
+            refinement_id=refinement_id,
+            job_db=job_db,
+            progress_callback=progress_cb,
+            file_path=file_path,
+            previous_status=previous_status,
+        )
+    thread = threading.Thread(target=run)
+    thread.daemon = True
+    thread.start()
+    return jsonify({'status': 'refining', 'message': 'Refinement started', 'refinement_id': refinement_id}), 202
+
+
+@app.route('/api/jobs/<job_id>/refinements', methods=['GET'])
+def get_job_refinements(job_id):
+    """List refinement history for a job."""
+    job = job_db.get_job(job_id)
+    if not job:
+        return jsonify({'error': 'Job not found'}), 404
+    refinements = job_db.get_refinement_history(job_id)
+    return jsonify({'refinements': refinements})
+
+
+@app.route('/api/jobs/<job_id>/preview/<path:file_path>', methods=['GET'])
+def serve_job_preview(job_id, file_path):
+    """Serve a file from the job workspace for HTML preview (correct Content-Type)."""
+    job = job_db.get_job(job_id)
+    if not job:
+        return jsonify({'error': 'Job not found'}), 404
+    if not _is_safe_relative_path(file_path):
+        return jsonify({'error': 'Invalid path'}), 400
+    workspace = Path(job['workspace_path'])
+    full_path = workspace / file_path
+    if not full_path.exists() or not full_path.is_file():
+        return jsonify({'error': 'File not found'}), 404
+    full_path = full_path.resolve()
+    if not str(full_path).startswith(str(workspace.resolve())):
+        return jsonify({'error': 'Invalid path'}), 400
+    ext = full_path.suffix.lower()
+    content_types = {
+        '.html': 'text/html', '.htm': 'text/html',
+        '.js': 'application/javascript', '.mjs': 'application/javascript',
+        '.css': 'text/css', '.json': 'application/json',
+        '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
+        '.gif': 'image/gif', '.svg': 'image/svg+xml', '.ico': 'image/x-icon',
+        '.woff': 'font/woff', '.woff2': 'font/woff2',
+    }
+    mimetype = content_types.get(ext, 'application/octet-stream')
+    return send_from_directory(workspace, file_path, mimetype=mimetype)
 
 
 @app.route('/api/jobs/<job_id>/cancel', methods=['POST'])

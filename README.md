@@ -124,8 +124,9 @@ The Crew Studio UI gives you:
 - ✅ Monitor task completion percentages in real-time
 - 📈 Track phase-by-phase progress (Meta → Product Owner → Designer → Tech Architect → Dev → Frontend)
 - 📋 View Kanban-style task board (To Do, In Progress, Completed)
-- 📁 Browse generated files and code
+- 📁 Browse generated files and code (per-project; switching project reloads the file tree)
 - 💰 Monitor budget and API costs
+- ✨ **Prompt-based refinement** – After a job completes, use the Refine panel to apply natural-language edits (e.g. “add comments”, “delete unused file”) at file or project scope. Refinement runs show as **running** in the dashboard and are tracked until complete.
 
 **Start the system:**
 
@@ -148,6 +149,7 @@ Then open **http://localhost:3000** (frontend) and **http://localhost:8080** (ba
 
 ## 📚 Documentation
 
+- **[Refinement & Studio UI](docs/REFINEMENT_AND_UI.md)** - Prompt-based refinement, file/project scope, dashboard tracking, UI testing
 - **[Getting Started Guide](agent/docs/getting-started/quickstart.md)** - Detailed setup instructions
 - **[LLM Configuration](agent/docs/guide/llm-configuration.md)** - Configure any OpenAI-compatible provider
 - **[Secure Config Patterns](agent/docs/deployment/secure-config-patterns.md)** - Production security best practices
@@ -219,6 +221,16 @@ cd agent
 pytest tests/unit/           # Unit tests
 pytest tests/e2e/ -m e2e    # E2E tests
 ```
+
+**UI (Cypress):**
+
+```bash
+cd studio-ui
+npm run cy:component   # Component tests (Files, Dashboard, AppLayout, etc.)
+npm run cy:e2e        # E2E tests (requires dev server + backend)
+```
+
+See `studio-ui/cypress/README.md` for what’s covered (e.g. project dropdown file reload, masthead/logo, refinement panel).
 
 ## 🐳 Deployment
 

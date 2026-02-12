@@ -21,17 +21,16 @@ describe('Tasks Page', () => {
 
   it('should display 3 Kanban columns', () => {
     cy.wait('@getTasks');
-    cy.contains('To Do').should('be.visible');
+    // Column titles from taskGrouping: Planned, In Progress, Completed
+    cy.contains('Planned').should('be.visible');
     cy.contains('In Progress').should('be.visible');
     cy.contains('Completed').should('be.visible');
   });
 
   it('should show task counts in column headers', () => {
     cy.wait('@getTasks');
-    // To Do: registered(t6, t7, t8) = 3
-    // In Progress: in_progress(t5) = 1
-    // Completed: completed(t1, t2, t3) + skipped(t4) = 4
-    cy.contains('To Do').parent().contains('3').should('be.visible');
+    // Planned: registered(t6, t7, t8) = 3; In Progress: in_progress(t5) = 1; Completed: completed(t1, t2, t3) + skipped(t4) = 4
+    cy.contains('Planned').parent().contains('3').should('be.visible');
     cy.contains('In Progress').parent().contains('1').should('be.visible');
     cy.contains('Completed').parent().contains('4').should('be.visible');
   });

@@ -9,6 +9,7 @@ import type {
   WorkspaceFile,
   HealthCheck,
   BackendOption,
+  Refinement,
 } from '../types';
 
 const api = axios.create({
@@ -153,6 +154,33 @@ export async function getJobFiles(jobId: string): Promise<WorkspaceFile[]> {
 export async function getJobBudget(jobId: string): Promise<Record<string, unknown>> {
   const { data } = await api.get<Record<string, unknown>>(`/api/jobs/${jobId}/budget`);
   return data;
+}
+
+// ── Refinement ──────────────────────────────────────────────────────────────
+export async function refineJob(
+  jobId: string,
+  prompt: string,
+  filePath?: string
+): Promise<{ status: string; message?: string; refinement_id?: string }> {
+  const { data } = await api.post<{ status: string; message?: string; refinement_id?: string }>(
+    `/api/jobs/${jobId}/refine`,
+    { prompt, file_path: filePath }
+  );
+  return data;
+}
+
+export async function getRefinementHistory(jobId: string): Promise<Refinement[]> {
+  const { data } = await api.get<{ refinements: Refinement[] }>(
+    `/api/jobs/${jobId}/refinements`
+  );
+  return data.refinements;
+}
+
+/** Base URL for job preview (append file path). Use in iframe src with sandbox. */
+export function getPreviewUrl(jobId: string, filePath: string): string {
+  const base = import.meta.env.VITE_API_URL || '';
+  const encoded = filePath.split('/').map(encodeURIComponent).join('/');
+  return `${base}/api/jobs/${jobId}/preview/${encoded}`;
 }
 
 // ── Workspace Files ─────────────────────────────────────────────────────────

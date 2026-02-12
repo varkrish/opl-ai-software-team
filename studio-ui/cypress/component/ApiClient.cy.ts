@@ -94,11 +94,13 @@ describe('groupTasksIntoColumns', () => {
     expect(result[2].tasks).to.have.length(2);
   });
 
-  it('should group failed tasks as To Do', () => {
+  it('should group failed tasks in Failed column', () => {
     const tasks: Task[] = [
       { task_id: 't1', phase: 'dev', task_type: 'impl', description: 'Implement', status: 'failed' },
     ];
     const result = groupTasksIntoColumns(tasks);
-    expect(result[0].tasks).to.have.length(1);
+    expect(result).to.have.length(4); // Planned, In Progress, Completed, Failed
+    expect(result[3].id).to.eq('failed');
+    expect(result[3].tasks).to.have.length(1);
   });
 });
