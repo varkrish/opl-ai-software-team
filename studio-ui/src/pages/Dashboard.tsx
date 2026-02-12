@@ -379,15 +379,15 @@ const Dashboard: React.FC = () => {
             <CardTitle>Recent Jobs</CardTitle>
           </CardHeader>
           <CardBody style={{ padding: 0 }}>
-            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.875rem' }}>
+            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.875rem', tableLayout: 'fixed' }}>
               <thead>
                 <tr style={{ borderBottom: '2px solid #E8E8E8', textAlign: 'left' }}>
-                  <th style={{ padding: '0.75rem 1rem', fontWeight: 600, color: '#6A6E73' }}>Vision</th>
-                  <th style={{ padding: '0.75rem 1rem', fontWeight: 600, color: '#6A6E73', width: 100 }}>Status</th>
-                  <th style={{ padding: '0.75rem 1rem', fontWeight: 600, color: '#6A6E73', width: 120 }}>Phase</th>
-                  <th style={{ padding: '0.75rem 1rem', fontWeight: 600, color: '#6A6E73', width: 80 }}>Progress</th>
-                  <th style={{ padding: '0.75rem 1rem', fontWeight: 600, color: '#6A6E73', width: 160 }}>Created</th>
-                  <th style={{ padding: '0.75rem 1rem', fontWeight: 600, color: '#6A6E73', width: 100 }}>Actions</th>
+                  <th style={{ padding: '0.75rem 1rem', fontWeight: 600, color: '#6A6E73', width: '35%' }}>Vision</th>
+                  <th style={{ padding: '0.75rem 1rem', fontWeight: 600, color: '#6A6E73', width: '9%' }}>Status</th>
+                  <th style={{ padding: '0.75rem 1rem', fontWeight: 600, color: '#6A6E73', width: '12%' }}>Phase</th>
+                  <th style={{ padding: '0.75rem 1rem', fontWeight: 600, color: '#6A6E73', width: '14%' }}>Progress</th>
+                  <th style={{ padding: '0.75rem 1rem', fontWeight: 600, color: '#6A6E73', width: '16%' }}>Created</th>
+                  <th style={{ padding: '0.75rem 1rem', fontWeight: 600, color: '#6A6E73', width: '14%' }}>Actions</th>
                 </tr>
               </thead>
               <tbody>
@@ -403,14 +403,23 @@ const Dashboard: React.FC = () => {
                       onClick={() => setSelectedJobId(job.id)}
                       style={{
                         padding: '0.625rem 1rem',
-                        maxWidth: 300,
                         overflow: 'hidden',
                         textOverflow: 'ellipsis',
                         whiteSpace: 'nowrap',
                         cursor: 'pointer',
                       }}
                     >
-                      {job.vision}
+                      {job.vision.startsWith('[MTA') ? (
+                        <span style={{ display: 'flex', alignItems: 'center', gap: '0.35rem', overflow: 'hidden' }}>
+                          <Label isCompact color="blue" style={{ flexShrink: 0 }}>MTA</Label>
+                          <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                            {/* Extract ZIP name + goal from vision string */}
+                            {job.vision
+                              .replace(/^\[MTA[^\]]*\]\s*/, '')  /* strip [MTA ...] prefix */
+                              || job.vision}
+                          </span>
+                        </span>
+                      ) : job.vision}
                     </td>
                     <td onClick={() => setSelectedJobId(job.id)} style={{ padding: '0.625rem 1rem', cursor: 'pointer' }}>
                       <Label isCompact color={jobStatusColor(job.status)}>
@@ -420,14 +429,22 @@ const Dashboard: React.FC = () => {
                     <td onClick={() => setSelectedJobId(job.id)} style={{ padding: '0.625rem 1rem', color: '#6A6E73', textTransform: 'capitalize', cursor: 'pointer' }}>
                       {(job.current_phase || 'N/A').replace(/_/g, ' ')}
                     </td>
-                    <td onClick={() => setSelectedJobId(job.id)} style={{ padding: '0.625rem 1rem', cursor: 'pointer' }}>
-                      <Progress
-                        value={job.progress}
-                        size="sm"
-                        title=""
-                        aria-label={`${job.progress}%`}
-                        variant={job.status === 'failed' ? ProgressVariant.danger : job.status === 'completed' ? ProgressVariant.success : undefined}
-                      />
+                    <td onClick={() => setSelectedJobId(job.id)} style={{ padding: '0.625rem 1rem', cursor: 'pointer', whiteSpace: 'nowrap' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <Progress
+                            value={job.progress}
+                            size="sm"
+                            title=""
+                            measureLocation="none"
+                            aria-label={`${job.progress}%`}
+                            variant={job.status === 'failed' ? ProgressVariant.danger : job.status === 'completed' ? ProgressVariant.success : undefined}
+                          />
+                        </div>
+                        <span style={{ fontSize: '0.75rem', color: '#6A6E73', flexShrink: 0 }}>
+                          {job.progress}%
+                        </span>
+                      </div>
                     </td>
                     <td onClick={() => setSelectedJobId(job.id)} style={{ padding: '0.625rem 1rem', color: '#6A6E73', fontSize: '0.8rem', cursor: 'pointer' }}>
                       {new Date(job.created_at).toLocaleString()}

@@ -13,6 +13,7 @@ An intelligent software development crew that transforms your vision into produc
 - 🔐 **Secure Configuration** - File-based config with encryption support
 - 🌐 **Professional UI** - Modern dashboard with phase progress and task tracking
 - 🔌 **Pluggable LLMs** - Works with any OpenAI-compatible API (Red Hat MaaS, vLLM, Ollama, etc.)
+- 🔄 **MTA Migration** - Upload an MTA report and auto-migrate legacy code with 4-tier context injection ([docs](docs/migration.md))
 
 ## 🚀 Quick Start
 

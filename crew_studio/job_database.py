@@ -83,6 +83,28 @@ class JobDatabase:
             """)
             conn.execute("CREATE INDEX IF NOT EXISTS idx_refinements_job ON refinements(job_id)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_refinements_status ON refinements(status)")
+            # ── Migration issues table ────────────────────────────────────
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS migration_issues (
+                    id TEXT PRIMARY KEY,
+                    job_id TEXT NOT NULL,
+                    migration_id TEXT NOT NULL,
+                    title TEXT,
+                    severity TEXT,
+                    effort TEXT,
+                    files TEXT,
+                    description TEXT,
+                    migration_hint TEXT,
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    error TEXT,
+                    created_at TEXT NOT NULL,
+                    completed_at TEXT,
+                    FOREIGN KEY (job_id) REFERENCES jobs(id)
+                )
+            """)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_migration_issues_job ON migration_issues(job_id)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_migration_issues_migration ON migration_issues(migration_id)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_migration_issues_status ON migration_issues(status)")
     
     def create_job(self, job_id: str, vision: str, workspace_path: str) -> Dict[str, Any]:
         """Create a new job record."""
@@ -344,6 +366,113 @@ class JobDatabase:
                 (job_id, limit)
             ).fetchall()
             return [dict(r) for r in rows]
+
+    # ── Migration methods ────────────────────────────────────────────────────
+
+    def create_migration_issue(
+        self,
+        issue_id: str,
+        job_id: str,
+        migration_id: str,
+        title: str,
+        severity: str,
+        effort: str,
+        files: List,
+        description: str,
+        migration_hint: str,
+    ) -> Dict[str, Any]:
+        """Create a migration issue record (status=pending)."""
+        now = datetime.now().isoformat()
+        files_json = json.dumps(files) if isinstance(files, (list, tuple)) else files
+        with self._get_conn() as conn:
+            conn.execute("""
+                INSERT INTO migration_issues
+                    (id, job_id, migration_id, title, severity, effort,
+                     files, description, migration_hint, status, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)
+            """, (issue_id, job_id, migration_id, title, severity, effort,
+                  files_json, description, migration_hint, now))
+        return {
+            'id': issue_id,
+            'job_id': job_id,
+            'migration_id': migration_id,
+            'title': title,
+            'severity': severity,
+            'effort': effort,
+            'files': files_json,
+            'description': description,
+            'migration_hint': migration_hint,
+            'status': 'pending',
+            'error': None,
+            'created_at': now,
+            'completed_at': None,
+        }
+
+    def update_migration_issue_status(
+        self, issue_id: str, status: str, error: Optional[str] = None
+    ) -> bool:
+        """Update a migration issue's status. Sets completed_at on terminal states."""
+        updates = {'status': status}
+        if error is not None:
+            updates['error'] = error
+        if status in ('completed', 'failed', 'skipped'):
+            updates['completed_at'] = datetime.now().isoformat()
+        set_clause = ", ".join(f"{k} = ?" for k in updates)
+        values = list(updates.values()) + [issue_id]
+        with self._get_conn() as conn:
+            cursor = conn.execute(
+                f"UPDATE migration_issues SET {set_clause} WHERE id = ?", values
+            )
+            return cursor.rowcount > 0
+
+    def get_migration_issues(
+        self, job_id: str, migration_id: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        """Return migration issues for a job, optionally filtered by migration_id."""
+        with self._get_conn() as conn:
+            if migration_id:
+                rows = conn.execute(
+                    "SELECT * FROM migration_issues WHERE job_id = ? AND migration_id = ? ORDER BY created_at",
+                    (job_id, migration_id),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM migration_issues WHERE job_id = ? ORDER BY created_at",
+                    (job_id,),
+                ).fetchall()
+            return [dict(r) for r in rows]
+
+    def get_migration_summary(self, job_id: str) -> Dict[str, int]:
+        """Return aggregated counts of migration issues by status."""
+        with self._get_conn() as conn:
+            row = conn.execute("""
+                SELECT
+                    COUNT(*) as total,
+                    SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) as pending,
+                    SUM(CASE WHEN status = 'running' THEN 1 ELSE 0 END) as running,
+                    SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as completed,
+                    SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) as failed,
+                    SUM(CASE WHEN status = 'skipped' THEN 1 ELSE 0 END) as skipped
+                FROM migration_issues
+                WHERE job_id = ?
+            """, (job_id,)).fetchone()
+            return {
+                'total': row['total'] or 0,
+                'pending': row['pending'] or 0,
+                'running': row['running'] or 0,
+                'completed': row['completed'] or 0,
+                'failed': row['failed'] or 0,
+                'skipped': row['skipped'] or 0,
+            }
+
+    def get_running_migration(self, job_id: str) -> Optional[Dict[str, Any]]:
+        """Return the currently running migration issue for this job, if any."""
+        with self._get_conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM migration_issues WHERE job_id = ? AND status = 'running' ORDER BY created_at DESC LIMIT 1",
+                (job_id,),
+            ).fetchone()
+            return dict(row) if row else None
 
     def _row_to_dict(self, row: sqlite3.Row) -> Dict[str, Any]:
         """Convert SQLite row to dictionary, parsing JSON fields."""

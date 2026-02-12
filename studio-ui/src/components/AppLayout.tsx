@@ -31,6 +31,7 @@ const navItems = [
   { path: '/agents', label: 'AI Crew' },
   { path: '/tasks', label: 'Tasks' },
   { path: '/files', label: 'Files' },
+  { path: '/migration', label: 'MTA Migration' },
   { path: '/settings', label: 'Settings' },
 ];
 
@@ -162,7 +163,11 @@ const AppLayout: React.FC = () => {
               <NavItem
                 key={item.path}
                 itemId={item.path}
-                isActive={location.pathname === item.path}
+                isActive={
+                  item.path === '/migration'
+                    ? location.pathname.startsWith('/migration')
+                    : location.pathname === item.path
+                }
               >
                 {item.label}
               </NavItem>

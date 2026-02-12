@@ -77,6 +77,41 @@ export async function createJob(
   return data;
 }
 
+/**
+ * Create a migration job with a source code archive and MTA report files.
+ *
+ * - source_archive → extracted into workspace root (preserves directory tree)
+ * - documents      → placed in workspace/docs/ (MTA reports)
+ * - mode=migration → tells backend to skip the build pipeline
+ */
+export async function createMigrationJob(
+  vision: string,
+  sourceArchive: File | null,
+  reportFiles: File[],
+  githubUrls?: string[],
+  backend?: string,
+): Promise<{ job_id: string; status: string; documents: number; source_files: number; github_repos: number }> {
+  const formData = new FormData();
+  formData.append('vision', vision);
+  formData.append('mode', 'migration');
+  if (backend) formData.append('backend', backend);
+  if (sourceArchive) {
+    formData.append('source_archive', sourceArchive);
+  }
+  reportFiles.forEach((file) => formData.append('documents', file));
+  if (githubUrls) {
+    githubUrls.forEach((url) => formData.append('github_urls', url));
+  }
+  const { data } = await api.post<{
+    job_id: string; status: string; documents: number; source_files: number; github_repos: number;
+  }>(
+    '/api/jobs',
+    formData,
+    { headers: { 'Content-Type': 'multipart/form-data' } },
+  );
+  return data;
+}
+
 export interface JobDocument {
   id: string;
   job_id: string;
@@ -223,6 +258,83 @@ export async function getFileContent(
     `/api/workspace/files/${filePath}`,
     { params }
   );
+  return data;
+}
+
+// ── Migration ────────────────────────────────────────────────────────────────
+
+export interface MigrationIssue {
+  id: string;
+  job_id: string;
+  migration_id: string;
+  title: string;
+  severity: string;
+  effort: string;
+  files: string;
+  description: string;
+  migration_hint: string;
+  status: string;
+  error: string | null;
+  created_at: string;
+  completed_at: string | null;
+}
+
+export interface MigrationSummary {
+  total: number;
+  pending: number;
+  running: number;
+  completed: number;
+  failed: number;
+  skipped: number;
+}
+
+export interface MigrationStatus {
+  job_id: string;
+  summary: MigrationSummary;
+  issues: MigrationIssue[];
+}
+
+export async function startMigration(
+  jobId: string,
+  migrationGoal: string,
+  migrationNotes?: string
+): Promise<{ status: string; migration_id: string; message: string }> {
+  const { data } = await api.post(`/api/jobs/${jobId}/migrate`, {
+    migration_goal: migrationGoal,
+    migration_notes: migrationNotes || undefined,
+  });
+  return data;
+}
+
+export async function getMigrationStatus(jobId: string): Promise<MigrationStatus> {
+  const { data } = await api.get<MigrationStatus>(`/api/jobs/${jobId}/migration`);
+  return data;
+}
+
+export async function getMigrationPlan(jobId: string): Promise<Record<string, unknown>> {
+  const { data } = await api.get(`/api/jobs/${jobId}/migration/plan`);
+  return data;
+}
+
+export interface MigrationFileChange {
+  path: string;
+  change_type: string;  // A=added, M=modified, D=deleted, R=renamed
+  insertions: number;
+  deletions: number;
+}
+
+export interface MigrationChanges {
+  job_id: string;
+  baseline_commit: string;
+  head_commit: string;
+  total_files: number;
+  total_insertions: number;
+  total_deletions: number;
+  files: MigrationFileChange[];
+}
+
+export async function getMigrationChanges(jobId: string): Promise<MigrationChanges> {
+  const { data } = await api.get<MigrationChanges>(`/api/jobs/${jobId}/migration/changes`);
   return data;
 }
 

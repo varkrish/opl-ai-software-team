@@ -26,9 +26,11 @@ import {
   GithubIcon,
   PlusCircleIcon,
 } from '@patternfly/react-icons';
-import { createJob, getBackends } from '../api/client';
+import { createJob, createMigrationJob, getBackends, startMigration, getMigrationStatus } from '../api/client';
 import type { BackendOption } from '../types';
 import BuildProgress from '../components/BuildProgress';
+
+type ProjectMode = 'build' | 'migration';
 
 /* ── Constants ────────────────────────────────────────────────────────────── */
 const ALLOWED_EXT = new Set([
@@ -38,6 +40,8 @@ const ALLOWED_EXT = new Set([
   'png','jpg','jpeg','svg',
   'doc','docx','pptx','xlsx',
 ]);
+
+const MTA_REPORT_EXT = new Set(['json','csv','html','xml','yaml','yml','txt']);
 
 const GITHUB_URL_RE = /^https?:\/\/github\.com\/[\w.\-]+\/[\w.\-]+(\/.*)?$/;
 
@@ -60,7 +64,10 @@ function formatSize(bytes: number): string {
 const Landing: React.FC = () => {
   const navigate = useNavigate();
 
-  // Form state
+  // Project mode
+  const [projectMode, setProjectMode] = useState<ProjectMode>('build');
+
+  // Form state (shared)
   const [vision, setVision] = useState('');
   const [files, setFiles] = useState<File[]>([]);
   const [githubUrls, setGithubUrls] = useState<string[]>([]);
@@ -70,6 +77,15 @@ const Landing: React.FC = () => {
   const [error, setError] = useState<string | null>(null);
   const [dragActive, setDragActive] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // Migration-specific state
+  const [migrationNotes, setMigrationNotes] = useState('');
+  const [mtaReportFiles, setMtaReportFiles] = useState<File[]>([]);
+  const mtaReportRef = useRef<HTMLInputElement>(null);
+  const [sourceArchive, setSourceArchive] = useState<File | null>(null);
+  const sourceArchiveRef = useRef<HTMLInputElement>(null);
+  const [mtaDragActive, setMtaDragActive] = useState(false);
+  const [srcDragActive, setSrcDragActive] = useState(false);
 
   // Backend selection
   const [backends, setBackends] = useState<BackendOption[]>([]);
@@ -138,6 +154,77 @@ const Landing: React.FC = () => {
     return parts.length >= 2 ? `${parts[parts.length - 2]}/${parts[parts.length - 1].split('/')[0]}` : url;
   };
 
+  /* ── MTA report file handling ──────────────────────────────────────────── */
+  const addMtaReport = useCallback((incoming: FileList | File[]) => {
+    const arr = Array.from(incoming);
+    const valid: File[] = [];
+    const rejected: string[] = [];
+    for (const f of arr) {
+      const ext = f.name.split('.').pop()?.toLowerCase() || '';
+      if (!MTA_REPORT_EXT.has(ext)) {
+        rejected.push(f.name);
+      } else if (f.size > 50 * 1024 * 1024) {
+        rejected.push(`${f.name} (>50 MB)`);
+      } else {
+        valid.push(f);
+      }
+    }
+    if (rejected.length > 0) {
+      setError(`Unsupported file(s) skipped: ${rejected.join(', ')}. Allowed: JSON, CSV, HTML, XML, YAML, TXT.`);
+    }
+    setMtaReportFiles((prev) => {
+      const names = new Set(prev.map((p) => p.name));
+      const deduped = valid.filter((f) => !names.has(f.name));
+      return [...prev, ...deduped].slice(0, 10);
+    });
+  }, []);
+
+  const removeMtaReport = (name: string) =>
+    setMtaReportFiles((prev) => prev.filter((f) => f.name !== name));
+
+  const handleMtaReportDrag = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setMtaDragActive(e.type === 'dragenter' || e.type === 'dragover');
+  }, []);
+
+  const handleMtaReportDrop = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setMtaDragActive(false);
+    if (e.dataTransfer.files?.length) addMtaReport(e.dataTransfer.files);
+  }, [addMtaReport]);
+
+  /* ── Source archive handling (migration mode — ZIP only) ───────────────── */
+  const handleSourceArchive = useCallback((fileList: FileList | null) => {
+    if (!fileList || fileList.length === 0) return;
+    const file = fileList[0];
+    const ext = file.name.split('.').pop()?.toLowerCase() || '';
+    if (ext !== 'zip') {
+      setError('Source code must be a .zip file. Please zip your project folder and upload it.');
+      return;
+    }
+    if (file.size > 100 * 1024 * 1024) {
+      setError('ZIP file must be under 100 MB');
+      return;
+    }
+    setSourceArchive(file);
+    setError(null);
+  }, []);
+
+  const handleSourceArchiveDrag = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setSrcDragActive(e.type === 'dragenter' || e.type === 'dragover');
+  }, []);
+
+  const handleSourceArchiveDrop = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setSrcDragActive(false);
+    handleSourceArchive(e.dataTransfer.files);
+  }, [handleSourceArchive]);
+
   /* ── Submit ─────────────────────────────────────────────────────────────── */
   const handleCreateProject = async () => {
     if (!vision.trim()) { setError('Please describe your project vision'); return; }
@@ -160,12 +247,111 @@ const Landing: React.FC = () => {
     }
   };
 
+  // Pre-submit readiness checks for migration mode
+  const migrationReady = {
+    hasReport: mtaReportFiles.length > 0,
+    hasSource: sourceArchive !== null || githubUrls.length > 0,
+  };
+  const canSubmitMigration = migrationReady.hasReport && migrationReady.hasSource && !creating;
+
+  const handleCreateMigrationProject = async () => {
+    // Double-check readiness — belt and suspenders
+    if (!migrationReady.hasReport) {
+      setError('Step 1 incomplete: Please upload at least one MTA report file (JSON, CSV, HTML, XML, YAML, or TXT).');
+      return;
+    }
+    if (!migrationReady.hasSource) {
+      setError('Step 2 incomplete: Please upload a ZIP of your legacy source code or add a GitHub repo URL.');
+      return;
+    }
+
+    // Verify source archive is still a valid File object (guards against stale state)
+    if (sourceArchive && !(sourceArchive instanceof File)) {
+      setError('Source file reference is invalid. Please re-select the ZIP file.');
+      setSourceArchive(null);
+      return;
+    }
+
+    setCreating(true);
+    setError(null);
+    try {
+      const reportNames = mtaReportFiles.map((f) => f.name).join(', ');
+      const srcName = sourceArchive ? sourceArchive.name : (githubUrls.length > 0 ? githubUrls.map(u => u.replace(/\/+$/, '').split('/').pop()).join(', ') : '');
+      const goalSnippet = migrationNotes ? ` — ${migrationNotes.slice(0, 80)}` : '';
+      const jobLabel = `[MTA] ${srcName}${goalSnippet}`;
+
+      // Log what we're sending for debugging
+      console.log('[Migration] Submitting:', {
+        reports: mtaReportFiles.map(f => `${f.name} (${f.size}b)`),
+        sourceArchive: sourceArchive ? `${sourceArchive.name} (${sourceArchive.size}b)` : 'none',
+        githubUrls,
+      });
+
+      // 1. Create migration job:
+      //    - source_archive → extracted into workspace root (preserves dir structure)
+      //    - documents (MTA reports) → workspace/docs/
+      //    - mode=migration → backend skips the build pipeline
+      const result = await createMigrationJob(
+        jobLabel,
+        sourceArchive,
+        mtaReportFiles,
+        githubUrls.length > 0 ? githubUrls : undefined,
+        selectedBackend,
+      );
+
+      console.log('[Migration] Job created:', result);
+
+      // Verify server actually processed the source code
+      if (sourceArchive && result.source_files === 0) {
+        setError(
+          `Warning: Source ZIP "${sourceArchive.name}" was uploaded but the server extracted 0 files. ` +
+          'Please verify the ZIP contains your source code (e.g. pom.xml, src/ directory). ' +
+          `Job ${result.job_id} was created — you can upload source code manually.`
+        );
+        // Don't return — let the user decide. The job is already created.
+      }
+
+      // Verify MTA reports were saved
+      if (result.documents === 0 && mtaReportFiles.length > 0) {
+        setError(
+          `Warning: ${mtaReportFiles.length} MTA report(s) were sent but the server saved 0. ` +
+          'The migration may not work correctly without the report.'
+        );
+      }
+
+      setSubmittedVision(`Migrate using ${reportNames}`);
+      setActiveJobId(result.job_id);
+
+      // 2. Auto-trigger migration — the analysis agent reads the report and infers the goal
+      setTimeout(async () => {
+        try {
+          await startMigration(
+            result.job_id,
+            'Analyse the uploaded MTA report and apply all migration changes',
+            migrationNotes || undefined,
+          );
+        } catch (migErr) {
+          console.error('Auto-trigger migration failed:', migErr);
+        }
+      }, 1500);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Unknown error';
+      setError(`Failed to create migration project: ${msg}. Please try again.`);
+      console.error('Error creating migration:', err);
+    } finally {
+      setCreating(false);
+    }
+  };
+
   const handleNewProject = () => {
     setActiveJobId(null);
     setSubmittedVision('');
     setVision('');
     setFiles([]);
     setGithubUrls([]);
+    setMigrationNotes('');
+    setMtaReportFiles([]);
+    setSourceArchive(null);
   };
 
   const examplePrompts = [
@@ -307,20 +493,48 @@ const Landing: React.FC = () => {
                   color: '#151515', lineHeight: 1.6,
                   borderTopLeftRadius: '4px',
                 }}>
-                  Got it! I'm assembling the crew and starting to build your project.
-                  You can see the real-time progress on the right panel.
-
-                  <div style={{
-                    marginTop: '0.75rem', padding: '0.75rem',
-                    background: 'white', borderRadius: '8px',
-                    border: '1px solid #E0E0E0', fontSize: '0.8125rem',
-                  }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                      <CubesIcon style={{ color: '#4A90E2' }} />
-                      <span style={{ fontWeight: 600 }}>6 AI Agents</span>
-                      <span style={{ color: '#6A6E73' }}>are working on your project</span>
-                    </div>
-                  </div>
+                  {projectMode === 'migration' ? (
+                    <>
+                      Got it! I'm analysing your MTA report and will apply migration changes file by file.
+                      Track progress on the right panel.
+                      <div style={{
+                        marginTop: '0.75rem', padding: '0.75rem',
+                        background: 'white', borderRadius: '8px',
+                        border: '1px solid #BEE1F4', fontSize: '0.8125rem',
+                      }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                          <ArrowRightIcon style={{ color: '#0066CC' }} />
+                          <span style={{ fontWeight: 600 }}>MTA Migration</span>
+                          <span style={{ color: '#6A6E73' }}>— analysing report &amp; applying changes</span>
+                        </div>
+                      </div>
+                      {activeJobId && (
+                        <div style={{ marginTop: '0.5rem' }}>
+                          <Button variant="link" size="sm"
+                            onClick={() => navigate(`/migration/${activeJobId}`)}
+                            style={{ fontSize: '0.8125rem', color: '#0066CC', padding: 0 }}>
+                            View migration details →
+                          </Button>
+                        </div>
+                      )}
+                    </>
+                  ) : (
+                    <>
+                      Got it! I'm assembling the crew and starting to build your project.
+                      You can see the real-time progress on the right panel.
+                      <div style={{
+                        marginTop: '0.75rem', padding: '0.75rem',
+                        background: 'white', borderRadius: '8px',
+                        border: '1px solid #E0E0E0', fontSize: '0.8125rem',
+                      }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                          <CubesIcon style={{ color: '#4A90E2' }} />
+                          <span style={{ fontWeight: 600 }}>6 AI Agents</span>
+                          <span style={{ color: '#6A6E73' }}>are working on your project</span>
+                        </div>
+                      </div>
+                    </>
+                  )}
                 </div>
               </div>
             </div>
@@ -424,166 +638,456 @@ const Landing: React.FC = () => {
             fontFamily: '"Red Hat Display", sans-serif',
             color: '#151515', marginBottom: '0.5rem', lineHeight: 1.15,
           }}>
-            Describe it.{' '}
-            <span style={{
-              background: 'linear-gradient(135deg, #EE0000, #CC0000)',
-              WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent',
-              backgroundClip: 'text',
-            }}>
-              We build it.
-            </span>
+            {projectMode === 'build' ? (
+              <>Describe it.{' '}
+                <span style={{
+                  background: 'linear-gradient(135deg, #EE0000, #CC0000)',
+                  WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent',
+                  backgroundClip: 'text',
+                }}>We build it.</span>
+              </>
+            ) : (
+              <>Upload.{' '}
+                <span style={{
+                  background: 'linear-gradient(135deg, #0066CC, #004080)',
+                  WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent',
+                  backgroundClip: 'text',
+                }}>We migrate it.</span>
+              </>
+            )}
           </h1>
-          <p style={{ fontSize: '0.9375rem', color: '#72767B', marginBottom: '1.25rem', lineHeight: 1.5 }}>
-            From idea to production-ready code, powered by 6 AI agents.
+          <p style={{ fontSize: '0.9375rem', color: '#72767B', marginBottom: '1rem', lineHeight: 1.5 }}>
+            {projectMode === 'build'
+              ? 'From idea to production-ready code, powered by 6 AI agents.'
+              : 'Upload your MTA report and legacy code — AI applies every change.'}
           </p>
+
+          {/* ── Mode toggle ──────────────────────────────────────────────── */}
+          <div style={{
+            display: 'inline-flex', borderRadius: '10px', overflow: 'hidden',
+            border: '1px solid #D2D2D2', marginBottom: '1.25rem', alignSelf: 'flex-start',
+          }}>
+            {([
+              { key: 'build' as ProjectMode, label: 'Build New Project', icon: <RocketIcon style={{ fontSize: '0.75rem' }} /> },
+              { key: 'migration' as ProjectMode, label: 'MTA Migration', icon: <ArrowRightIcon style={{ fontSize: '0.75rem' }} /> },
+            ]).map((m) => (
+              <button
+                key={m.key}
+                onClick={() => { setProjectMode(m.key); setError(null); }}
+                style={{
+                  display: 'flex', alignItems: 'center', gap: '0.35rem',
+                  padding: '0.45rem 1rem', border: 'none', cursor: 'pointer',
+                  fontSize: '0.8125rem', fontWeight: 600,
+                  fontFamily: '"Red Hat Text", sans-serif',
+                  background: projectMode === m.key
+                    ? (m.key === 'build' ? '#EE0000' : '#0066CC')
+                    : 'white',
+                  color: projectMode === m.key ? 'white' : '#72767B',
+                  transition: 'all 0.2s',
+                }}
+              >
+                {m.icon} {m.label}
+              </button>
+            ))}
+          </div>
 
           {error && (
             <Alert variant="danger" title={error} style={{ marginBottom: '1rem' }} isInline isPlain
               actionClose={<Button variant="plain" onClick={() => setError(null)}>×</Button>} />
           )}
 
-          {/* Input card */}
-          <div style={{
-            background: 'white', borderRadius: '16px', padding: '1.25rem',
-            boxShadow: '0 2px 16px rgba(0,0,0,0.06)', border: '1px solid #E7E7E7',
-          }}>
-            <TextArea
-              value={vision}
-              onChange={(_e, v) => setVision(v)}
-              placeholder="Describe your project vision..."
-              style={{
-                minHeight: '120px', fontSize: '0.9375rem',
-                fontFamily: '"Red Hat Text", sans-serif',
-                border: 'none', padding: '0', resize: 'none',
-                lineHeight: 1.6, color: '#151515',
-              }}
-              aria-label="Project description"
-              onKeyDown={(e) => {
-                if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) handleCreateProject();
-              }}
-            />
+          {/* ═══════════════════════════════════════════════════════════════ */}
+          {/* BUILD NEW PROJECT MODE                                        */}
+          {/* ═══════════════════════════════════════════════════════════════ */}
+          {projectMode === 'build' && (
+            <>
+              {/* Input card */}
+              <div style={{
+                background: 'white', borderRadius: '16px', padding: '1.25rem',
+                boxShadow: '0 2px 16px rgba(0,0,0,0.06)', border: '1px solid #E7E7E7',
+              }}>
+                <TextArea
+                  value={vision}
+                  onChange={(_e, v) => setVision(v)}
+                  placeholder="Describe your project vision..."
+                  style={{
+                    minHeight: '120px', fontSize: '0.9375rem',
+                    fontFamily: '"Red Hat Text", sans-serif',
+                    border: 'none', padding: '0', resize: 'none',
+                    lineHeight: 1.6, color: '#151515',
+                  }}
+                  aria-label="Project description"
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) handleCreateProject();
+                  }}
+                />
 
-            <div style={{
-              display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-              marginTop: '0.75rem', paddingTop: '0.75rem',
-              borderTop: '1px solid #F0F0F0',
-            }}>
-              <Select
-                toggle={(toggleRef) => (
-                  <MenuToggle ref={toggleRef}
-                    onClick={() => setBackendSelectOpen(!backendSelectOpen)}
-                    isExpanded={backendSelectOpen}
-                    style={{ fontSize: '0.8125rem', padding: '0.3rem 0.75rem', minWidth: '150px', border: '1px solid #D2D2D2', borderRadius: '8px' }}
+                <div style={{
+                  display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                  marginTop: '0.75rem', paddingTop: '0.75rem',
+                  borderTop: '1px solid #F0F0F0',
+                }}>
+                  <Select
+                    toggle={(toggleRef) => (
+                      <MenuToggle ref={toggleRef}
+                        onClick={() => setBackendSelectOpen(!backendSelectOpen)}
+                        isExpanded={backendSelectOpen}
+                        style={{ fontSize: '0.8125rem', padding: '0.3rem 0.75rem', minWidth: '150px', border: '1px solid #D2D2D2', borderRadius: '8px' }}
+                      >
+                        {backends.find((b) => b.name === selectedBackend)?.display_name || 'OPL AI Team'}
+                      </MenuToggle>
+                    )}
+                    onSelect={(_e, s) => { setSelectedBackend(s as string); setBackendSelectOpen(false); }}
+                    selected={selectedBackend}
+                    isOpen={backendSelectOpen}
+                    onOpenChange={setBackendSelectOpen}
+                    aria-label="Select agentic system"
                   >
-                    {backends.find((b) => b.name === selectedBackend)?.display_name || 'OPL AI Team'}
-                  </MenuToggle>
-                )}
-                onSelect={(_e, s) => { setSelectedBackend(s as string); setBackendSelectOpen(false); }}
-                selected={selectedBackend}
-                isOpen={backendSelectOpen}
-                onOpenChange={setBackendSelectOpen}
-                aria-label="Select agentic system"
-              >
-                <SelectList>
-                  {backends.map((b) => (
-                    <SelectOption key={b.name} value={b.name} isDisabled={!b.available}>
-                      {b.display_name}{!b.available && <span style={{ color: '#8A8D90', fontSize: '0.7rem', marginLeft: '0.4rem' }}>(N/A)</span>}
-                    </SelectOption>
-                  ))}
-                </SelectList>
-              </Select>
-              <Button variant="primary" onClick={handleCreateProject}
-                isLoading={creating} isDisabled={!vision.trim() || creating}
-                style={{
-                  backgroundColor: '#EE0000', border: 'none', fontWeight: 600,
-                  padding: '0.5rem 1.75rem', fontSize: '0.875rem', borderRadius: '10px', color: 'white',
-                }}
-                icon={creating ? <Spinner size="sm" /> : <RocketIcon />} iconPosition="end">
-                {creating ? 'Creating...' : 'Start Building'}
-              </Button>
-            </div>
-          </div>
-
-          {/* Example prompt pills */}
-          <div style={{ marginTop: '0.875rem', display: 'flex', flexWrap: 'wrap', gap: '0.4rem' }}>
-            {examplePrompts.map((p) => (
-              <button key={p} onClick={() => setVision(p)} style={{
-                background: 'rgba(238,0,0,0.04)', border: '1px solid rgba(238,0,0,0.12)',
-                borderRadius: '999px', padding: '0.3rem 0.75rem',
-                fontSize: '0.75rem', color: '#CC0000', cursor: 'pointer',
-                fontFamily: '"Red Hat Text", sans-serif', transition: 'all 0.15s', lineHeight: 1.4,
-              }}
-              onMouseOver={(e) => { e.currentTarget.style.background = 'rgba(238,0,0,0.10)'; }}
-              onMouseOut={(e) => { e.currentTarget.style.background = 'rgba(238,0,0,0.04)'; }}
-              >
-                {p}
-              </button>
-            ))}
-          </div>
-
-          {/* Context attachments — compact */}
-          <details style={{
-            background: 'white', borderRadius: '10px', border: '1px solid #E7E7E7',
-            marginTop: '1rem',
-          }}>
-            <summary style={{
-              padding: '0.625rem 1rem', cursor: 'pointer',
-              fontSize: '0.8125rem', fontWeight: 600, color: '#151515',
-              listStyle: 'none', display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-            }}>
-              <span>+ Add Context (GitHub repos, files)</span>
-              {contextCount > 0 && (
-                <span style={{ background: '#EE0000', color: 'white', borderRadius: '12px', padding: '0.1rem 0.45rem', fontSize: '0.7rem', fontWeight: 600 }}>{contextCount}</span>
-              )}
-            </summary>
-            <div style={{ padding: '0 1rem 1rem' }}>
-              <div style={{ display: 'flex', gap: '0.4rem', marginBottom: '0.5rem' }}>
-                <div style={{ flex: 1, display: 'flex', alignItems: 'center', gap: '0.4rem', background: '#FAFAFA', border: '1px solid #D2D2D2', borderRadius: '8px', padding: '0.1rem 0.6rem' }}>
-                  <GithubIcon style={{ color: '#151515', fontSize: '0.8rem', flexShrink: 0 }} />
-                  <TextInput value={githubInput} onChange={(_e, v) => { setGithubInput(v); setGithubError(null); }}
-                    placeholder="https://github.com/user/repo" aria-label="GitHub URL"
-                    style={{ border: 'none', background: 'transparent', fontSize: '0.8125rem', padding: '0.35rem 0' }}
-                    onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); addGithubUrl(); } }} />
+                    <SelectList>
+                      {backends.map((b) => (
+                        <SelectOption key={b.name} value={b.name} isDisabled={!b.available}>
+                          {b.display_name}{!b.available && <span style={{ color: '#8A8D90', fontSize: '0.7rem', marginLeft: '0.4rem' }}>(N/A)</span>}
+                        </SelectOption>
+                      ))}
+                    </SelectList>
+                  </Select>
+                  <Button variant="primary" onClick={handleCreateProject}
+                    isLoading={creating} isDisabled={!vision.trim() || creating}
+                    style={{
+                      backgroundColor: '#EE0000', border: 'none', fontWeight: 600,
+                      padding: '0.5rem 1.75rem', fontSize: '0.875rem', borderRadius: '10px', color: 'white',
+                    }}
+                    icon={creating ? <Spinner size="sm" /> : <RocketIcon />} iconPosition="end">
+                    {creating ? 'Creating...' : 'Start Building'}
+                  </Button>
                 </div>
-                <Button variant="secondary" size="sm" onClick={addGithubUrl} isDisabled={!githubInput.trim()} icon={<PlusCircleIcon />}>Add</Button>
               </div>
-              {githubError && <span style={{ fontSize: '0.7rem', color: '#C9190B', display: 'block', marginBottom: '0.4rem' }}>{githubError}</span>}
-              {githubUrls.length > 0 && (
-                <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.35rem', marginBottom: '0.5rem' }}>
-                  {githubUrls.map((url) => (
-                    <span key={url} style={{ display: 'inline-flex', alignItems: 'center', gap: '0.3rem', background: '#F0F7FF', border: '1px solid #BEE1F4', borderRadius: '6px', padding: '0.2rem 0.5rem', fontSize: '0.75rem' }}>
-                      <GithubIcon style={{ fontSize: '0.7rem', color: '#0066CC' }} />{extractRepoName(url)}
-                      <button onClick={() => removeGithubUrl(url)} style={{ background: 'none', border: 'none', cursor: 'pointer', padding: '1px', display: 'flex', color: '#6A6E73' }}><TimesIcon style={{ fontSize: '0.65rem' }} /></button>
-                    </span>
-                  ))}
-                </div>
-              )}
-              <div onDragEnter={handleDrag} onDragLeave={handleDrag} onDragOver={handleDrag} onDrop={handleDrop}
-                onClick={() => fileInputRef.current?.click()}
-                style={{ padding: '0.6rem', border: `2px dashed ${dragActive ? '#EE0000' : '#D2D2D2'}`, borderRadius: '8px', background: dragActive ? 'rgba(238,0,0,0.02)' : '#FAFAFA', cursor: 'pointer', textAlign: 'center' }}>
-                <input ref={fileInputRef} type="file" multiple style={{ display: 'none' }}
-                  accept={Array.from(ALLOWED_EXT).map((e) => `.${e}`).join(',')}
-                  onChange={(e) => { if (e.target.files) addFiles(e.target.files); e.target.value = ''; }} />
-                <UploadIcon style={{ marginRight: '0.4rem', color: '#72767B', fontSize: '0.8rem' }} />
-                <span style={{ fontSize: '0.8125rem', color: '#72767B' }}>Drop files or click</span>
-              </div>
-              {files.length > 0 && (
-                <div style={{ marginTop: '0.5rem', display: 'flex', flexWrap: 'wrap', gap: '0.35rem' }}>
-                  {files.map((f) => (
-                    <span key={f.name} style={{ display: 'inline-flex', alignItems: 'center', gap: '0.3rem', background: '#F5F5F5', borderRadius: '6px', padding: '0.2rem 0.5rem', fontSize: '0.75rem', border: '1px solid #E7E7E7' }}>
-                      {getFileIcon(f.name)}{f.name} <span style={{ color: '#8A8D90', fontSize: '0.65rem' }}>{formatSize(f.size)}</span>
-                      <button onClick={(e) => { e.stopPropagation(); removeFile(f.name); }} style={{ background: 'none', border: 'none', cursor: 'pointer', padding: '1px', display: 'flex', color: '#6A6E73' }}><TimesIcon style={{ fontSize: '0.65rem' }} /></button>
-                    </span>
-                  ))}
-                </div>
-              )}
-            </div>
-          </details>
 
-          <div style={{ marginTop: '0.75rem', fontSize: '0.75rem', color: '#8A8D90' }}>
-            {contextCount > 0 ? `${contextCount} reference${contextCount > 1 ? 's' : ''} attached  ·  ` : ''}
-            ⌘+Enter to submit
-          </div>
+              {/* Example prompt pills */}
+              <div style={{ marginTop: '0.875rem', display: 'flex', flexWrap: 'wrap', gap: '0.4rem' }}>
+                {examplePrompts.map((p) => (
+                  <button key={p} onClick={() => setVision(p)} style={{
+                    background: 'rgba(238,0,0,0.04)', border: '1px solid rgba(238,0,0,0.12)',
+                    borderRadius: '999px', padding: '0.3rem 0.75rem',
+                    fontSize: '0.75rem', color: '#CC0000', cursor: 'pointer',
+                    fontFamily: '"Red Hat Text", sans-serif', transition: 'all 0.15s', lineHeight: 1.4,
+                  }}
+                  onMouseOver={(e) => { e.currentTarget.style.background = 'rgba(238,0,0,0.10)'; }}
+                  onMouseOut={(e) => { e.currentTarget.style.background = 'rgba(238,0,0,0.04)'; }}
+                  >
+                    {p}
+                  </button>
+                ))}
+              </div>
+
+              {/* Context attachments — compact */}
+              <details style={{
+                background: 'white', borderRadius: '10px', border: '1px solid #E7E7E7',
+                marginTop: '1rem',
+              }}>
+                <summary style={{
+                  padding: '0.625rem 1rem', cursor: 'pointer',
+                  fontSize: '0.8125rem', fontWeight: 600, color: '#151515',
+                  listStyle: 'none', display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                }}>
+                  <span>+ Add Context (GitHub repos, files)</span>
+                  {contextCount > 0 && (
+                    <span style={{ background: '#EE0000', color: 'white', borderRadius: '12px', padding: '0.1rem 0.45rem', fontSize: '0.7rem', fontWeight: 600 }}>{contextCount}</span>
+                  )}
+                </summary>
+                <div style={{ padding: '0 1rem 1rem' }}>
+                  <div style={{ display: 'flex', gap: '0.4rem', marginBottom: '0.5rem' }}>
+                    <div style={{ flex: 1, display: 'flex', alignItems: 'center', gap: '0.4rem', background: '#FAFAFA', border: '1px solid #D2D2D2', borderRadius: '8px', padding: '0.1rem 0.6rem' }}>
+                      <GithubIcon style={{ color: '#151515', fontSize: '0.8rem', flexShrink: 0 }} />
+                      <TextInput value={githubInput} onChange={(_e, v) => { setGithubInput(v); setGithubError(null); }}
+                        placeholder="https://github.com/user/repo" aria-label="GitHub URL"
+                        style={{ border: 'none', background: 'transparent', fontSize: '0.8125rem', padding: '0.35rem 0' }}
+                        onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); addGithubUrl(); } }} />
+                    </div>
+                    <Button variant="secondary" size="sm" onClick={addGithubUrl} isDisabled={!githubInput.trim()} icon={<PlusCircleIcon />}>Add</Button>
+                  </div>
+                  {githubError && <span style={{ fontSize: '0.7rem', color: '#C9190B', display: 'block', marginBottom: '0.4rem' }}>{githubError}</span>}
+                  {githubUrls.length > 0 && (
+                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.35rem', marginBottom: '0.5rem' }}>
+                      {githubUrls.map((url) => (
+                        <span key={url} style={{ display: 'inline-flex', alignItems: 'center', gap: '0.3rem', background: '#F0F7FF', border: '1px solid #BEE1F4', borderRadius: '6px', padding: '0.2rem 0.5rem', fontSize: '0.75rem' }}>
+                          <GithubIcon style={{ fontSize: '0.7rem', color: '#0066CC' }} />{extractRepoName(url)}
+                          <button onClick={() => removeGithubUrl(url)} style={{ background: 'none', border: 'none', cursor: 'pointer', padding: '1px', display: 'flex', color: '#6A6E73' }}><TimesIcon style={{ fontSize: '0.65rem' }} /></button>
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                  <div onDragEnter={handleDrag} onDragLeave={handleDrag} onDragOver={handleDrag} onDrop={handleDrop}
+                    onClick={() => fileInputRef.current?.click()}
+                    style={{ padding: '0.6rem', border: `2px dashed ${dragActive ? '#EE0000' : '#D2D2D2'}`, borderRadius: '8px', background: dragActive ? 'rgba(238,0,0,0.02)' : '#FAFAFA', cursor: 'pointer', textAlign: 'center' }}>
+                    <input ref={fileInputRef} type="file" multiple style={{ display: 'none' }}
+                      accept={Array.from(ALLOWED_EXT).map((e) => `.${e}`).join(',')}
+                      onChange={(e) => { if (e.target.files) addFiles(e.target.files); e.target.value = ''; }} />
+                    <UploadIcon style={{ marginRight: '0.4rem', color: '#72767B', fontSize: '0.8rem' }} />
+                    <span style={{ fontSize: '0.8125rem', color: '#72767B' }}>Drop files or click</span>
+                  </div>
+                  {files.length > 0 && (
+                    <div style={{ marginTop: '0.5rem', display: 'flex', flexWrap: 'wrap', gap: '0.35rem' }}>
+                      {files.map((f) => (
+                        <span key={f.name} style={{ display: 'inline-flex', alignItems: 'center', gap: '0.3rem', background: '#F5F5F5', borderRadius: '6px', padding: '0.2rem 0.5rem', fontSize: '0.75rem', border: '1px solid #E7E7E7' }}>
+                          {getFileIcon(f.name)}{f.name} <span style={{ color: '#8A8D90', fontSize: '0.65rem' }}>{formatSize(f.size)}</span>
+                          <button onClick={(e) => { e.stopPropagation(); removeFile(f.name); }} style={{ background: 'none', border: 'none', cursor: 'pointer', padding: '1px', display: 'flex', color: '#6A6E73' }}><TimesIcon style={{ fontSize: '0.65rem' }} /></button>
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </details>
+
+              <div style={{ marginTop: '0.75rem', fontSize: '0.75rem', color: '#8A8D90' }}>
+                {contextCount > 0 ? `${contextCount} reference${contextCount > 1 ? 's' : ''} attached  ·  ` : ''}
+                ⌘+Enter to submit
+              </div>
+            </>
+          )}
+
+          {/* ═══════════════════════════════════════════════════════════════ */}
+          {/* MTA MIGRATION MODE                                            */}
+          {/* ═══════════════════════════════════════════════════════════════ */}
+          {projectMode === 'migration' && (
+            <>
+              <div style={{
+                background: 'white', borderRadius: '16px', padding: '1.25rem',
+                boxShadow: '0 2px 16px rgba(0,0,0,0.06)', border: '1px solid #E7E7E7',
+                display: 'flex', flexDirection: 'column', gap: '1rem',
+              }}>
+                {/* Step 1: MTA Report upload */}
+                <div>
+                  <label style={{ fontWeight: 600, fontSize: '0.8125rem', color: '#151515', display: 'block', marginBottom: '0.3rem' }}>
+                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.35rem' }}>
+                      <Label color={migrationReady.hasReport ? 'green' : 'blue'} isCompact>1</Label> MTA Report
+                      {migrationReady.hasReport
+                        ? <span style={{ color: '#3E8635', fontSize: '0.75rem', fontWeight: 400 }}>Ready</span>
+                        : <span style={{ color: '#C9190B', fontSize: '0.75rem', fontWeight: 400 }}>Required</span>
+                      }
+                    </span>
+                  </label>
+                  <p style={{ fontSize: '0.75rem', color: '#72767B', marginBottom: '0.4rem' }}>
+                    The AI reads the report to determine what to migrate — no manual goal needed.
+                  </p>
+                  <div
+                    onDragEnter={handleMtaReportDrag} onDragLeave={handleMtaReportDrag} onDragOver={handleMtaReportDrag}
+                    onDrop={handleMtaReportDrop}
+                    onClick={() => mtaReportRef.current?.click()}
+                    style={{
+                      padding: '0.6rem', border: `2px dashed ${mtaDragActive ? '#0066CC' : '#BEE1F4'}`, borderRadius: '8px',
+                      background: mtaDragActive ? 'rgba(0,102,204,0.04)' : '#F0F7FF', cursor: 'pointer', textAlign: 'center',
+                      transition: 'border-color 0.15s, background 0.15s',
+                    }}
+                  >
+                    <input ref={mtaReportRef} type="file" multiple style={{ display: 'none' }}
+                      accept=".json,.csv,.html,.xml,.yaml,.yml,.txt"
+                      onChange={(e) => { if (e.target.files) addMtaReport(e.target.files); e.target.value = ''; }} />
+                    <UploadIcon style={{ marginRight: '0.4rem', color: '#0066CC', fontSize: '0.8rem' }} />
+                    <span style={{ fontSize: '0.8125rem', color: '#0066CC' }}>
+                      {mtaReportFiles.length > 0 ? 'Add more report files' : 'Drop MTA report files here or click to upload'}
+                    </span>
+                    <span style={{ display: 'block', fontSize: '0.7rem', color: '#8A8D90', marginTop: '0.15rem' }}>
+                      Supported: JSON, CSV, HTML, XML, YAML, TXT (max 50 MB each)
+                    </span>
+                  </div>
+                  {mtaReportFiles.length > 0 && (
+                    <div style={{ marginTop: '0.4rem', display: 'flex', flexWrap: 'wrap', gap: '0.35rem' }}>
+                      {mtaReportFiles.map((f) => (
+                        <span key={f.name} style={{
+                          display: 'inline-flex', alignItems: 'center', gap: '0.3rem',
+                          background: '#F0F7FF', border: '1px solid #BEE1F4', borderRadius: '6px',
+                          padding: '0.2rem 0.5rem', fontSize: '0.75rem', color: '#0066CC',
+                        }}>
+                          <FileAltIcon style={{ fontSize: '0.7rem' }} />{f.name}
+                          <span style={{ color: '#8A8D90', fontSize: '0.65rem' }}>{formatSize(f.size)}</span>
+                          <button onClick={(e) => { e.stopPropagation(); removeMtaReport(f.name); }} style={{ background: 'none', border: 'none', cursor: 'pointer', padding: '1px', display: 'flex', color: '#6A6E73' }}>
+                            <TimesIcon style={{ fontSize: '0.65rem' }} />
+                          </button>
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                {/* Step 2: Legacy source code (ZIP upload) */}
+                <div>
+                  <label style={{ fontWeight: 600, fontSize: '0.8125rem', color: '#151515', display: 'block', marginBottom: '0.3rem' }}>
+                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.35rem' }}>
+                      <Label color={migrationReady.hasSource ? 'green' : 'blue'} isCompact>2</Label> Legacy Source Code
+                      {migrationReady.hasSource
+                        ? <span style={{ color: '#3E8635', fontSize: '0.75rem', fontWeight: 400 }}>Ready</span>
+                        : <span style={{ color: '#C9190B', fontSize: '0.75rem', fontWeight: 400 }}>Required</span>
+                      }
+                    </span>
+                  </label>
+                  <p style={{ fontSize: '0.75rem', color: '#72767B', marginBottom: '0.4rem' }}>
+                    Upload a ZIP of your project (directory structure is preserved) or paste a GitHub URL.
+                  </p>
+                  {/* ZIP upload */}
+                  <div
+                    onDragEnter={handleSourceArchiveDrag} onDragLeave={handleSourceArchiveDrag} onDragOver={handleSourceArchiveDrag}
+                    onDrop={handleSourceArchiveDrop}
+                    onClick={() => sourceArchiveRef.current?.click()}
+                    style={{
+                      padding: '0.75rem', border: `2px dashed ${srcDragActive ? '#0066CC' : (sourceArchive ? '#3E8635' : '#D2D2D2')}`,
+                      borderRadius: '8px', background: srcDragActive ? 'rgba(0,102,204,0.02)' : (sourceArchive ? 'rgba(62,134,53,0.02)' : '#FAFAFA'),
+                      cursor: 'pointer', textAlign: 'center', marginBottom: '0.5rem',
+                      transition: 'border-color 0.15s, background 0.15s',
+                    }}
+                  >
+                    <input ref={sourceArchiveRef} type="file" style={{ display: 'none' }}
+                      accept=".zip"
+                      onChange={(e) => { handleSourceArchive(e.target.files); e.target.value = ''; }} />
+                    <UploadIcon style={{ marginRight: '0.4rem', color: sourceArchive ? '#3E8635' : '#0066CC', fontSize: '0.85rem' }} />
+                    <span style={{ fontSize: '0.8125rem', color: sourceArchive ? '#3E8635' : '#0066CC', fontWeight: 500 }}>
+                      {sourceArchive ? 'Replace ZIP' : 'Drop project ZIP here or click to upload'}
+                    </span>
+                    <span style={{ display: 'block', fontSize: '0.7rem', color: '#8A8D90', marginTop: '0.25rem' }}>
+                      .zip only — max 100 MB (e.g. legacy-inventory-system.zip)
+                    </span>
+                  </div>
+                  {sourceArchive && (
+                    <div style={{
+                      display: 'inline-flex', alignItems: 'center', gap: '0.4rem',
+                      background: 'rgba(62,134,53,0.06)', border: '1px solid rgba(62,134,53,0.3)', borderRadius: '8px',
+                      padding: '0.35rem 0.6rem', marginBottom: '0.5rem',
+                    }}>
+                      <FileCodeIcon style={{ color: '#3E8635', fontSize: '0.85rem' }} />
+                      <span style={{ fontSize: '0.8125rem', fontWeight: 500, color: '#151515' }}>{sourceArchive.name}</span>
+                      <span style={{ fontSize: '0.7rem', color: '#8A8D90' }}>{formatSize(sourceArchive.size)}</span>
+                      <button onClick={() => setSourceArchive(null)} style={{
+                        background: 'none', border: 'none', cursor: 'pointer', padding: '2px',
+                        display: 'flex', color: '#6A6E73',
+                      }}>
+                        <TimesIcon style={{ fontSize: '0.65rem' }} />
+                      </button>
+                    </div>
+                  )}
+                  {/* Or: GitHub input (alternative to ZIP) */}
+                  <div style={{
+                    display: 'flex', alignItems: 'center', gap: '0.5rem',
+                    margin: '0.25rem 0', fontSize: '0.75rem', color: '#8A8D90',
+                  }}>
+                    <div style={{ flex: 1, height: '1px', background: '#E7E7E7' }} />
+                    <span>or add a GitHub repo</span>
+                    <div style={{ flex: 1, height: '1px', background: '#E7E7E7' }} />
+                  </div>
+                  <div style={{ display: 'flex', gap: '0.4rem' }}>
+                    <div style={{ flex: 1, display: 'flex', alignItems: 'center', gap: '0.4rem', background: '#FAFAFA', border: '1px solid #D2D2D2', borderRadius: '8px', padding: '0.1rem 0.6rem' }}>
+                      <GithubIcon style={{ color: '#151515', fontSize: '0.8rem', flexShrink: 0 }} />
+                      <TextInput value={githubInput} onChange={(_e, v) => { setGithubInput(v); setGithubError(null); }}
+                        placeholder="https://github.com/user/repo" aria-label="GitHub URL"
+                        style={{ border: 'none', background: 'transparent', fontSize: '0.8125rem', padding: '0.35rem 0' }}
+                        onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); addGithubUrl(); } }} />
+                    </div>
+                    <Button variant="secondary" size="sm" onClick={addGithubUrl} isDisabled={!githubInput.trim()} icon={<PlusCircleIcon />}>Add</Button>
+                  </div>
+                  {githubError && <span style={{ fontSize: '0.7rem', color: '#C9190B', display: 'block', marginTop: '0.3rem' }}>{githubError}</span>}
+                  {githubUrls.length > 0 && (
+                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.35rem', marginTop: '0.4rem' }}>
+                      {githubUrls.map((url) => (
+                        <span key={url} style={{ display: 'inline-flex', alignItems: 'center', gap: '0.3rem', background: '#F0F7FF', border: '1px solid #BEE1F4', borderRadius: '6px', padding: '0.2rem 0.5rem', fontSize: '0.75rem' }}>
+                          <GithubIcon style={{ fontSize: '0.7rem', color: '#0066CC' }} />{extractRepoName(url)}
+                          <button onClick={() => removeGithubUrl(url)} style={{ background: 'none', border: 'none', cursor: 'pointer', padding: '1px', display: 'flex', color: '#6A6E73' }}><TimesIcon style={{ fontSize: '0.65rem' }} /></button>
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                {/* Step 3 (optional): Migration notes */}
+                <div>
+                  <label style={{ fontWeight: 600, fontSize: '0.8125rem', color: '#151515', display: 'block', marginBottom: '0.3rem' }}>
+                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.35rem' }}>
+                      <Label color="grey" isCompact>3</Label> Instructions (optional)
+                    </span>
+                  </label>
+                  <TextArea
+                    value={migrationNotes}
+                    onChange={(_e, v) => setMigrationNotes(v)}
+                    placeholder="e.g., Skip files under src/auth/, preserve custom logging, focus on mandatory issues only..."
+                    rows={2}
+                    style={{ fontSize: '0.8125rem', fontFamily: '"Red Hat Text", sans-serif' }}
+                    aria-label="Migration notes"
+                  />
+                </div>
+
+                {/* Pre-submit readiness checklist + submit */}
+                <div style={{
+                  paddingTop: '0.75rem', borderTop: '1px solid #F0F0F0',
+                }}>
+                  {/* Readiness indicators */}
+                  <div style={{ display: 'flex', gap: '1rem', marginBottom: '0.75rem', fontSize: '0.75rem' }}>
+                    <span style={{
+                      display: 'inline-flex', alignItems: 'center', gap: '0.3rem',
+                      color: migrationReady.hasReport ? '#3E8635' : '#C9190B',
+                    }}>
+                      <span style={{
+                        width: '8px', height: '8px', borderRadius: '50%', display: 'inline-block',
+                        background: migrationReady.hasReport ? '#3E8635' : '#C9190B',
+                      }} />
+                      {migrationReady.hasReport
+                        ? `${mtaReportFiles.length} report${mtaReportFiles.length !== 1 ? 's' : ''} ready`
+                        : 'MTA report missing'}
+                    </span>
+                    <span style={{
+                      display: 'inline-flex', alignItems: 'center', gap: '0.3rem',
+                      color: migrationReady.hasSource ? '#3E8635' : '#C9190B',
+                    }}>
+                      <span style={{
+                        width: '8px', height: '8px', borderRadius: '50%', display: 'inline-block',
+                        background: migrationReady.hasSource ? '#3E8635' : '#C9190B',
+                      }} />
+                      {sourceArchive
+                        ? sourceArchive.name
+                        : githubUrls.length > 0
+                          ? `${githubUrls.length} repo${githubUrls.length !== 1 ? 's' : ''}`
+                          : 'Source code missing'}
+                    </span>
+                  </div>
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                    <Select
+                      toggle={(toggleRef) => (
+                        <MenuToggle ref={toggleRef}
+                          onClick={() => setBackendSelectOpen(!backendSelectOpen)}
+                          isExpanded={backendSelectOpen}
+                          style={{ fontSize: '0.8125rem', padding: '0.3rem 0.75rem', minWidth: '150px', border: '1px solid #D2D2D2', borderRadius: '8px' }}
+                        >
+                          {backends.find((b) => b.name === selectedBackend)?.display_name || 'OPL AI Team'}
+                        </MenuToggle>
+                      )}
+                      onSelect={(_e, s) => { setSelectedBackend(s as string); setBackendSelectOpen(false); }}
+                      selected={selectedBackend}
+                      isOpen={backendSelectOpen}
+                      onOpenChange={setBackendSelectOpen}
+                      aria-label="Select agentic system"
+                    >
+                      <SelectList>
+                        {backends.map((b) => (
+                          <SelectOption key={b.name} value={b.name} isDisabled={!b.available}>
+                            {b.display_name}{!b.available && <span style={{ color: '#8A8D90', fontSize: '0.7rem', marginLeft: '0.4rem' }}>(N/A)</span>}
+                          </SelectOption>
+                        ))}
+                      </SelectList>
+                    </Select>
+                    <Button variant="primary" onClick={handleCreateMigrationProject}
+                      isLoading={creating}
+                      isDisabled={!canSubmitMigration}
+                      style={{
+                        backgroundColor: canSubmitMigration ? '#0066CC' : '#D2D2D2',
+                        border: 'none', fontWeight: 600,
+                        padding: '0.5rem 1.75rem', fontSize: '0.875rem', borderRadius: '10px', color: 'white',
+                        transition: 'background-color 0.2s',
+                      }}
+                      icon={creating ? <Spinner size="sm" /> : <ArrowRightIcon />} iconPosition="end">
+                      {creating ? 'Uploading & Starting...' : 'Start Migration'}
+                    </Button>
+                  </div>
+                </div>
+              </div>
+            </>
+          )}
         </div>
       </div>
 
@@ -617,7 +1121,8 @@ const Landing: React.FC = () => {
             { icon: <RocketIcon />,     gradient: 'linear-gradient(135deg, #EE0000, #CC0000)', title: 'Lightning Fast',     desc: 'Idea to prototype in minutes with real-time tracking.' },
             { icon: <LightbulbIcon />,  gradient: 'linear-gradient(135deg, #F59E0B, #D97706)', title: 'Prompt-to-Refine',   desc: 'Describe edits in English — add, delete, restructure.' },
             { icon: <GithubIcon />,     gradient: 'linear-gradient(135deg, #6EE7B7, #10B981)', title: 'Context-Aware',      desc: 'Attach repos & docs — no hallucinated APIs.' },
-            { icon: <ArrowRightIcon />, gradient: 'linear-gradient(135deg, #38BDF8, #0EA5E9)', title: 'Pluggable LLMs',     desc: 'Red Hat MaaS, OpenRouter, Ollama — swap from the UI.' },
+            { icon: <ArrowRightIcon />, gradient: 'linear-gradient(135deg, #0066CC, #004080)', title: 'MTA Migration',      desc: 'Upload an MTA report — AI migrates every file for you.' },
+            { icon: <CodeIcon />,       gradient: 'linear-gradient(135deg, #38BDF8, #0EA5E9)', title: 'Pluggable LLMs',     desc: 'Red Hat MaaS, OpenRouter, Ollama — swap from the UI.' },
           ].map((c, i) => (
             <div
               key={c.title}

@@ -142,3 +142,39 @@ python3 -c "import sys; sys.path.insert(0, 'agent'); sys.path.insert(0, 'agent/s
 ```
 
 All verifications passing ✅
+
+---
+
+## Feature: MTA Report-Driven Code Migration
+
+### Overview
+Two-phase AI pipeline that reads an MTA (Migration Toolkit for Applications) report
+and automatically applies code changes with 4-tier context injection.
+
+### New Files
+- `crew_studio/migration/__init__.py` — Package init
+- `crew_studio/migration/blueprint.py` — Flask API endpoints (POST /migrate, GET /migration, GET /migration/plan)
+- `crew_studio/migration/runner.py` — Two-phase orchestration (analysis → execution)
+- `crew_studio/migration/utils.py` — git_snapshot, migration rules loader
+- `agent/src/llamaindex_crew/agents/migration_agent.py` — MigrationAnalysisAgent + MigrationExecutionAgent
+- `agent/src/ai_software_dev_crew/prompts/migration/analyze_report.txt` — Analysis prompt
+- `agent/src/ai_software_dev_crew/prompts/migration/apply_changes.txt` — Execution prompt (Tier 1)
+- `studio-ui/src/pages/Migration.tsx` — Frontend migration page
+- `docs/migration.md` — Feature documentation
+
+### Modified
+- `crew_studio/job_database.py` — Added `migration_issues` table + 5 methods
+- `crew_studio/llamaindex_web_app.py` — Registered migration Blueprint
+- `studio-ui/src/api/client.ts` — Added migration API functions + types
+- `studio-ui/src/App.tsx` — Added `/migration/:jobId` route
+
+### Tests
+- `agent/tests/unit/test_migration_db.py` — 14 tests (DB layer)
+- `agent/tests/unit/test_migration_agent.py` — 13 tests (agent prompts + tool binding)
+- `agent/tests/api/test_migration_endpoint.py` — 10 tests (API endpoints)
+- `studio-ui/cypress/component/Migration.cy.tsx` — 6 tests (frontend component)
+
+### Verification
+```bash
+cd agent && python -m pytest tests/unit/test_migration_db.py tests/unit/test_migration_agent.py tests/api/test_migration_endpoint.py -v
+```

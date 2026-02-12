@@ -51,6 +51,12 @@ print(f"✅ Job database initialized at: {db_path.absolute()}")
 base_workspace_path = Path(os.getenv("WORKSPACE_PATH", "./workspace"))
 base_workspace_path.mkdir(parents=True, exist_ok=True)
 
+# ── Register migration blueprint ─────────────────────────────────────────
+from crew_studio.migration.blueprint import migration_bp  # noqa: E402
+app.config["JOB_DB"] = job_db
+app.config["WORKSPACE_PATH"] = str(base_workspace_path)
+app.register_blueprint(migration_bp)
+
 
 def run_job_with_backend(job_id: str, vision: str, backend):
     """Run a job using the pluggable backend."""
@@ -95,14 +101,6 @@ def run_job_async(job_id: str, vision: str, job_config: SecretConfig = None):
     import traceback
     import logging
     
-    # Lazy import to avoid blocking Flask startup
-    try:
-        from src.llamaindex_crew.workflows.software_dev_workflow import SoftwareDevWorkflow
-    except Exception as imp_err:
-        logger.exception(f"Failed to import SoftwareDevWorkflow: {imp_err}")
-        job_db.mark_failed(job_id, f"Import error: {imp_err}")
-        return
-    
     logger = logging.getLogger(__name__)
     
     # Use global config if not provided
@@ -114,14 +112,32 @@ def run_job_async(job_id: str, vision: str, job_config: SecretConfig = None):
         job_db.update_progress(job_id, phase, progress, message)
     
     try:
-        # Mark job as started
-        job_db.mark_started(job_id)
-        
-        # Get job to access workspace path
+        # ── Guard: Skip build pipeline for migration jobs ───────────────
+        # Check BEFORE mark_started() because mark_started overwrites
+        # current_phase to 'initializing'.
         job = job_db.get_job(job_id)
         if not job:
             logger.error(f"Job {job_id} not found in database during async run")
             return
+        
+        if job.get("current_phase") == "awaiting_migration":
+            logger.warning(
+                f"Job {job_id} is a migration job (current_phase=awaiting_migration) — "
+                "skipping build pipeline. Use POST /api/jobs/{job_id}/migrate to start migration."
+            )
+            return
+        
+        # Mark job as started (sets current_phase='initializing')
+        job_db.mark_started(job_id)
+        
+        # Re-fetch job after mark_started to get updated workspace_path etc.
+        job = job_db.get_job(job_id)
+        if not job:
+            logger.error(f"Job {job_id} not found after mark_started")
+            return
+        
+        # Lazy import to avoid blocking Flask startup
+        from src.llamaindex_crew.workflows.software_dev_workflow import SoftwareDevWorkflow
         
         job_workspace = Path(job['workspace_path'])
         
@@ -622,6 +638,100 @@ def _run_repomix(github_url: str, job_workspace: Path, job_id: str) -> Optional[
         return None
 
 
+def _clone_github_repo(github_url: str, target_dir: Path, job_id: str) -> Optional[Dict[str, Any]]:
+    """
+    Clone a GitHub repository directly into the target directory.
+    Used for migration mode where we need actual source files, not XML packs.
+    
+    If the clone creates a wrapper directory (common with GitHub), files are
+    moved up to target_dir root and the wrapper is removed.
+    
+    Returns dict with metadata or None on failure.
+    """
+    import logging
+    import shutil
+    import tempfile
+    logger = logging.getLogger(__name__)
+    
+    # Normalise URL
+    clean_url = github_url.strip().rstrip('/')
+    
+    # Extract repo name for logging
+    parts = clean_url.rstrip('/').split('/')
+    repo_name = '/'.join(parts[-2:]) if len(parts) >= 2 else parts[-1]
+    
+    logger.info(f"Cloning GitHub repo for migration: {repo_name}")
+    
+    try:
+        # Clone to a temp directory first to handle wrapper directories
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            clone_target = tmp_path / "clone"
+            
+            result = subprocess.run(
+                ['git', 'clone', '--depth=1', clean_url, str(clone_target)],
+                capture_output=True,
+                text=True,
+                timeout=300,  # 5 min max
+            )
+            
+            if result.returncode != 0:
+                logger.warning(f"Git clone failed (exit {result.returncode}): {result.stderr[:500]}")
+                return None
+            
+            if not clone_target.exists():
+                logger.warning("Git clone completed but directory not found")
+                return None
+            
+            # Check if there's a single top-level directory (common with GitHub archives)
+            contents = list(clone_target.iterdir())
+            # Filter out .git
+            non_git = [c for c in contents if c.name != '.git']
+            
+            source_dir = clone_target
+            wrapper_dir = None
+            
+            # If single directory (ignoring .git), treat it as wrapper
+            if len(non_git) == 1 and non_git[0].is_dir():
+                wrapper_dir = non_git[0].name
+                source_dir = non_git[0]
+                logger.info(f"Detected wrapper directory: {wrapper_dir}")
+            
+            # Copy files from source_dir to target_dir
+            file_count = 0
+            for item in source_dir.rglob('*'):
+                if item.is_file():
+                    # Skip .git internals
+                    if '.git' in item.parts:
+                        continue
+                    
+                    rel_path = item.relative_to(source_dir)
+                    dest = target_dir / rel_path
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(item, dest)
+                    file_count += 1
+            
+            logger.info(f"Cloned {file_count} files from {repo_name}")
+            
+            return {
+                'repo': repo_name,
+                'files': file_count,
+                'wrapper_dir': wrapper_dir,
+            }
+    
+    except subprocess.TimeoutExpired:
+        logger.error(f"Git clone timed out (300s) for {clean_url}")
+        return None
+    except FileNotFoundError:
+        logger.error("git command not found – Git must be installed")
+        return None
+    except Exception as e:
+        logger.error(f"Git clone error for {clean_url}: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return None
+
+
 ALLOWED_EXTENSIONS = {
     'txt', 'md', 'pdf', 'json', 'yaml', 'yml', 'csv', 'xml',
     'py', 'js', 'ts', 'java', 'go', 'rs', 'rb', 'sh',
@@ -672,6 +782,80 @@ def _save_uploaded_files(job_id: str, job_workspace: Path, files) -> list:
     return saved
 
 
+def _extract_source_archive(job_workspace: Path, archive_file) -> int:
+    """Extract a ZIP archive into the workspace root, preserving directory structure.
+
+    If the ZIP has a single top-level directory (common when downloading a
+    repo as ZIP), that wrapper directory is automatically stripped so that
+    files land directly in the workspace root.
+
+    Returns the number of files extracted.
+    """
+    data = archive_file.read()
+    if not data:
+        return 0
+
+    try:
+        zf_io = io.BytesIO(data)
+        zf_test = zipfile.ZipFile(zf_io)
+        zf_test.close()
+    except zipfile.BadZipFile:
+        print(f"[Migration] WARNING: Uploaded file is not a valid ZIP archive")
+        return 0
+    except Exception as e:
+        print(f"[Migration] WARNING: Failed to read archive: {e}")
+        return 0
+
+    with zipfile.ZipFile(io.BytesIO(data)) as zf:
+        # Detect single top-level folder to strip
+        names = [n for n in zf.namelist() if not n.endswith('/')]
+        top_dirs: set[str] = set()
+        for n in names:
+            first_segment = n.split('/')[0]
+            top_dirs.add(first_segment)
+
+        strip_prefix = ''
+        if len(top_dirs) == 1:
+            only_dir = top_dirs.pop()
+            # Only strip if it really is a directory wrapper (not a single file)
+            if any('/' in n for n in names):
+                strip_prefix = only_dir + '/'
+
+        extracted = 0
+        for info in zf.infolist():
+            if info.is_dir():
+                continue
+
+            rel_path = info.filename
+            if strip_prefix and rel_path.startswith(strip_prefix):
+                rel_path = rel_path[len(strip_prefix):]
+            if not rel_path:
+                continue
+
+            # Security: reject path traversal
+            parts = rel_path.replace('\\', '/').split('/')
+            if any(p == '..' for p in parts):
+                continue
+            clean = '/'.join(p for p in parts if p and p != '.')
+            if not clean:
+                continue
+
+            target = job_workspace / clean
+            target.parent.mkdir(parents=True, exist_ok=True)
+
+            with zf.open(info) as src:
+                target.write_bytes(src.read())
+
+            # Enforce per-file size limit
+            if target.stat().st_size > MAX_FILE_SIZE:
+                target.unlink()
+                continue
+
+            extracted += 1
+
+    return extracted
+
+
 @app.route('/api/backends', methods=['GET'])
 def list_backends():
     """List available agentic backends."""
@@ -689,21 +873,28 @@ def list_backends():
 
 @app.route('/api/jobs', methods=['POST'])
 def create_job():
-    """Create a new build job. Accepts JSON or multipart/form-data with files."""
+    """Create a new build job. Accepts JSON or multipart/form-data with files.
+
+    For migration projects, pass ``mode=migration`` to skip the build pipeline
+    and send source files via the ``source_files``/``source_paths`` fields.
+    """
     # Support both JSON and multipart
     github_urls = []
     backend_name = 'opl-ai-team'  # default
+    mode = 'build'
     
     if request.content_type and 'multipart/form-data' in request.content_type:
         vision = request.form.get('vision', '')
         backend_name = request.form.get('backend', 'opl-ai-team')
         # GitHub URLs can come as repeated form fields
         github_urls = request.form.getlist('github_urls')
+        mode = request.form.get('mode', 'build')
     else:
         data = request.json or {}
         vision = data.get('vision', '')
         backend_name = data.get('backend', 'opl-ai-team')
         github_urls = data.get('github_urls', [])
+        mode = data.get('mode', 'build')
     
     # Validate backend
     try:
@@ -732,16 +923,56 @@ def create_job():
     # Create job record in database
     job_db.create_job(job_id, vision, str(job_workspace))
     
-    # Save any uploaded documents
+    # Save any uploaded documents (MTA reports end up here)
     uploaded_docs = []
     if request.files:
         files = request.files.getlist('documents')
         if len(files) > MAX_FILES_PER_JOB:
             files = files[:MAX_FILES_PER_JOB]
         uploaded_docs = _save_uploaded_files(job_id, job_workspace, files)
-    
-    # Process GitHub URLs with Repomix (in background thread to not block response)
+
+    # ── Migration mode: extract source ZIP to workspace root, skip build ──
+    source_count = 0
+    if mode == 'migration':
+        print(f"[Migration] mode=migration, request.files keys: {list(request.files.keys()) if request.files else 'NONE'}")
+        if request.files:
+            archive = request.files.get('source_archive')
+            print(f"[Migration] source_archive present: {archive is not None}, filename: {archive.filename if archive else 'N/A'}")
+            if archive and archive.filename:
+                source_count = _extract_source_archive(job_workspace, archive)
+                print(f"[Migration] Extracted {source_count} files from ZIP")
+            else:
+                print("[Migration] WARNING: No source_archive file in request. Source code will be missing!")
+        else:
+            print("[Migration] WARNING: request.files is empty!")
+
     valid_urls = [u for u in github_urls if u and _is_github_url(u)]
+
+    if mode == 'migration':
+        # Clone GitHub repos directly to workspace root (not packed as XML)
+        github_file_count = 0
+        for url in valid_urls:
+            try:
+                result = _clone_github_repo(url, job_workspace, job_id)
+                if result:
+                    github_file_count += result.get('files', 0)
+            except Exception as e:
+                print(f"Failed to clone {url}: {e}")
+                # Continue with other repos even if one fails
+        
+        # For migration projects we only persist files — the build pipeline
+        # is NOT started.  The frontend calls POST /api/jobs/<id>/migrate
+        # separately to kick off the migration runner.
+        job_db.update_job(job_id, {'status': 'queued', 'current_phase': 'awaiting_migration'})
+        return jsonify({
+            'job_id': job_id,
+            'status': 'queued',
+            'documents': len(uploaded_docs),
+            'source_files': source_count + github_file_count,
+            'github_repos': len(valid_urls),
+        }), 201
+
+    # Process GitHub URLs with Repomix (in background thread to not block response)
     repomix_count = 0
 
     def process_github_and_run():

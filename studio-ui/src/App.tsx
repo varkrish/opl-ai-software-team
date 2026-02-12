@@ -7,6 +7,7 @@ import Agents from './pages/Agents';
 import Tasks from './pages/Tasks';
 import Files from './pages/Files';
 import Settings from './pages/Settings';
+import Migration from './pages/Migration';
 
 const App: React.FC = () => {
   return (
@@ -19,6 +20,8 @@ const App: React.FC = () => {
           <Route path="/tasks" element={<Tasks />} />
           <Route path="/files" element={<Files />} />
           <Route path="/settings" element={<Settings />} />
+          <Route path="/migration" element={<Migration />} />
+          <Route path="/migration/:jobId" element={<Migration />} />
         </Route>
       </Routes>
     </BrowserRouter>
