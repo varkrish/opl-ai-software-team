@@ -672,10 +672,13 @@ class TestDeduplicationMergesFiles:
             path = Path(f.name)
         try:
             issues = parse_mta_issues_json(path)
-            assert len(issues) == 1, "Should deduplicate to 1 issue"
-            files = issues[0]["files"]
-            assert len(files) == 2, f"Should have 2 files merged, got {files}"
-            assert "src/main/java/com/app/Foo.java" in files
-            assert "src/main/java/com/app/Bar.java" in files
+            # Dedup merges both files under one ruleId, then per-file split
+            # explodes into 2 single-file issues.
+            assert len(issues) == 2, f"Should split to 2 per-file issues, got {len(issues)}"
+            all_files = [f for i in issues for f in i["files"]]
+            assert "src/main/java/com/app/Foo.java" in all_files
+            assert "src/main/java/com/app/Bar.java" in all_files
+            for issue in issues:
+                assert len(issue["files"]) == 1, "Each issue should have exactly 1 file"
         finally:
             path.unlink()

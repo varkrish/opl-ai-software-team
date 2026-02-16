@@ -231,5 +231,20 @@ def parse_mta_issues_json(
                     "migration_hint": migration_hint,
                 }
     
-    # Return deduplicated list
-    return list(seen_rules.values())
+    # Split multi-file issues into one issue per file.
+    # This ensures every issue maps to exactly one file, so the runner
+    # can mark each completed/failed independently without multi-file tracking.
+    per_file_issues: List[Dict[str, Any]] = []
+    for issue in seen_rules.values():
+        files = issue["files"]
+        if len(files) <= 1:
+            per_file_issues.append(issue)
+        else:
+            for idx, fpath in enumerate(files):
+                per_file_issues.append({
+                    **issue,
+                    "id": f"{issue['id']}-{idx:02d}",
+                    "files": [fpath],
+                })
+
+    return per_file_issues

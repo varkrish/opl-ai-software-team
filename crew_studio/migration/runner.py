@@ -14,8 +14,59 @@ from .utils import git_snapshot, workspace_has_changes, load_migration_rules
 
 logger = logging.getLogger(__name__)
 
-# Max chars to inline per file in execution prompt
-_MAX_INLINE_CHARS = 8_000
+
+def _validate_java_structural(original: str, rewritten: str, file_path: str) -> Optional[str]:
+    """Return an error message if the rewritten Java file has structural problems,
+    or None if it looks acceptable.
+
+    Checks:
+    - Package declaration preserved
+    - Primary class/interface name preserved
+    - Line count not dramatically reduced (> 50% loss)
+    - No obviously incomplete statements (e.g. `= \\n` with no value)
+    """
+    if not file_path.endswith(".java"):
+        return None
+
+    # 1. Package declaration
+    orig_pkg = re.search(r"^package\s+([\w.]+);", original, re.MULTILINE)
+    new_pkg = re.search(r"^package\s+([\w.]+);", rewritten, re.MULTILINE)
+    if orig_pkg and (not new_pkg or orig_pkg.group(1) != new_pkg.group(1)):
+        return f"Package declaration changed or missing (expected '{orig_pkg.group(1)}')"
+
+    # 2. Primary class / interface name
+    orig_class = re.search(
+        r"(?:public\s+)?(?:abstract\s+)?(?:class|interface|enum)\s+(\w+)",
+        original,
+    )
+    new_class = re.search(
+        r"(?:public\s+)?(?:abstract\s+)?(?:class|interface|enum)\s+(\w+)",
+        rewritten,
+    )
+    if orig_class and (not new_class or orig_class.group(1) != new_class.group(1)):
+        return f"Primary class/interface name changed or missing (expected '{orig_class.group(1)}')"
+
+    # 3. Line count sanity — more than 50% of lines lost is suspicious
+    orig_lines = original.count("\n")
+    new_lines = rewritten.count("\n")
+    if orig_lines > 10 and new_lines < orig_lines * 0.5:
+        return (
+            f"Too many lines lost ({new_lines} vs {orig_lines} original, "
+            f"{100 - round(100 * new_lines / orig_lines)}% reduction)"
+        )
+
+    # 4. Incomplete statements — assignment with nothing after `=`
+    incomplete = re.findall(r"=\s*\n\s*\n", rewritten)
+    if len(incomplete) >= 2:
+        return f"Detected {len(incomplete)} incomplete assignment statements (value missing after '=')"
+
+    return None
+
+
+# Max chars to inline per file in execution prompt.
+# Large Java files can easily exceed 20-50K chars; 60K covers the vast majority
+# while staying within typical LLM context windows.
+_MAX_INLINE_CHARS = 60_000
 
 
 def _normalize_path_for_workspace(ws: Path, path: str) -> str:
@@ -370,6 +421,7 @@ def run_migration(
 
         for file_path, file_issue_list in file_issues.items():
             # Resolve path (e.g. app/pom.xml -> pom.xml)
+            orig_file_path = file_path
             file_path = _normalize_path_for_workspace(ws, file_path)
             abs_path = ws / file_path
             issue_ids = [i.get("id", "?") for i in file_issue_list]
@@ -377,20 +429,21 @@ def run_migration(
 
             # Mark issues as running
             for issue in file_issue_list:
-                job_db.update_migration_issue_status(issue["id"], "running")
+                iid = issue.get("id", "")
+                job_db.update_migration_issue_status(iid, "running")
 
             if not abs_path.is_file():
                 logger.warning("File not found, skipping: %s", abs_path)
                 for issue in file_issue_list:
-                    job_db.update_migration_issue_status(
-                        issue["id"], "skipped", error="File not found"
-                    )
+                    iid = issue.get("id", "")
+                    job_db.update_migration_issue_status(iid, "skipped", error="File not found")
                 continue
 
-            MAX_RETRIES = 2
-            file_content = abs_path.read_text(encoding="utf-8", errors="replace")[
-                :_MAX_INLINE_CHARS
-            ]
+            MAX_RETRIES = 3
+            raw_content = abs_path.read_text(encoding="utf-8", errors="replace")
+            actual_file_size = len(raw_content)
+            is_truncated = actual_file_size > _MAX_INLINE_CHARS
+            file_content = raw_content[:_MAX_INLINE_CHARS]
             last_error = None
 
             for attempt in range(1, MAX_RETRIES + 1):
@@ -403,36 +456,46 @@ def run_migration(
                         migration_goal=migration_goal,
                         repo_rules=repo_rules,
                         user_notes=migration_notes,
+                        truncated=is_truncated,
                     )
 
-                    # Check if the agent actually changed anything
                     has_changes = workspace_has_changes(ws)
                     logger.info("Agent finished for %s (attempt %d) — has_changes=%s", file_path, attempt, has_changes)
                     if has_changes:
-                        # Validate write: reject obviously corrupted output
                         new_content = abs_path.read_text(encoding="utf-8", errors="replace")
-                        orig_len = len(file_content)
                         new_len = len(new_content)
-                        # Reject if new content is < 30% of original (truncation)
-                        if orig_len > 100 and new_len < 0.3 * orig_len:
+                        # Validate against actual file size, not truncated input
+                        if actual_file_size > 100 and new_len < 0.3 * actual_file_size:
                             raise ValueError(
-                                f"Written file too small ({new_len} chars vs {orig_len}), possible truncation"
+                                f"Written file too small ({new_len} chars vs {actual_file_size} original), possible truncation"
                             )
-                        # Reject if file became a single broken line (LLM corruption)
-                        if new_len > 0 and new_content.count("\n") == 0 and orig_len > 200:
+                        if new_len > 0 and new_content.count("\n") == 0 and actual_file_size > 200:
                             raise ValueError("File was collapsed to a single line (corrupted)")
+
+                        # Structural validation for Java files
+                        struct_err = _validate_java_structural(raw_content, new_content, file_path)
+                        if struct_err:
+                            raise ValueError(f"Structural validation failed: {struct_err}")
 
                         git_snapshot(ws, f"migration: {file_path}")
                         for issue in file_issue_list:
-                            job_db.update_migration_issue_status(issue["id"], "completed")
+                            iid = issue.get("id", "")
+                            job_db.update_migration_issue_status(iid, "completed")
                         last_error = None
                         break  # Success
                     else:
-                        logger.info("No changes for %s (attempt %d) — marking completed", file_path, attempt)
+                        # Agent made no changes — retry; if still nothing, mark failed
+                        if attempt < MAX_RETRIES:
+                            logger.warning("No changes for %s (attempt %d/%d) — retrying", file_path, attempt, MAX_RETRIES)
+                            continue
+                        logger.warning("No changes for %s after %d attempts — marking failed", file_path, MAX_RETRIES)
                         for issue in file_issue_list:
-                            job_db.update_migration_issue_status(issue["id"], "completed")
-                        last_error = None
-                        break  # No change needed
+                            iid = issue.get("id", "")
+                            job_db.update_migration_issue_status(
+                                iid, "failed",
+                                error=f"Agent made no changes after {MAX_RETRIES} attempts",
+                            )
+                        break
 
                 except (ValueError, OSError) as validation_err:
                     last_error = validation_err
@@ -450,8 +513,9 @@ def run_migration(
                         continue
                     # Final attempt failed
                     for issue in file_issue_list:
+                        iid = issue.get("id", "")
                         job_db.update_migration_issue_status(
-                            issue["id"], "failed",
+                            iid, "failed",
                             error=f"Output validation failed after {MAX_RETRIES} attempts: {validation_err!s}"[:500],
                         )
                 except Exception as e:
@@ -468,8 +532,9 @@ def run_migration(
                             pass
                         continue
                     for issue in file_issue_list:
+                        iid = issue.get("id", "")
                         job_db.update_migration_issue_status(
-                            issue["id"], "failed", error=str(e)[:500]
+                            iid, "failed", error=str(e)[:500]
                         )
 
             completed_files += 1
@@ -488,6 +553,20 @@ def run_migration(
                 git_snapshot(ws, "deterministic javax→jakarta sweep")
             _progress("migrating", 98, f"Sweep updated {sweep_count} additional files")
 
+        # ── Resilience: one automatic retry round for failed tasks ─────
+        failed_after_run = job_db.get_failed_migration_issues(job_id)
+        if failed_after_run:
+            n = len(failed_after_run)
+            logger.info("Automatic retry: %d failed issue(s) — running one retry round for resilience", n)
+            _progress("migrating", 92, f"Retrying {n} failed task(s) automatically...")
+            run_migration_retry(
+                job_id=job_id,
+                workspace_path=workspace_path,
+                migration_goal=migration_goal,
+                job_db=job_db,
+                progress_callback=progress_callback,
+            )
+
         # ── Done ──────────────────────────────────────────────────────
         git_snapshot(ws, "post-migration snapshot")
         _progress("completed", 100, "Migration complete")
@@ -496,3 +575,145 @@ def run_migration(
         logger.error("Migration run failed for job %s: %s", job_id, e, exc_info=True)
         _progress("migration_failed", 0, str(e))
         raise
+
+
+# ── Retry only failed tasks ─────────────────────────────────────────────────
+
+def run_migration_retry(
+    job_id: str,
+    workspace_path: str,
+    migration_goal: str,
+    job_db: Any,
+    progress_callback: Optional[Callable] = None,
+) -> None:
+    """Re-execute only the *failed* migration issues for a job.
+
+    Completed/skipped issues are left untouched.  Failed issues are reset to
+    pending, then processed with the same execution logic as run_migration.
+    """
+    from llamaindex_crew.agents.migration_agent import MigrationExecutionAgent
+
+    ws = Path(workspace_path)
+
+    def _progress(phase: str, pct: int, msg: str):
+        if progress_callback:
+            try:
+                progress_callback(phase, pct, msg)
+            except Exception:
+                pass
+
+    # 1. Fail any stale 'running' issues left from the previous attempt
+    job_db.fail_stale_migrations(job_id)
+
+    # 2. Collect failed issues and reset them to pending
+    failed_issues = job_db.get_failed_migration_issues(job_id)
+    if not failed_issues:
+        _progress("completed", 100, "No failed issues to retry — migration is complete")
+        return
+
+    job_db.reset_failed_migration_issues(job_id)
+    _progress("migrating", 5, f"Retrying {len(failed_issues)} failed issue(s)...")
+
+    # Load repo rules
+    repo_rules = load_migration_rules(ws)
+
+    # 3. Group issues by file (same as run_migration Phase 2)
+    file_issues: Dict[str, List[Dict]] = {}
+    for issue in failed_issues:
+        files_raw = issue.get("files", "[]")
+        if isinstance(files_raw, str):
+            import json as _json
+            try:
+                files_list = _json.loads(files_raw)
+            except (ValueError, TypeError):
+                files_list = [files_raw]
+        else:
+            files_list = files_raw
+        for fpath in files_list:
+            file_issues.setdefault(fpath, []).append(issue)
+
+    total_files = len(file_issues)
+    completed_files = 0
+
+    for file_path, file_issue_list in file_issues.items():
+        file_path = _normalize_path_for_workspace(ws, file_path)
+        abs_path = ws / file_path
+        logger.info("Retry: processing %s (%d issues)", file_path, len(file_issue_list))
+
+        for issue in file_issue_list:
+            job_db.update_migration_issue_status(issue["id"], "running")
+
+        if not abs_path.is_file():
+            logger.warning("Retry: file not found, skipping: %s", abs_path)
+            for issue in file_issue_list:
+                job_db.update_migration_issue_status(issue["id"], "skipped", error="File not found")
+            completed_files += 1
+            continue
+
+        MAX_RETRIES = 3
+        raw_content = abs_path.read_text(encoding="utf-8", errors="replace")
+        actual_file_size = len(raw_content)
+        is_truncated = actual_file_size > _MAX_INLINE_CHARS
+        file_content = raw_content[:_MAX_INLINE_CHARS]
+
+        for attempt in range(1, MAX_RETRIES + 1):
+            try:
+                exec_agent = MigrationExecutionAgent(ws, job_id)
+                exec_agent.run(
+                    file_path=file_path,
+                    file_content=file_content,
+                    issues=file_issue_list,
+                    migration_goal=migration_goal,
+                    repo_rules=repo_rules,
+                    truncated=is_truncated,
+                )
+
+                has_changes = workspace_has_changes(ws)
+                if has_changes:
+                    new_content = abs_path.read_text(encoding="utf-8", errors="replace")
+                    new_len = len(new_content)
+                    if actual_file_size > 100 and new_len < 0.3 * actual_file_size:
+                        raise ValueError(
+                            f"Written file too small ({new_len} chars vs {actual_file_size} original), possible truncation"
+                        )
+                    if new_len > 0 and new_content.count("\n") == 0 and actual_file_size > 200:
+                        raise ValueError("File was collapsed to a single line (corrupted)")
+
+                    # Structural validation for Java files
+                    struct_err = _validate_java_structural(raw_content, new_content, file_path)
+                    if struct_err:
+                        raise ValueError(f"Structural validation failed: {struct_err}")
+
+                    git_snapshot(ws, f"migration-retry: {file_path}")
+                    for issue in file_issue_list:
+                        job_db.update_migration_issue_status(issue["id"], "completed")
+                    break  # success
+                else:
+                    if attempt < MAX_RETRIES:
+                        logger.warning("Retry: no changes for %s (attempt %d/%d) — retrying", file_path, attempt, MAX_RETRIES)
+                        continue
+                    logger.warning("Retry: no changes for %s after %d attempts — marking failed", file_path, MAX_RETRIES)
+                    for issue in file_issue_list:
+                        job_db.update_migration_issue_status(
+                            issue["id"], "failed",
+                            error=f"Agent made no changes after {MAX_RETRIES} attempts",
+                        )
+                    break
+
+            except Exception as e:
+                logger.error("Retry failed for %s (attempt %d): %s", file_path, attempt, e)
+                try:
+                    import subprocess
+                    subprocess.run(["git", "checkout", "--", file_path], cwd=str(ws), capture_output=True, check=True)
+                except Exception:
+                    pass
+                if attempt >= MAX_RETRIES:
+                    for issue in file_issue_list:
+                        job_db.update_migration_issue_status(issue["id"], "failed", error=str(e)[:500])
+
+        completed_files += 1
+        pct = 5 + int(90 * completed_files / max(total_files, 1))
+        _progress("migrating", pct, f"Retry: processed {file_path} ({completed_files}/{total_files})")
+
+    git_snapshot(ws, "post-migration-retry snapshot")
+    _progress("completed", 100, "Migration retry complete")
