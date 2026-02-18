@@ -13,6 +13,13 @@ from .base_agent import BaseLlamaIndexAgent
 from ..tools.file_tools import create_workspace_file_tools
 from ..budget.tracker import EnhancedBudgetTracker
 from ..utils.prompt_loader import load_prompt
+from ..utils.llm_config import get_llm_for_agent
+
+# Migration execution needs higher max_tokens than default (2048) because
+# the agent must output complete file content.  16384 covers most Java files
+# while staying under typical provider limits.
+_MIGRATION_MIN_MAX_TOKENS = 8192
+_MIGRATION_MAX_TOKENS_CAP = 16384
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +34,15 @@ ANALYSIS_BACKSTORY = (
 EXECUTION_BACKSTORY = (
     "You are a senior software engineer specializing in legacy code modernization. "
     "You apply migration changes precisely, respecting existing code patterns, "
-    "and always writing complete file content via the file_writer tool."
+    "and always writing complete file content via the file_writer tool.\n\n"
+    "CRITICAL RULES:\n"
+    "- Output the COMPLETE file. Every original line must appear in your output, "
+    "modified ONLY where required by the migration issues.\n"
+    "- Do NOT omit, summarize, abbreviate, or skip any code.\n"
+    "- Do NOT add methods, fields, or imports that are not in the original file.\n"
+    "- Do NOT fabricate or hallucinate code that was not present.\n"
+    "- Preserve ALL comments, formatting, and structure from the original.\n"
+    "- If unsure about a change, leave the original code unchanged."
 )
 
 
@@ -130,12 +145,19 @@ class MigrationExecutionAgent:
             "migration/apply_changes.txt", fallback=EXECUTION_BACKSTORY
         )
 
+        # Use higher max_tokens for migration (large file rewrites), but cap to avoid 400
+        llm = get_llm_for_agent("worker")
+        if hasattr(llm, "max_tokens"):
+            requested = max(llm.max_tokens, _MIGRATION_MIN_MAX_TOKENS)
+            llm.max_tokens = min(requested, _MIGRATION_MAX_TOKENS_CAP)
+
         self.agent = BaseLlamaIndexAgent(
             role="Migration Execution Agent",
             goal="Apply the specified migration changes to the target file precisely.",
             backstory=backstory,
             tools=tools,
             agent_type="worker",
+            llm=llm,
             budget_tracker=tracker,
             verbose=True,
         )
@@ -149,6 +171,7 @@ class MigrationExecutionAgent:
         repo_rules: Optional[str] = None,
         user_notes: Optional[str] = None,
         uploaded_docs_context: Optional[str] = None,
+        truncated: bool = False,
     ) -> str:
         """Build the execution prompt with 4-tier context injection.
 
@@ -161,7 +184,17 @@ class MigrationExecutionAgent:
 
         sections.append(f"## Migration goal\n{migration_goal}")
         sections.append(f"## Target file\nYou must ONLY modify: **{file_path}**")
-        sections.append(f"## Current content of {file_path}\n```\n{file_content}\n```")
+
+        if truncated:
+            sections.append(
+                f"## Current content of {file_path} (TRUNCATED)\n"
+                f"**WARNING**: The content below is truncated because the file is very large.\n"
+                f"You MUST call `file_reader` with file_path=\"{file_path}\" to read the COMPLETE "
+                f"file content before making any changes.\n"
+                f"```\n{file_content}\n```"
+            )
+        else:
+            sections.append(f"## Current content of {file_path}\n```\n{file_content}\n```")
 
         # Build issues section
         issues_text = []
@@ -187,7 +220,12 @@ class MigrationExecutionAgent:
         sections.append(
             f"## Instructions\n"
             f"Apply all the migration issues listed above to **{file_path}**.\n"
-            f"Call `file_writer` with file_path=\"{file_path}\" and the COMPLETE updated content.\n"
+            f"Call `file_writer` with file_path=\"{file_path}\" and the COMPLETE updated content.\n\n"
+            f"IMPORTANT — your output MUST:\n"
+            f"- Contain EVERY line of the original file (modified only where needed).\n"
+            f"- Keep the same package, class name, all fields, all methods, all comments.\n"
+            f"- NOT add any new methods, fields, or imports that were not in the original.\n"
+            f"- NOT omit or abbreviate any section of the file.\n\n"
             f"Provide a Final Answer listing what you changed."
         )
 
@@ -202,6 +240,7 @@ class MigrationExecutionAgent:
         repo_rules: Optional[str] = None,
         user_notes: Optional[str] = None,
         uploaded_docs_context: Optional[str] = None,
+        truncated: bool = False,
     ) -> str:
         prompt = self.build_prompt(
             file_path=file_path,
@@ -211,5 +250,6 @@ class MigrationExecutionAgent:
             repo_rules=repo_rules,
             user_notes=user_notes,
             uploaded_docs_context=uploaded_docs_context,
+            truncated=truncated,
         )
         return str(self.agent.chat(prompt))

@@ -9,6 +9,7 @@ from .tech_architect_agent import TechArchitectAgent
 from .dev_agent import DevAgent
 from .frontend_agent import FrontendAgent
 from .refinement_agent import RefinementAgent
+from .devops_agent import DevOpsAgent
 
 __all__ = [
     "BaseLlamaIndexAgent",
@@ -19,4 +20,5 @@ __all__ = [
     "DevAgent",
     "FrontendAgent",
     "RefinementAgent",
+    "DevOpsAgent",
 ]

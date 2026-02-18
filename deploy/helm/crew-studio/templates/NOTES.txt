@@ -1,0 +1,33 @@
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  AI Crew Studio deployed!
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  LLM Provider: Red Hat MaaS
+  Endpoint:     {{ .Values.llm.apiBaseUrl }}
+
+{{- if .Values.frontend.route.enabled }}
+
+  Frontend URL:
+  {{- if .Values.frontend.route.host }}
+    https://{{ .Values.frontend.route.host }}
+  {{- else }}
+    Run: oc get route {{ include "crew-studio.fullname" . }}-frontend -o jsonpath='{.spec.host}'
+  {{- end }}
+{{- else }}
+  Frontend (port-forward):
+    oc port-forward svc/{{ include "crew-studio.fullname" . }}-frontend 3000:8080
+    Then open http://localhost:3000
+{{- end }}
+
+{{- if .Values.backend.route.enabled }}
+
+  Backend API URL:
+  {{- if .Values.backend.route.host }}
+    https://{{ .Values.backend.route.host }}
+  {{- else }}
+    Run: oc get route {{ include "crew-studio.fullname" . }}-backend -o jsonpath='{.spec.host}'
+  {{- end }}
+{{- end }}
+
+  Check pod status:
+    oc get pods -l app.kubernetes.io/part-of={{ include "crew-studio.name" . }}

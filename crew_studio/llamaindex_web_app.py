@@ -53,9 +53,95 @@ base_workspace_path.mkdir(parents=True, exist_ok=True)
 
 # ── Register migration blueprint ─────────────────────────────────────────
 from crew_studio.migration.blueprint import migration_bp  # noqa: E402
+from crew_studio.refactor.blueprint import refactor_bp  # noqa: E402
 app.config["JOB_DB"] = job_db
 app.config["WORKSPACE_PATH"] = str(base_workspace_path)
 app.register_blueprint(migration_bp)
+app.register_blueprint(refactor_bp)
+
+
+# ── Phases used by migration / refactor / refinement flows ────────────────
+# Used by resume_pending_jobs to classify interrupted jobs.
+_MIGRATION_PHASES = frozenset({'migrating'})
+_REFACTOR_PHASES = frozenset({'refactoring', 'analysis', 'design', 'planning', 'execution', 'devops'})
+_REFINEMENT_PHASES = frozenset({'refining'})
+_SKIP_PHASES = frozenset({'awaiting_migration', 'awaiting_refactor'})
+
+
+def resume_pending_jobs(override_job_db=None):
+    """Resume or clean up jobs that were in-flight when the server last stopped.
+
+    Called at startup.  For each non-terminal job:
+    - Build jobs (queued/running, not awaiting_*): spawn run_job_async thread.
+    - Migration/refactor jobs (running): mark as failed (no checkpoint resume).
+    - Jobs with a running refinement: fail the refinement, restore job to completed.
+    """
+    import logging
+    _job_db = override_job_db or job_db
+    logger = logging.getLogger(__name__)
+    logger.info("resume_pending_jobs: scanning for interrupted / pending jobs...")
+
+    all_jobs = _job_db.get_all_jobs()
+    resumed = 0
+    interrupted = 0
+
+    # 1. Fail any globally-stuck refinements
+    for j in all_jobs:
+        ref = _job_db.get_running_refinement(j["id"])
+        if ref:
+            _job_db.fail_refinement(ref["id"], "Interrupted by server restart.")
+            _job_db.update_job(j["id"], {
+                "status": "completed",
+                "current_phase": "completed",
+                "progress": 100,
+                "error": None,
+            })
+            interrupted += 1
+            logger.info("  Marked stuck refinement %s (job %s) as failed.", ref["id"][:8], j["id"][:8])
+
+    # Re-fetch after refinement cleanup (status may have changed)
+    all_jobs = _job_db.get_all_jobs()
+
+    for j in all_jobs:
+        status = j.get("status")
+        phase = j.get("current_phase", "")
+
+        # Skip terminal states
+        if status in ("completed", "failed", "cancelled", "quota_exhausted"):
+            continue
+
+        # Skip jobs waiting for explicit user trigger
+        if phase in _SKIP_PHASES:
+            continue
+
+        # Migration / refactor in progress → mark interrupted (no checkpoint resume)
+        if phase in _MIGRATION_PHASES | _REFACTOR_PHASES:
+            _job_db.update_job(j["id"], {
+                "status": "failed",
+                "current_phase": "error",
+                "error": "Interrupted by server restart. Please trigger migration/refactor again.",
+                "completed_at": None,
+            })
+            # Also clear any stale migration_issues left in 'running' state
+            if phase in _MIGRATION_PHASES:
+                _job_db.fail_stale_migrations(j["id"])
+            interrupted += 1
+            logger.info("  Marked interrupted %s job %s (phase=%s).", "migration" if phase in _MIGRATION_PHASES else "refactor", j["id"][:8], phase)
+            continue
+
+        # Resumable build job (queued or running, build phase)
+        if status in ("running", "queued"):
+            vision = j.get("vision", "")
+            logger.info("  Resuming build job %s (status=%s, phase=%s).", j["id"][:8], status, phase)
+            thread = threading.Thread(
+                target=run_job_async,
+                args=(j["id"], vision, config),
+                daemon=True,
+            )
+            thread.start()
+            resumed += 1
+
+    logger.info("resume_pending_jobs: %d resumed, %d marked interrupted.", resumed, interrupted)
 
 
 def run_job_with_backend(job_id: str, vision: str, backend):
@@ -127,6 +213,13 @@ def run_job_async(job_id: str, vision: str, job_config: SecretConfig = None):
             )
             return
         
+        if job.get("current_phase") == "awaiting_refactor":
+            logger.warning(
+                f"Job {job_id} is a refactor job (current_phase=awaiting_refactor) — "
+                "skipping build pipeline. Use POST /api/jobs/{job_id}/refactor to start."
+            )
+            return
+        
         # Mark job as started (sets current_phase='initializing')
         job_db.mark_started(job_id)
         
@@ -136,123 +229,70 @@ def run_job_async(job_id: str, vision: str, job_config: SecretConfig = None):
             logger.error(f"Job {job_id} not found after mark_started")
             return
         
-        # Lazy import to avoid blocking Flask startup
-        from src.llamaindex_crew.workflows.software_dev_workflow import SoftwareDevWorkflow
-        
+        from crew_studio.build_runner import run_build_pipeline
+
         job_workspace = Path(job['workspace_path'])
-        
-        # Log to job-specific error log
-        error_log_path = job_workspace / "crew_errors.log"
-        
-        # Set workspace path in environment for this job
-        original_workspace = os.environ.get("WORKSPACE_PATH")
-        os.environ["WORKSPACE_PATH"] = str(job_workspace)
-        os.environ["PROJECT_ID"] = job_id
-        
-        try:
-            # Build enriched vision with uploaded reference docs & GitHub repos
-            enriched_vision = vision
-            uploaded_docs = job_db.get_job_documents(job_id)
-            if uploaded_docs:
-                doc_context_parts = []
-                repo_context_parts = []
-                TEXT_TYPES = (
-                    'txt', 'md', 'json', 'yaml', 'yml', 'csv', 'xml',
-                    'py', 'js', 'ts', 'java', 'go', 'rs', 'rb', 'sh',
-                    'html', 'css', 'sql', 'proto', 'graphql',
-                )
-                for doc in uploaded_docs:
-                    doc_path = Path(doc['stored_path'])
-                    if not doc_path.exists() or doc['file_type'] not in TEXT_TYPES:
-                        continue
-                    try:
-                        is_repomix = doc['original_name'].startswith('github:')
-                        # Repomix outputs can be large – allow up to 200KB
-                        max_chars = 200_000 if is_repomix else 50_000
-                        content = doc_path.read_text(errors='replace')[:max_chars]
-                        if is_repomix:
-                            repo_name = doc['original_name'].replace('github:', '')
-                            repo_context_parts.append(
-                                f"--- Reference Repository: {repo_name} (packed by Repomix) ---\n{content}"
-                            )
-                        else:
-                            doc_context_parts.append(
-                                f"--- Reference: {doc['original_name']} ---\n{content}"
-                            )
-                    except Exception as read_err:
-                        logger.warning(f"Could not read doc {doc['original_name']}: {read_err}")
-                
-                all_parts = []
-                if doc_context_parts:
-                    all_parts.append(
-                        f"=== REFERENCE DOCUMENTS ({len(doc_context_parts)} files) ===\n"
-                        + "\n\n".join(doc_context_parts)
-                    )
-                if repo_context_parts:
-                    all_parts.append(
-                        f"=== REFERENCE REPOSITORIES ({len(repo_context_parts)} repos, packed by Repomix) ===\n"
-                        "Use the code structure and patterns from these repos as reference for implementation.\n\n"
-                        + "\n\n".join(repo_context_parts)
-                    )
-                if all_parts:
-                    enriched_vision = f"{vision}\n\n" + "\n\n".join(all_parts)
-                    logger.info(
-                        f"Enriched vision with {len(doc_context_parts)} docs, "
-                        f"{len(repo_context_parts)} repos"
-                    )
-            
-            # Log start
-            with open(error_log_path, 'a') as f:
-                f.write(f"\n{'='*80}\n")
-                f.write(f"JOB STARTED - {datetime.now().isoformat()}\n")
-                f.write(f"Vision: {vision}\n")
-                if uploaded_docs:
-                    f.write(f"Reference Docs: {', '.join(d['original_name'] for d in uploaded_docs)}\n")
-                f.write(f"{'='*80}\n\n")
-            
-            progress_callback('initializing', 5, "Initializing workflow...")
-            
-            # Create workflow with job-specific workspace
-            workflow = SoftwareDevWorkflow(
-                project_id=job_id,
-                workspace_path=job_workspace,
-                vision=enriched_vision,
-                config=job_config,
-                progress_callback=progress_callback
+
+        # Build enriched vision with uploaded reference docs & GitHub repos
+        enriched_vision = vision
+        uploaded_docs = job_db.get_job_documents(job_id)
+        if uploaded_docs:
+            doc_context_parts = []
+            repo_context_parts = []
+            TEXT_TYPES = (
+                'txt', 'md', 'json', 'yaml', 'yml', 'csv', 'xml',
+                'py', 'js', 'ts', 'java', 'go', 'rs', 'rb', 'sh',
+                'html', 'css', 'sql', 'proto', 'graphql',
             )
-            
-            progress_callback('meta', 10, "Starting Meta phase...")
-            
-            # Run workflow
-            results = workflow.run()
-            
-            # Log completion
-            with open(error_log_path, 'a') as f:
-                f.write(f"\n{'='*80}\n")
-                f.write(f"JOB COMPLETED SUCCESSFULLY - {datetime.now().isoformat()}\n")
-                f.write(f"{'='*80}\n\n")
-            
-        except Exception as inner_e:
-            # Log inner exception
-            error_trace = traceback.format_exc()
-            with open(error_log_path, 'a') as f:
-                f.write(f"\n{'='*80}\n")
-                f.write(f"ERROR IN WORKFLOW - {datetime.now().isoformat()}\n")
-                f.write(f"{'='*80}\n")
-                f.write(f"Error Type: {type(inner_e).__name__}\n")
-                f.write(f"Error Message: {str(inner_e)}\n")
-                f.write(f"Traceback:\n{error_trace}\n")
-                f.write(f"{'='*80}\n\n")
-            
-            # Re-raise to be caught by outer exception handler
-            raise
-        finally:
-            # Restore original workspace path
-            if original_workspace:
-                os.environ["WORKSPACE_PATH"] = original_workspace
-            elif "WORKSPACE_PATH" in os.environ:
-                del os.environ["WORKSPACE_PATH"]
-        
+            for doc in uploaded_docs:
+                doc_path = Path(doc['stored_path'])
+                if not doc_path.exists() or doc['file_type'] not in TEXT_TYPES:
+                    continue
+                try:
+                    is_repomix = doc['original_name'].startswith('github:')
+                    # Repomix outputs can be large – allow up to 200KB
+                    max_chars = 200_000 if is_repomix else 50_000
+                    content = doc_path.read_text(errors='replace')[:max_chars]
+                    if is_repomix:
+                        repo_name = doc['original_name'].replace('github:', '')
+                        repo_context_parts.append(
+                            f"--- Reference Repository: {repo_name} (packed by Repomix) ---\n{content}"
+                        )
+                    else:
+                        doc_context_parts.append(
+                            f"--- Reference: {doc['original_name']} ---\n{content}"
+                        )
+                except Exception as read_err:
+                    logger.warning(f"Could not read doc {doc['original_name']}: {read_err}")
+
+            all_parts = []
+            if doc_context_parts:
+                all_parts.append(
+                    f"=== REFERENCE DOCUMENTS ({len(doc_context_parts)} files) ===\n"
+                    + "\n\n".join(doc_context_parts)
+                )
+            if repo_context_parts:
+                all_parts.append(
+                    f"=== REFERENCE REPOSITORIES ({len(repo_context_parts)} repos, packed by Repomix) ===\n"
+                    "Use the code structure and patterns from these repos as reference for implementation.\n\n"
+                    + "\n\n".join(repo_context_parts)
+                )
+            if all_parts:
+                enriched_vision = f"{vision}\n\n" + "\n\n".join(all_parts)
+                logger.info(
+                    f"Enriched vision with {len(doc_context_parts)} docs, "
+                    f"{len(repo_context_parts)} repos"
+                )
+
+        results = run_build_pipeline(
+            job_id=job_id,
+            workspace_path=job_workspace,
+            vision=enriched_vision,
+            config=job_config,
+            progress_callback=progress_callback,
+            job_db=job_db,
+        )
+
         # Mark job as completed or failed based on task validation
         task_validation = results.get('task_validation', {})
         if task_validation.get('valid', True):  # If valid or no validation info
@@ -931,9 +971,9 @@ def create_job():
             files = files[:MAX_FILES_PER_JOB]
         uploaded_docs = _save_uploaded_files(job_id, job_workspace, files)
 
-    # ── Migration mode: extract source ZIP to workspace root, skip build ──
+    # ── Migration/Refactor mode: extract source ZIP to workspace root, skip build ──
     source_count = 0
-    if mode == 'migration':
+    if mode in ('migration', 'refactor'):
         print(f"[Migration] mode=migration, request.files keys: {list(request.files.keys()) if request.files else 'NONE'}")
         if request.files:
             archive = request.files.get('source_archive')
@@ -948,7 +988,7 @@ def create_job():
 
     valid_urls = [u for u in github_urls if u and _is_github_url(u)]
 
-    if mode == 'migration':
+    if mode in ('migration', 'refactor'):
         # Clone GitHub repos directly to workspace root (not packed as XML)
         github_file_count = 0
         for url in valid_urls:
@@ -960,10 +1000,11 @@ def create_job():
                 print(f"Failed to clone {url}: {e}")
                 # Continue with other repos even if one fails
         
-        # For migration projects we only persist files — the build pipeline
-        # is NOT started.  The frontend calls POST /api/jobs/<id>/migrate
-        # separately to kick off the migration runner.
-        job_db.update_job(job_id, {'status': 'queued', 'current_phase': 'awaiting_migration'})
+        # For migration/refactor projects we only persist files — the build pipeline
+        # is NOT started. The frontend calls POST /api/jobs/<id>/{migrate|refactor}
+        # separately to kick off the runner.
+        phase = 'awaiting_migration' if mode == 'migration' else 'awaiting_refactor'
+        job_db.update_job(job_id, {'status': 'queued', 'current_phase': phase})
         return jsonify({
             'job_id': job_id,
             'status': 'queued',
@@ -1256,7 +1297,7 @@ def get_job_tasks(job_id):
 
 
 # ── Agent Definitions ──────────────────────────────────────────────────────
-# Ordered by workflow phase sequence
+# Build workflow: ordered by phase sequence
 AGENT_DEFINITIONS = [
     {'name': 'Meta Agent',    'role': 'Orchestrator',      'model': 'deepseek-r1-distill-qwen-14b', 'phase': 'meta'},
     {'name': 'Product Owner', 'role': 'Requirements',      'model': 'qwen3-14b',                    'phase': 'product_owner'},
@@ -1268,10 +1309,27 @@ AGENT_DEFINITIONS = [
 
 PHASE_ORDER = [a['phase'] for a in AGENT_DEFINITIONS]
 
+# Refactor workflow: architect (analyze → design → plan) → executor → devops
+REFACTOR_AGENT_DEFINITIONS = [
+    {'name': 'Refactor Architect (Analysis)', 'role': 'Source Analysis',     'model': 'qwen3-14b', 'phase': 'analysis'},
+    {'name': 'Refactor Architect (Design)',  'role': 'Target Architecture',  'model': 'qwen3-14b', 'phase': 'design'},
+    {'name': 'Refactor Architect (Plan)',    'role': 'Refactor Plan',        'model': 'qwen3-14b', 'phase': 'planning'},
+    {'name': 'Refactor Executor',            'role': 'Code Migration',        'model': 'qwen3-14b', 'phase': 'execution'},
+    {'name': 'DevOps',                       'role': 'Container & Pipeline', 'model': 'qwen3-14b', 'phase': 'devops'},
+]
+
+REFACTOR_PHASE_ORDER = [a['phase'] for a in REFACTOR_AGENT_DEFINITIONS]
+
+# Phases that indicate job is in refactor flow (roster shows refactor + devops agents)
+REFACTOR_PHASES = {'refactoring', 'analysis', 'design', 'planning', 'execution', 'devops', 'refactor_failed'}
+
 
 @app.route('/api/jobs/<job_id>/agents', methods=['GET'])
 def get_job_agents(job_id):
-    """Get agent statuses derived from job's current phase"""
+    """Get agent statuses derived from job's current phase.
+    Build jobs: meta → product_owner → designer → tech_architect → development → frontend.
+    Refactor jobs: analysis → design → planning → execution → devops (shows Refactor Architect, Executor, DevOps).
+    """
     job = job_db.get_job(job_id)
     if not job:
         return jsonify({'error': 'Job not found'}), 404
@@ -1280,17 +1338,25 @@ def get_job_agents(job_id):
     job_status = job.get('status', 'queued')
     messages = job.get('last_message', [])
 
-    # Determine the index of the current phase
-    if job_status == 'completed' or current_phase == 'completed':
-        current_idx = len(PHASE_ORDER)  # All phases completed
-    elif current_phase in PHASE_ORDER:
-        current_idx = PHASE_ORDER.index(current_phase)
+    # Use refactor roster when job is in refactor flow
+    if current_phase in REFACTOR_PHASES:
+        definitions = REFACTOR_AGENT_DEFINITIONS
+        phase_order = REFACTOR_PHASE_ORDER
     else:
-        current_idx = -1  # Job hasn't started meaningful work yet
+        definitions = AGENT_DEFINITIONS
+        phase_order = PHASE_ORDER
+
+    if job_status == 'completed' or current_phase == 'completed':
+        current_idx = len(phase_order)
+    elif current_phase in phase_order:
+        current_idx = phase_order.index(current_phase)
+    elif current_phase == 'refactoring' and phase_order == REFACTOR_PHASE_ORDER:
+        current_idx = 0  # Refactor just started → first agent (Analysis) working
+    else:
+        current_idx = -1
 
     agents = []
-    for i, defn in enumerate(AGENT_DEFINITIONS):
-        # Derive status
+    for i, defn in enumerate(definitions):
         if current_idx < 0:
             status = 'idle'
         elif i < current_idx:
@@ -1300,7 +1366,6 @@ def get_job_agents(job_id):
         else:
             status = 'idle'
 
-        # Find last activity message for this agent's phase
         phase_messages = [m for m in messages if m.get('phase') == defn['phase']]
         last_msg = phase_messages[-1] if phase_messages else None
 
@@ -1594,6 +1659,167 @@ def serve_job_preview(job_id, file_path):
     return send_from_directory(str(workspace), file_path, mimetype=mimetype)
 
 
+# ── Phase sets for job-type classification (restart) ─────────────────────
+_MIGRATION_JOB_PHASES = frozenset({
+    'migrating', 'migration_failed', 'awaiting_migration',
+})
+_REFACTOR_JOB_PHASES = frozenset({
+    'refactoring', 'analysis', 'design', 'planning', 'execution',
+    'devops', 'refactor_failed', 'awaiting_refactor',
+})
+_RESTARTABLE_STATUSES = frozenset({'failed', 'cancelled', 'quota_exhausted', 'completed'})
+
+
+@app.route('/api/jobs/<job_id>/restart', methods=['POST'])
+def restart_job(job_id):
+    """Restart a failed / cancelled / quota-exhausted job.
+
+    Classifies the job as build, migration, or refactor and takes the
+    appropriate action to start it again.
+    """
+    job = job_db.get_job(job_id)
+    if not job:
+        return jsonify({'error': 'Job not found'}), 404
+
+    if job['status'] not in _RESTARTABLE_STATUSES:
+        return jsonify({
+            'error': f"Job is not restartable (status={job['status']}). "
+                     "Only completed, failed, cancelled, or quota_exhausted jobs can be restarted."
+        }), 400
+
+    phase = job.get('current_phase', '')
+    vision = job.get('vision', '')
+
+    # ── Migration job ─────────────────────────────────────────────────────
+    if phase in _MIGRATION_JOB_PHASES or vision.startswith('[MTA]'):
+        job_db.fail_stale_migrations(job_id)
+
+        # Determine whether we can do a targeted retry (some issues exist)
+        # or need a full re-run (no issues recorded yet).
+        failed_issues = job_db.get_failed_migration_issues(job_id)
+        all_issues = job_db.get_migration_issues(job_id)
+        has_issues = len(all_issues) > 0
+        has_failures = len(failed_issues) > 0
+
+        job_db.update_job(job_id, {
+            'status': 'running',
+            'current_phase': 'migrating',
+            'error': None,
+        })
+
+        def _mig_progress(p_phase, pct, msg):
+            job_db.update_progress(job_id, p_phase, pct, msg)
+
+        def _run_migration_thread():
+            try:
+                ws_path = job.get('workspace_path', '')
+                ws = Path(ws_path)
+                if not ws.is_dir():
+                    ws = base_workspace_path / f"job-{job_id}"
+
+                if has_issues and has_failures:
+                    # Retry only the failed tasks
+                    from crew_studio.migration.runner import run_migration_retry
+                    run_migration_retry(
+                        job_id=job_id,
+                        workspace_path=str(ws),
+                        migration_goal='Analyse the MTA report and apply all migration changes',
+                        job_db=job_db,
+                        progress_callback=_mig_progress,
+                    )
+                else:
+                    # Full re-run — delete old issues first to avoid duplicates
+                    deleted = job_db.delete_migration_issues(job_id)
+                    if deleted:
+                        logger.info("Cleaned up %d old migration issues before re-run for job %s", deleted, job_id)
+
+                    from crew_studio.migration.runner import run_migration
+                    docs = job_db.get_job_documents(job_id)
+                    report_doc = None
+                    for doc in docs:
+                        name_lower = doc['original_name'].lower()
+                        if any(kw in name_lower for kw in ('mta', 'migration', 'report', 'analysis', 'issues')):
+                            report_doc = doc
+                            break
+                    if not report_doc and docs:
+                        report_doc = docs[0]
+                    report_rel = report_doc['stored_path'] if report_doc else ''
+                    try:
+                        report_rel = str(Path(report_doc['stored_path']).relative_to(ws))
+                    except (ValueError, AttributeError):
+                        pass
+                    run_migration(
+                        job_id=job_id,
+                        workspace_path=str(ws),
+                        migration_goal='Analyse the MTA report and apply all migration changes',
+                        report_path=report_rel,
+                        migration_notes=None,
+                        job_db=job_db,
+                        progress_callback=_mig_progress,
+                    )
+
+                # Check for remaining failures/pending before marking completed
+                remaining_failed = job_db.get_failed_migration_issues(job_id)
+                summary = job_db.get_migration_summary(job_id)
+                if remaining_failed:
+                    n = len(remaining_failed)
+                    sample = remaining_failed[0].get('error') or 'Unknown'
+                    job_db.update_job(job_id, {
+                        'status': 'failed',
+                        'current_phase': 'migration_failed',
+                        'error': f"{n} migration task(s) failed. Example: {sample[:400]}",
+                    })
+                elif summary.get('pending', 0) > 0:
+                    job_db.update_job(job_id, {
+                        'status': 'failed',
+                        'current_phase': 'migration_failed',
+                        'error': f"{summary['pending']} task(s) still pending — migration did not complete fully",
+                    })
+                else:
+                    job_db.update_job(job_id, {'status': 'completed', 'current_phase': 'completed'})
+            except Exception as e:
+                job_db.update_job(job_id, {
+                    'status': 'failed',
+                    'current_phase': 'migration_failed',
+                    'error': str(e)[:1000],
+                })
+
+        thread = threading.Thread(target=_run_migration_thread, daemon=True)
+        thread.start()
+        retry_mode = "retry_failed" if (has_issues and has_failures) else "full"
+        return jsonify({
+            'status': 'restarted',
+            'job_type': 'migration',
+            'job_id': job_id,
+            'mode': retry_mode,
+            'failed_issues': len(failed_issues),
+        }), 202
+
+    # ── Refactor job ──────────────────────────────────────────────────────
+    if phase in _REFACTOR_JOB_PHASES:
+        job_db.update_job(job_id, {
+            'status': 'queued',
+            'current_phase': 'awaiting_refactor',
+            'error': None,
+        })
+        return jsonify({'status': 'restarted', 'job_type': 'refactor', 'job_id': job_id}), 202
+
+    # ── Build job (default) ───────────────────────────────────────────────
+    job_db.update_job(job_id, {
+        'status': 'queued',
+        'current_phase': 'starting',
+        'progress': 0,
+        'error': None,
+    })
+    thread = threading.Thread(
+        target=run_job_async,
+        args=(job_id, vision, config),
+        daemon=True,
+    )
+    thread.start()
+    return jsonify({'status': 'restarted', 'job_type': 'build', 'job_id': job_id}), 202
+
+
 @app.route('/api/jobs/<job_id>/cancel', methods=['POST'])
 def cancel_job(job_id):
     """Cancel a running job"""
@@ -1611,6 +1837,9 @@ def cancel_job(job_id):
 
 
 if __name__ == '__main__':
+    # Resume / clean-up any jobs that were in-flight when the server last stopped
+    resume_pending_jobs()
+
     port = int(os.getenv('PORT', 8080))
     # use_reloader=False is critical: the Werkzeug reloader holds an import
     # lock that deadlocks background threads doing lazy imports (e.g. the

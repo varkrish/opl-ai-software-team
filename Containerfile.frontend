@@ -41,8 +41,8 @@ USER root
 # Copy built assets
 COPY --from=builder /build/dist /opt/app-root/src
 
-# Nginx config: SPA routing + API reverse proxy
-RUN cat > /etc/nginx/nginx.conf <<'NGINX'
+# Nginx config template — ${BACKEND_HOST} is resolved at container start via envsubst
+RUN cat > /etc/nginx/nginx.conf.template <<'NGINX'
 worker_processes auto;
 error_log /var/log/nginx/error.log warn;
 pid /tmp/nginx.pid;
@@ -84,7 +84,7 @@ http {
 
         # API and health requests → backend
         location /api/ {
-            proxy_pass http://backend:8080;
+            proxy_pass http://${BACKEND_HOST}:8080;
             proxy_http_version 1.1;
             proxy_set_header Host $host;
             proxy_set_header X-Real-IP $remote_addr;
@@ -96,7 +96,7 @@ http {
         }
 
         location /health {
-            proxy_pass http://backend:8080;
+            proxy_pass http://${BACKEND_HOST}:8080;
             proxy_http_version 1.1;
             proxy_set_header Host $host;
         }
@@ -115,10 +115,14 @@ http {
 }
 NGINX
 
+# Default backend hostname — matches compose service name "backend".
+# Override via env var for Kubernetes (e.g. BACKEND_HOST=crew-studio-backend).
+ENV BACKEND_HOST=backend
+
 # Ensure writable dirs for non-root Nginx
 RUN mkdir -p /tmp/client_body /tmp/proxy /tmp/fastcgi /tmp/uwsgi /tmp/scgi && \
-    chown -R 1001:0 /opt/app-root/src /var/log/nginx /tmp && \
-    chmod -R g=u /opt/app-root/src /var/log/nginx /tmp
+    chown -R 1001:0 /opt/app-root/src /var/log/nginx /tmp /etc/nginx && \
+    chmod -R g=u /opt/app-root/src /var/log/nginx /tmp /etc/nginx
 
 USER 1001
 
@@ -127,4 +131,5 @@ EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD curl -sf http://localhost:8080/ || exit 1
 
-CMD ["nginx", "-g", "daemon off;"]
+# Substitute BACKEND_HOST into nginx.conf at startup, then run Nginx
+CMD ["/bin/sh", "-c", "envsubst '${BACKEND_HOST}' < /etc/nginx/nginx.conf.template > /etc/nginx/nginx.conf && nginx -g 'daemon off;'"]

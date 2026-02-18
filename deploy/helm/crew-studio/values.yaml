@@ -1,0 +1,127 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# AI Crew Studio — Helm Values (Red Hat MaaS)
+# ─────────────────────────────────────────────────────────────────────────────
+
+global:
+  imagePullSecrets: []
+  #   - quay-pull-secret
+
+nameOverride: ""
+fullnameOverride: ""
+
+# ── Backend (Flask API + AI Agents) ─────────────────────────────────────────
+backend:
+  replicaCount: 1
+
+  image:
+    repository: quay.io/varkrish/crew-backend
+    tag: latest
+    pullPolicy: IfNotPresent
+
+  resources:
+    requests:
+      cpu: 500m
+      memory: 1Gi
+    limits:
+      cpu: "2"
+      memory: 4Gi
+
+  route:
+    enabled: false
+    host: ""
+    path: "/"
+    annotations: {}
+    tls:
+      enabled: true
+      termination: edge
+      insecureEdgeTerminationPolicy: Redirect
+
+  nodeSelector: {}
+  tolerations: []
+
+# ── Frontend (React + PatternFly → Nginx) ───────────────────────────────────
+frontend:
+  replicaCount: 1
+
+  image:
+    repository: quay.io/varkrish/crew-frontend
+    tag: latest
+    pullPolicy: IfNotPresent
+
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+
+  route:
+    enabled: true
+    host: ""
+    annotations: {}
+    tls:
+      enabled: true
+      termination: edge
+      insecureEdgeTerminationPolicy: Redirect
+
+  nodeSelector: {}
+  tolerations: []
+
+# ── Persistence ─────────────────────────────────────────────────────────────
+persistence:
+  workspace:
+    enabled: true
+    size: 5Gi
+    accessMode: ReadWriteOnce
+    # storageClass: ""
+  data:
+    enabled: true
+    size: 1Gi
+    accessMode: ReadWriteOnce
+    # storageClass: ""
+
+# ── LLM / Red Hat MaaS Configuration ───────────────────────────────────────
+# The backend reads its LLM settings from a mounted config.yaml (Secret).
+# Set the values below; Helm renders them into the Secret automatically.
+llm:
+  # Generic API key for the LLM provider (REQUIRED)
+  apiKey: ""
+
+  # Red Hat MaaS endpoint (OpenAI-compatible)
+  apiBaseUrl: "https://litellm-prod.apps.maas.redhatworkshops.io"
+
+  # "production" (remote API) or "local" (Ollama)
+  environment: production
+
+  # Models — any model name served by the MaaS gateway
+  modelManager: "gpt-4o-mini"
+  modelWorker: "gpt-4o-mini"
+  modelReviewer: "gpt-4o-mini"
+
+  maxTokens: 2048
+  temperature: 0.7
+  embeddingModel: "text-embedding-3-small"
+
+  # Ollama (only used when environment=local)
+  ollamaBaseUrl: "http://localhost:11434"
+  ollamaModel: "llama3.2:latest"
+
+# ── Application Config (non-sensitive → ConfigMap) ──────────────────────────
+config:
+  workspacePath: /app/workspace
+  jobDbPath: /app/data/crew_jobs.db
+  flaskEnv: production
+  extra: {}
+
+# ── Budget ──────────────────────────────────────────────────────────────────
+budget:
+  maxCostPerProject: 100.0
+  maxCostPerHour: 10.0
+  alertThreshold: 0.8
+
+# ── Service Account ────────────────────────────────────────────────────────
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}

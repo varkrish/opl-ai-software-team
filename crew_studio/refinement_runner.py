@@ -359,18 +359,45 @@ def _run_project_wide_refinement(
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
+def _user_friendly_llm_error(raw_error: str) -> str:
+    """Turn raw LLM/proxy errors (503, 502, 429, etc.) into a short message for the refine UI."""
+    s = raw_error.strip()
+    if "503" in s or "Service Unavailable" in s.lower():
+        return (
+            "LLM service temporarily unavailable (503). "
+            "Try again in a few minutes or check your LLM endpoint configuration."
+        )
+    if "502" in s or "Bad Gateway" in s.lower():
+        return (
+            "LLM gateway error (502). The AI service may be overloaded. "
+            "Try again in a few minutes."
+        )
+    if "429" in s or "rate limit" in s.lower() or "quota" in s.lower():
+        return (
+            "LLM rate limit or quota exceeded (429). "
+            "Wait a moment and try again, or check your API quota."
+        )
+    if "timeout" in s.lower() or "timed out" in s.lower():
+        return "The AI request timed out. Try again or use a shorter refinement prompt."
+    # Keep original if it's short enough; otherwise truncate and add hint
+    if len(s) > 200:
+        return s[:200] + "… Try rephrasing your request or selecting a different file."
+    return s
+
+
 def _fail_refinement(job_db, job_id, refinement_id, progress_callback, error_msg, previous_status: str = "completed"):
     """Mark refinement as failed and restore job status so dashboard shows correct state."""
     logger.error("Refinement failed: %s", error_msg)
-    job_db.fail_refinement(refinement_id, error_msg)
+    friendly_msg = _user_friendly_llm_error(error_msg)
+    job_db.fail_refinement(refinement_id, friendly_msg)
     job_db.update_job(job_id, {
         "status": previous_status,
         "current_phase": "completed",
         "progress": 100,
         "error": None,
     })
-    progress_callback("refinement_failed", 0, error_msg)
-    return {"status": "error", "error": error_msg}
+    progress_callback("refinement_failed", 0, friendly_msg)
+    return {"status": "error", "error": friendly_msg}
 
 
 def _complete_refinement(workspace_path, job_db, job_id, refinement_id, progress_callback, message, previous_status: str = "completed"):

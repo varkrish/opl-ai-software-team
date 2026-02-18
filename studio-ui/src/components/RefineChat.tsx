@@ -352,7 +352,12 @@ const RefineChat: React.FC<RefineChatProps> = ({
                   : m
               )
             );
-            addSystemMsg('You can try rephrasing your request or selecting a different file scope.');
+            const isServiceError = /503|502|429|temporarily unavailable|rate limit|quota|timed out/i.test(failMsg);
+            if (isServiceError) {
+              addSystemMsg('You can try again in a few minutes once the service is back.');
+            } else {
+              addSystemMsg('You can try rephrasing your request or selecting a different file scope.');
+            }
             setError(failMsg);
             setIsRefining(false);
             return;

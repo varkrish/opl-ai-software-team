@@ -26,30 +26,30 @@ import {
   GithubIcon,
   PlusCircleIcon,
 } from '@patternfly/react-icons';
-import { createJob, createMigrationJob, getBackends, startMigration, getMigrationStatus } from '../api/client';
+import { createJob, createMigrationJob, createRefactorJob, getBackends, startMigration, startRefactor, getMigrationStatus } from '../api/client';
 import type { BackendOption } from '../types';
 import BuildProgress from '../components/BuildProgress';
 
-type ProjectMode = 'build' | 'migration';
+type ProjectMode = 'build' | 'migration' | 'refactor';
 
 /* ── Constants ────────────────────────────────────────────────────────────── */
 const ALLOWED_EXT = new Set([
-  'txt','md','pdf','json','yaml','yml','csv','xml',
-  'py','js','ts','java','go','rs','rb','sh',
-  'html','css','sql','proto','graphql',
-  'png','jpg','jpeg','svg',
-  'doc','docx','pptx','xlsx',
+  'txt', 'md', 'pdf', 'json', 'yaml', 'yml', 'csv', 'xml',
+  'py', 'js', 'ts', 'java', 'go', 'rs', 'rb', 'sh',
+  'html', 'css', 'sql', 'proto', 'graphql',
+  'png', 'jpg', 'jpeg', 'svg',
+  'doc', 'docx', 'pptx', 'xlsx',
 ]);
 
-const MTA_REPORT_EXT = new Set(['json','csv','html','xml','yaml','yml','txt']);
+const MTA_REPORT_EXT = new Set(['json', 'csv', 'html', 'xml', 'yaml', 'yml', 'txt']);
 
 const GITHUB_URL_RE = /^https?:\/\/github\.com\/[\w.\-]+\/[\w.\-]+(\/.*)?$/;
 
 function getFileIcon(name: string) {
   const ext = name.split('.').pop()?.toLowerCase() || '';
-  if (['py','js','ts','java','go','rs','rb','sh','sql','html','css'].includes(ext))
+  if (['py', 'js', 'ts', 'java', 'go', 'rs', 'rb', 'sh', 'sql', 'html', 'css'].includes(ext))
     return <FileCodeIcon style={{ color: '#4A90E2' }} />;
-  if (['md','txt','pdf','doc','docx','pptx','xlsx'].includes(ext))
+  if (['md', 'txt', 'pdf', 'doc', 'docx', 'pptx', 'xlsx'].includes(ext))
     return <FileAltIcon style={{ color: '#7B68EE' }} />;
   return <FileIcon style={{ color: '#6A6E73' }} />;
 }
@@ -82,6 +82,8 @@ const Landing: React.FC = () => {
   const [migrationNotes, setMigrationNotes] = useState('');
   const [mtaReportFiles, setMtaReportFiles] = useState<File[]>([]);
   const mtaReportRef = useRef<HTMLInputElement>(null);
+  const [targetStack, setTargetStack] = useState('');
+  const [techPreferences, setTechPreferences] = useState('');
   const [sourceArchive, setSourceArchive] = useState<File | null>(null);
   const sourceArchiveRef = useRef<HTMLInputElement>(null);
   const [mtaDragActive, setMtaDragActive] = useState(false);
@@ -343,6 +345,47 @@ const Landing: React.FC = () => {
     }
   };
 
+  const handleCreateRefactorProject = async () => {
+    if (!targetStack.trim()) { setError('Please specify the target stack'); return; }
+    if (!sourceArchive && githubUrls.length === 0) {
+      setError('Please upload source code or add a GitHub repo');
+      return;
+    }
+    setCreating(true);
+    setError(null);
+    try {
+      const srcName = sourceArchive ? sourceArchive.name : (githubUrls.length > 0 ? githubUrls.map(u => u.replace(/\/+$/, '').split('/').pop()).join(', ') : '');
+      const jobLabel = `[Refactor] ${srcName} -> ${targetStack}`;
+
+      // 1. Create job
+      const result = await createRefactorJob(
+        jobLabel,
+        sourceArchive,
+        githubUrls.length > 0 ? githubUrls : undefined,
+        selectedBackend
+      );
+
+      console.log('[Refactor] Job created:', result);
+      setSubmittedVision(`Refactor to ${targetStack}`);
+      setActiveJobId(result.job_id);
+
+      // 2. Auto-trigger
+      setTimeout(async () => {
+        try {
+          await startRefactor(result.job_id, targetStack, techPreferences || '');
+        } catch (err) {
+          console.error('Auto-trigger refactor failed:', err);
+        }
+      }, 1500);
+
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Unknown error';
+      setError(`Failed to create refactor project: ${msg}`);
+    } finally {
+      setCreating(false);
+    }
+  };
+
   const handleNewProject = () => {
     setActiveJobId(null);
     setSubmittedVision('');
@@ -352,6 +395,8 @@ const Landing: React.FC = () => {
     setMigrationNotes('');
     setMtaReportFiles([]);
     setSourceArchive(null);
+    setTargetStack('');
+    setTechPreferences('');
   };
 
   const examplePrompts = [
@@ -670,6 +715,7 @@ const Landing: React.FC = () => {
             {([
               { key: 'build' as ProjectMode, label: 'Build New Project', icon: <RocketIcon style={{ fontSize: '0.75rem' }} /> },
               { key: 'migration' as ProjectMode, label: 'MTA Migration', icon: <ArrowRightIcon style={{ fontSize: '0.75rem' }} /> },
+              { key: 'refactor' as ProjectMode, label: 'Refactor Agent', icon: <CodeIcon style={{ fontSize: '0.75rem' }} /> },
             ]).map((m) => (
               <button
                 key={m.key}
@@ -772,8 +818,8 @@ const Landing: React.FC = () => {
                     fontSize: '0.75rem', color: '#CC0000', cursor: 'pointer',
                     fontFamily: '"Red Hat Text", sans-serif', transition: 'all 0.15s', lineHeight: 1.4,
                   }}
-                  onMouseOver={(e) => { e.currentTarget.style.background = 'rgba(238,0,0,0.10)'; }}
-                  onMouseOut={(e) => { e.currentTarget.style.background = 'rgba(238,0,0,0.04)'; }}
+                    onMouseOver={(e) => { e.currentTarget.style.background = 'rgba(238,0,0,0.10)'; }}
+                    onMouseOut={(e) => { e.currentTarget.style.background = 'rgba(238,0,0,0.04)'; }}
                   >
                     {p}
                   </button>
@@ -1088,6 +1134,160 @@ const Landing: React.FC = () => {
               </div>
             </>
           )}
+
+          {/* ═══════════════════════════════════════════════════════════════ */}
+          {/* REFACTOR AGENT MODE                                           */}
+          {/* ═══════════════════════════════════════════════════════════════ */}
+          {projectMode === 'refactor' && (
+            <div style={{
+              background: 'white', borderRadius: '16px', padding: '1.25rem',
+              boxShadow: '0 2px 16px rgba(0,0,0,0.06)', border: '1px solid #E7E7E7',
+              display: 'flex', flexDirection: 'column', gap: '1rem',
+            }}>
+              {/* Target Architecture Banner */}
+              <div style={{
+                background: 'linear-gradient(to right, #f0f9ff, #e6f2ff)',
+                border: '1px solid #bae6fd',
+                borderRadius: '12px',
+                padding: '1rem',
+                display: 'flex',
+                alignItems: 'start',
+                gap: '0.75rem'
+              }}>
+                <div style={{
+                  background: '#0284c7', color: 'white', borderRadius: '50%', width: '24px', height: '24px',
+                  display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0, fontWeight: 'bold', fontSize: '14px'
+                }}>✓</div>
+                <div>
+                  <h4 style={{ margin: '0 0 0.5rem 0', color: '#0369a1', fontSize: '0.9rem', fontWeight: 700 }}>
+                    Target Architecture: Cloud Native & DDD
+                  </h4>
+                  <ul style={{ margin: 0, paddingLeft: '1.2rem', color: '#0c4a6e', fontSize: '0.8rem', lineHeight: '1.4' }}>
+                    <li><strong>12-Factor App:</strong> Stateless processes, config via env, external backing services.</li>
+                    <li><strong>Domain-Driven Design:</strong> Code organized by Bounded Contexts (e.g., <code>billing/</code>, <code>inventory/</code>).</li>
+                    <li><strong>Modernization:</strong> No legacy anti-patterns allowed.</li>
+                  </ul>
+                </div>
+              </div>
+
+              {/* Step 1: Target Stack */}
+              <div>
+                <label style={{ fontWeight: 600, fontSize: '0.8125rem', color: '#151515', display: 'block', marginBottom: '0.3rem' }}>
+                  <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.35rem' }}>
+                    <Label color={targetStack ? 'green' : 'blue'} isCompact>1</Label> Target Stack
+                    {targetStack
+                      ? <span style={{ color: '#3E8635', fontSize: '0.75rem', fontWeight: 400 }}>Ready</span>
+                      : <span style={{ color: '#C9190B', fontSize: '0.75rem', fontWeight: 400 }}>Required</span>
+                    }
+                  </span>
+                </label>
+                <TextArea
+                  value={targetStack}
+                  onChange={(_e, v) => setTargetStack(v)}
+                  placeholder="e.g., Migrate Java 8 to Java 17, Spring Boot 3, and replace JSP with React."
+                  style={{ minHeight: '80px', fontSize: '0.9375rem', fontFamily: '"Red Hat Text", sans-serif', resize: 'vertical' }}
+                  aria-label="Target Stack"
+                />
+              </div>
+
+              {/* Step 2: Tech Preferences (Optional) */}
+              <div>
+                <label style={{ fontWeight: 600, fontSize: '0.8125rem', color: '#151515', display: 'block', marginBottom: '0.3rem' }}>
+                  <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.35rem' }}>
+                    <Label color='blue' isCompact>2</Label> Tech Preferences
+                    <span style={{ color: '#72767B', fontSize: '0.75rem', fontWeight: 400 }}>(Optional)</span>
+                  </span>
+                </label>
+                <TextArea
+                  value={techPreferences}
+                  onChange={(_e, v) => setTechPreferences(v)}
+                  placeholder="e.g., Use Postgres 15, Testcontainers for integration tests, Mapstruct for mapping."
+                  style={{ minHeight: '60px', fontSize: '0.9375rem', fontFamily: '"Red Hat Text", sans-serif', resize: 'vertical' }}
+                  aria-label="Tech Preferences"
+                />
+              </div>
+
+              {/* Step 3: Legacy source code (ZIP upload) - Reusing migration components */}
+              <div>
+                <label style={{ fontWeight: 600, fontSize: '0.8125rem', color: '#151515', display: 'block', marginBottom: '0.3rem' }}>
+                  <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.35rem' }}>
+                    <Label color={(sourceArchive || githubUrls.length > 0) ? 'green' : 'blue'} isCompact>3</Label> Source Code
+                    {(sourceArchive || githubUrls.length > 0)
+                      ? <span style={{ color: '#3E8635', fontSize: '0.75rem', fontWeight: 400 }}>Ready</span>
+                      : <span style={{ color: '#C9190B', fontSize: '0.75rem', fontWeight: 400 }}>Required</span>
+                    }
+                  </span>
+                </label>
+                <p style={{ fontSize: '0.75rem', color: '#72767B', marginBottom: '0.4rem' }}>
+                  Upload a ZIP of your project or add a GitHub URL.
+                </p>
+                <div
+                  onDragEnter={handleSourceArchiveDrag} onDragLeave={handleSourceArchiveDrag} onDragOver={handleSourceArchiveDrag}
+                  onDrop={handleSourceArchiveDrop}
+                  onClick={() => sourceArchiveRef.current?.click()}
+                  style={{
+                    padding: '0.75rem', border: `2px dashed ${srcDragActive ? '#0066CC' : (sourceArchive ? '#3E8635' : '#D2D2D2')}`,
+                    borderRadius: '8px', background: srcDragActive ? 'rgba(0,102,204,0.02)' : (sourceArchive ? 'rgba(62,134,53,0.02)' : '#FAFAFA'),
+                    cursor: 'pointer', textAlign: 'center', marginBottom: '0.5rem',
+                  }}
+                >
+                  <input ref={sourceArchiveRef} type="file" style={{ display: 'none' }}
+                    accept=".zip"
+                    onChange={(e) => { handleSourceArchive(e.target.files); e.target.value = ''; }} />
+                  <UploadIcon style={{ marginRight: '0.4rem', color: sourceArchive ? '#3E8635' : '#0066CC', fontSize: '0.85rem' }} />
+                  <span style={{ fontSize: '0.8125rem', color: sourceArchive ? '#3E8635' : '#0066CC', fontWeight: 500 }}>
+                    {sourceArchive ? 'Replace ZIP' : 'Drop project ZIP here or click to upload'}
+                  </span>
+                </div>
+                {sourceArchive && (
+                  <div style={{
+                    display: 'inline-flex', alignItems: 'center', gap: '0.4rem',
+                    background: 'rgba(62,134,53,0.06)', border: '1px solid rgba(62,134,53,0.3)', borderRadius: '8px',
+                    padding: '0.35rem 0.6rem', marginBottom: '0.5rem',
+                  }}>
+                    <FileCodeIcon style={{ color: '#3E8635', fontSize: '0.85rem' }} />
+                    <span style={{ fontSize: '0.8125rem', fontWeight: 500, color: '#151515' }}>{sourceArchive.name}</span>
+                    <button onClick={() => setSourceArchive(null)} style={{ background: 'none', border: 'none', cursor: 'pointer', padding: '2px', display: 'flex', color: '#6A6E73' }}><TimesIcon style={{ fontSize: '0.65rem' }} /></button>
+                  </div>
+                )}
+
+                {/* GitHub Input */}
+                <div style={{ display: 'flex', gap: '0.4rem' }}>
+                  <div style={{ flex: 1, display: 'flex', alignItems: 'center', gap: '0.4rem', background: '#FAFAFA', border: '1px solid #D2D2D2', borderRadius: '8px', padding: '0.1rem 0.6rem' }}>
+                    <GithubIcon style={{ color: '#151515', fontSize: '0.8rem', flexShrink: 0 }} />
+                    <TextInput value={githubInput} onChange={(_e, v) => { setGithubInput(v); setGithubError(null); }}
+                      placeholder="https://github.com/user/repo" aria-label="GitHub URL"
+                      style={{ border: 'none', background: 'transparent', fontSize: '0.8125rem', padding: '0.35rem 0' }}
+                      onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); addGithubUrl(); } }} />
+                  </div>
+                  <Button variant="secondary" size="sm" onClick={addGithubUrl} isDisabled={!githubInput.trim()} icon={<PlusCircleIcon />}>Add</Button>
+                </div>
+                {githubUrls.length > 0 && (
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.35rem', marginTop: '0.4rem' }}>
+                    {githubUrls.map((url) => (
+                      <span key={url} style={{ display: 'inline-flex', alignItems: 'center', gap: '0.3rem', background: '#F0F7FF', border: '1px solid #BEE1F4', borderRadius: '6px', padding: '0.2rem 0.5rem', fontSize: '0.75rem' }}>
+                        <GithubIcon style={{ fontSize: '0.7rem', color: '#0066CC' }} />{extractRepoName(url)}
+                        <button onClick={() => removeGithubUrl(url)} style={{ background: 'none', border: 'none', cursor: 'pointer', padding: '1px', display: 'flex', color: '#6A6E73' }}><TimesIcon style={{ fontSize: '0.65rem' }} /></button>
+                      </span>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              <div style={{ paddingTop: '0.75rem', borderTop: '1px solid #F0F0F0', display: 'flex', justifyContent: 'flex-end' }}>
+                <Button variant="primary" onClick={handleCreateRefactorProject}
+                  isLoading={creating}
+                  isDisabled={!targetStack.trim() || (!sourceArchive && githubUrls.length === 0)}
+                  style={{
+                    backgroundColor: '#0066CC', border: 'none', fontWeight: 600,
+                    padding: '0.5rem 1.75rem', fontSize: '0.875rem', borderRadius: '10px', color: 'white',
+                  }}
+                  icon={creating ? <Spinner size="sm" /> : <CodeIcon />} iconPosition="end">
+                  {creating ? 'Starting...' : 'Start Refactor'}
+                </Button>
+              </div>
+            </div>
+          )}
         </div>
       </div>
 
@@ -1116,13 +1316,13 @@ const Landing: React.FC = () => {
 
         <div style={{ display: 'flex', flexDirection: 'column', gap: '0.6rem' }}>
           {[
-            { icon: <CubesIcon />,     gradient: 'linear-gradient(135deg, #4A90E2, #357ABD)', title: 'Multi-Agent Crew',   desc: '6 AI agents: PM, Architect, Dev, QA, Frontend, DevOps.' },
-            { icon: <CodeIcon />,       gradient: 'linear-gradient(135deg, #A855F7, #7C3AED)', title: 'Production Ready',   desc: 'TDD, code review, security checks — tested & deployable.' },
-            { icon: <RocketIcon />,     gradient: 'linear-gradient(135deg, #EE0000, #CC0000)', title: 'Lightning Fast',     desc: 'Idea to prototype in minutes with real-time tracking.' },
-            { icon: <LightbulbIcon />,  gradient: 'linear-gradient(135deg, #F59E0B, #D97706)', title: 'Prompt-to-Refine',   desc: 'Describe edits in English — add, delete, restructure.' },
-            { icon: <GithubIcon />,     gradient: 'linear-gradient(135deg, #6EE7B7, #10B981)', title: 'Context-Aware',      desc: 'Attach repos & docs — no hallucinated APIs.' },
-            { icon: <ArrowRightIcon />, gradient: 'linear-gradient(135deg, #0066CC, #004080)', title: 'MTA Migration',      desc: 'Upload an MTA report — AI migrates every file for you.' },
-            { icon: <CodeIcon />,       gradient: 'linear-gradient(135deg, #38BDF8, #0EA5E9)', title: 'Pluggable LLMs',     desc: 'Red Hat MaaS, OpenRouter, Ollama — swap from the UI.' },
+            { icon: <CubesIcon />, gradient: 'linear-gradient(135deg, #4A90E2, #357ABD)', title: 'Multi-Agent Crew', desc: '6 AI agents: PM, Architect, Dev, QA, Frontend, DevOps.' },
+            { icon: <CodeIcon />, gradient: 'linear-gradient(135deg, #A855F7, #7C3AED)', title: 'Production Ready', desc: 'TDD, code review, security checks — tested & deployable.' },
+            { icon: <RocketIcon />, gradient: 'linear-gradient(135deg, #EE0000, #CC0000)', title: 'Lightning Fast', desc: 'Idea to prototype in minutes with real-time tracking.' },
+            { icon: <LightbulbIcon />, gradient: 'linear-gradient(135deg, #F59E0B, #D97706)', title: 'Prompt-to-Refine', desc: 'Describe edits in English — add, delete, restructure.' },
+            { icon: <GithubIcon />, gradient: 'linear-gradient(135deg, #6EE7B7, #10B981)', title: 'Context-Aware', desc: 'Attach repos & docs — no hallucinated APIs.' },
+            { icon: <ArrowRightIcon />, gradient: 'linear-gradient(135deg, #0066CC, #004080)', title: 'MTA Migration', desc: 'Upload an MTA report — AI migrates every file for you.' },
+            { icon: <CodeIcon />, gradient: 'linear-gradient(135deg, #38BDF8, #0EA5E9)', title: 'Pluggable LLMs', desc: 'Red Hat MaaS, OpenRouter, Ollama — swap from the UI.' },
           ].map((c, i) => (
             <div
               key={c.title}

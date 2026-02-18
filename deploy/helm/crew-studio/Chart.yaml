@@ -1,0 +1,14 @@
+apiVersion: v2
+name: crew-studio
+description: AI Crew Studio — Flask backend + React/PatternFly frontend on OpenShift
+type: application
+version: 0.1.0
+appVersion: "1.0.0"
+keywords:
+  - ai
+  - migration
+  - mta
+  - openshift
+home: https://github.com/redhat/crew-coding-bots
+maintainers:
+  - name: Red Hat AI Team

@@ -10,11 +10,6 @@ import {
   PageSidebar,
   PageSidebarBody,
   PageToggleButton,
-  Toolbar,
-  ToolbarContent,
-  ToolbarItem,
-  SearchInput,
-  NotificationBadge,
   PageSection,
   Flex,
   FlexItem,
@@ -23,7 +18,6 @@ import {
 } from '@patternfly/react-core';
 import {
   BarsIcon,
-  BellIcon,
 } from '@patternfly/react-icons';
 
 const navItems = [
@@ -39,7 +33,6 @@ const AppLayout: React.FC = () => {
   const navigate = useNavigate();
   const location = useLocation();
   const [isSidebarOpen, setIsSidebarOpen] = useState(true);
-  const [searchValue, setSearchValue] = useState('');
 
   const onNavSelect = (
     _event: React.FormEvent<HTMLInputElement>,
@@ -47,47 +40,6 @@ const AppLayout: React.FC = () => {
   ) => {
     navigate(result.itemId as string);
   };
-
-  const headerToolbar = (
-    <Toolbar id="toolbar" isFullHeight isStatic>
-      <ToolbarContent>
-        <ToolbarItem>
-          <span style={{ color: 'rgba(255,255,255,0.85)', fontSize: '0.875rem' }}>
-            Project /{' '}
-            <strong style={{ color: '#ffffff' }}>opl-ai-software-team</strong>
-          </span>
-        </ToolbarItem>
-        <ToolbarItem variant="separator" style={{ '--pf-v5-c-divider--BackgroundColor': 'rgba(255,255,255,0.3)' } as React.CSSProperties} />
-        <ToolbarItem>
-          <SearchInput
-            placeholder="Search tasks..."
-            value={searchValue}
-            onChange={(_event, value) => setSearchValue(value)}
-            onClear={() => setSearchValue('')}
-            style={{
-              '--pf-v5-c-search-input--BackgroundColor': 'rgba(255,255,255,0.15)',
-              '--pf-v5-c-search-input--BorderTopColor': 'transparent',
-              '--pf-v5-c-search-input--BorderRightColor': 'transparent',
-              '--pf-v5-c-search-input--BorderBottomColor': 'rgba(255,255,255,0.3)',
-              '--pf-v5-c-search-input--BorderLeftColor': 'transparent',
-              '--pf-v5-c-search-input__text-input--Color': '#ffffff',
-              color: '#ffffff',
-            } as React.CSSProperties}
-          />
-        </ToolbarItem>
-        <ToolbarItem>
-          <NotificationBadge
-            variant="attention"
-            onClick={() => {}}
-            aria-label="Notifications"
-            style={{ color: 'white' }}
-          >
-            <BellIcon />
-          </NotificationBadge>
-        </ToolbarItem>
-      </ToolbarContent>
-    </Toolbar>
-  );
 
   const mastheadMinHeight = '4.375rem'; // PatternFly masthead default
 
@@ -139,17 +91,20 @@ const AppLayout: React.FC = () => {
           AI Crew
         </span>
       </div>
-      {/* ── Right section: red background with toolbar ── */}
+      {/* ── Right section: red background ── */}
       <div style={{
         display: 'flex',
         alignItems: 'center',
+        justifyContent: 'flex-end',
         minHeight: mastheadMinHeight,
         background: '#EE0000',
         flex: 1,
-        padding: '0 1.25rem',
+        padding: '0 1.5rem',
         borderBottom: '1px solid #cc0000',
       }}>
-        {headerToolbar}
+        <span style={{ color: 'rgba(255,255,255,0.7)', fontSize: '0.8125rem' }}>
+          opl-ai-software-team
+        </span>
       </div>
     </Masthead>
   );

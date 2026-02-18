@@ -57,12 +57,19 @@ class GenericLlamaLLM(LLM):
             model_name=self.model,
         )
 
+    def _completions_url(self) -> str:
+        """Build the chat completions URL, normalising the base to include /v1."""
+        base = self.api_base.rstrip("/")
+        if not base.endswith("/v1"):
+            base = f"{base}/v1"
+        return f"{base}/chat/completions"
+
     def chat(self, messages: list[ChatMessage], **kwargs) -> ChatResponse:
         import httpx
         import time
         from llama_index.core.llms import ChatResponse, ChatMessage, MessageRole
         
-        url = f"{self.api_base.rstrip('/')}/chat/completions"
+        url = self._completions_url()
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json"
@@ -174,7 +181,7 @@ class GenericLlamaLLM(LLM):
         import httpx
         from llama_index.core.llms import ChatResponse, ChatMessage, MessageRole
         
-        url = f"{self.api_base.rstrip('/')}/chat/completions"
+        url = self._completions_url()
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json"

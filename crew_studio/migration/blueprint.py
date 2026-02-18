@@ -104,10 +104,21 @@ def start_migration(job_id: str):
                 job_db=job_db,
                 progress_callback=_progress_callback,
             )
-            job_db.update_job(job_id, {
-                "status": "completed",
-                "current_phase": "completed",
-            })
+            # If any migration issues failed, mark job as failed so it's clear something went wrong
+            failed = job_db.get_failed_migration_issues(job_id)
+            if failed:
+                failed_count = len(failed)
+                sample_error = failed[0].get("error") or "Unknown"
+                job_db.update_job(job_id, {
+                    "status": "failed",
+                    "current_phase": "migration_failed",
+                    "error": f"{failed_count} migration task(s) failed. Example: {sample_error[:400]}",
+                })
+            else:
+                job_db.update_job(job_id, {
+                    "status": "completed",
+                    "current_phase": "completed",
+                })
         except Exception as e:
             logger.error("Migration thread failed: %s", e)
             job_db.update_job(job_id, {

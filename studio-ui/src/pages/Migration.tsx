@@ -40,6 +40,7 @@ import {
   getMigrationChanges,
   getJobs,
   getJob,
+  restartJob,
   MigrationIssue,
   MigrationSummary,
   MigrationChanges,
@@ -88,6 +89,8 @@ const Migration: React.FC = () => {
   const [detailLoading, setDetailLoading] = useState(false);
   const [fileChanges, setFileChanges] = useState<MigrationChanges | null>(null);
   const [changesExpanded, setChangesExpanded] = useState(false);
+  const [retryingFailed, setRetryingFailed] = useState(false);
+  const [progressAccordionExpanded, setProgressAccordionExpanded] = useState(false);
 
   // ── Load migration projects (list view) ──────────────────────────────
   useEffect(() => {
@@ -301,7 +304,13 @@ const Migration: React.FC = () => {
   const completedPct = summary && summary.total > 0
     ? Math.round(((summary.completed + summary.failed + summary.skipped) / summary.total) * 100)
     : 0;
-  
+
+  // Mandatory (high severity) progress: fixed count / total
+  const mandatoryIssues = issues.filter((i) => i.severity === 'mandatory');
+  const mandatoryTotal = mandatoryIssues.length;
+  const mandatoryFixed = mandatoryIssues.filter((i) => i.status === 'completed').length;
+  const mandatoryPct = mandatoryTotal > 0 ? Math.round((mandatoryFixed / mandatoryTotal) * 100) : 100;
+
   // Show parsing/analyzing phase even when no issues yet
   const showParsingProgress = (currentPhase === 'parsing' || currentPhase === 'analyzing') && summary?.total === 0;
 
@@ -324,70 +333,125 @@ const Migration: React.FC = () => {
         </SplitItem>
       </Split>
 
-      {/* Progress bar */}
-      {summary && summary.total > 0 && (
-        <Card style={{ marginBottom: '1rem' }}>
-          <CardBody>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', marginBottom: '0.75rem' }}>
-              {migrating && <SyncAltIcon style={{ color: '#0066CC', animation: 'spin 2s linear infinite' }} />}
-              <span style={{ fontWeight: 600 }}>
-                {migrating ? 'Migration in progress…' : 'Migration complete'}
+      {/* Compact progress strip (collapsible) */}
+      <style>{`@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }`}</style>
+      {(showParsingProgress || (summary && summary.total > 0)) && (
+        <div
+          style={{
+            marginBottom: '0.75rem',
+            border: '1px solid #D2D2D2',
+            borderRadius: 6,
+            background: '#FAFAFA',
+            fontSize: '0.8125rem',
+          }}
+        >
+          <ExpandableSection
+            isExpanded={progressAccordionExpanded}
+            onToggle={() => setProgressAccordionExpanded(!progressAccordionExpanded)}
+            toggleContent={
+              <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap', lineHeight: 1.4 }}>
+                {showParsingProgress ? (
+                  <>
+                    <SyncAltIcon style={{ color: '#0066CC', fontSize: '0.75rem', animation: 'spin 2s linear infinite' }} />
+                    <span style={{ fontWeight: 600 }}>
+                      {currentPhase === 'parsing' ? 'Parsing…' : 'Analyzing…'}
+                    </span>
+                    {lastMsg && <span style={{ color: '#6A6E73', fontSize: '0.75rem' }}>— {lastMsg}</span>}
+                  </>
+                ) : summary ? (
+                  <>
+                    {migrating && <SyncAltIcon style={{ color: '#0066CC', fontSize: '0.75rem', animation: 'spin 2s linear infinite' }} />}
+                    <span style={{ fontWeight: 600 }}>{migrating ? 'In progress' : 'Complete'}</span>
+                    <span style={{ color: '#6A6E73' }}>
+                      {summary.completed + summary.failed + summary.skipped}/{summary.total}
+                    </span>
+                    <span style={{ color: '#B8BBBE' }}>·</span>
+                    <span>{completedPct}%</span>
+                    {mandatoryTotal > 0 && (
+                      <>
+                        <span style={{ color: '#B8BBBE' }}>·</span>
+                        <span>Mandatory {mandatoryFixed}/{mandatoryTotal}</span>
+                      </>
+                    )}
+                    <span style={{ color: '#B8BBBE' }}>·</span>
+                    <span style={{ display: 'inline-flex', gap: 4, flexWrap: 'wrap' }} data-testid="migration-summary">
+                      <Label color="grey" isCompact>Total: {summary.total}</Label>
+                      {summary.running > 0 && <Label color="blue" isCompact>Running: {summary.running}</Label>}
+                      <Label color="green" isCompact>Done: {summary.completed}</Label>
+                      {summary.failed > 0 && <Label color="red" isCompact>Failed: {summary.failed}</Label>}
+                    </span>
+                  </>
+                ) : null}
               </span>
-              <span style={{ fontSize: '0.8125rem', color: '#6A6E73' }}>
-                {summary.completed + summary.failed + summary.skipped} / {summary.total} issues processed
-              </span>
+            }
+          >
+            <div style={{ padding: '0.5rem 0.75rem 0.625rem', borderTop: '1px solid #E8E8E8' }}>
+              {showParsingProgress && (
+                <>
+                  <Progress
+                    value={job?.progress ?? 0}
+                    title={currentPhase === 'parsing' ? 'Parsing' : 'Analysis'}
+                    size="sm"
+                  />
+                  <p style={{ fontSize: '0.6875rem', color: '#6A6E73', marginTop: '0.25rem' }}>
+                    {currentPhase === 'parsing' ? 'Issues will appear shortly' : 'AI is analyzing — may take a few minutes'}
+                  </p>
+                </>
+              )}
+              {summary && summary.total > 0 && (
+                <div style={{ display: 'flex', gap: '1.5rem', alignItems: 'flex-start', flexWrap: 'wrap' }}>
+                  <div style={{ flex: 1, minWidth: 200 }}>
+                    <Progress
+                      value={completedPct}
+                      title="Migration progress"
+                      size="sm"
+                      variant={summary.failed > 0 ? ProgressVariant.warning : undefined}
+                    />
+                  </div>
+                  {mandatoryTotal > 0 && (
+                    <div style={{ flex: 1, minWidth: 200 }} data-testid="migration-mandatory-progress">
+                      <Progress
+                        value={mandatoryPct}
+                        title={`Mandatory: ${mandatoryFixed}/${mandatoryTotal} fixed`}
+                        size="sm"
+                      />
+                    </div>
+                  )}
+                  {summary.failed > 0 && !migrating && (
+                    <Button
+                      variant="link"
+                      size="sm"
+                      isDisabled={retryingFailed}
+                      style={{ padding: 0, fontSize: '0.75rem' }}
+                      onClick={async () => {
+                        if (!jobId || retryingFailed) return;
+                        setRetryingFailed(true);
+                        try {
+                          await restartJob(jobId);
+                          pollStatus();
+                        } catch (e) {
+                          console.error('Retry failed tasks failed:', e);
+                        } finally {
+                          setRetryingFailed(false);
+                        }
+                      }}
+                      icon={retryingFailed ? <Spinner size="sm" /> : undefined}
+                    >
+                      {retryingFailed ? 'Retrying…' : `Retry ${summary.failed} failed`}
+                    </Button>
+                  )}
+                </div>
+              )}
             </div>
-            <Progress
-              value={completedPct}
-              title="Migration progress"
-              variant={summary.failed > 0 ? ProgressVariant.warning : undefined}
-              style={{ marginBottom: '0.5rem' }}
-            />
-            <style>{`@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }`}</style>
-
-            {/* Summary badges */}
-            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }} data-testid="migration-summary">
-              <Label color="grey">Total: {summary.total}</Label>
-              {summary.pending > 0 && <Label color="gold">Pending: {summary.pending}</Label>}
-              {summary.running > 0 && <Label color="blue">Running: {summary.running}</Label>}
-              <Label color="green">Completed: {summary.completed}</Label>
-              {summary.failed > 0 && <Label color="red">Failed: {summary.failed}</Label>}
-              {summary.skipped > 0 && <Label color="grey">Skipped: {summary.skipped}</Label>}
-            </div>
-          </CardBody>
-        </Card>
+          </ExpandableSection>
+        </div>
       )}
 
-      {/* Parsing/Analysis progress (shown before issues appear) */}
-      {showParsingProgress && (
-        <Card style={{ marginBottom: '1rem' }}>
-          <CardBody>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', marginBottom: '0.75rem' }}>
-              <SyncAltIcon style={{ color: '#0066CC', animation: 'spin 2s linear infinite' }} />
-              <span style={{ fontWeight: 600 }}>
-                {currentPhase === 'parsing' ? 'Parsing MTA Report' : 'Analyzing Report'}
-              </span>
-            </div>
-            {lastMsg && (
-              <Alert variant="info" isInline title={lastMsg} style={{ marginBottom: '0.75rem' }} />
-            )}
-            <Progress
-              value={job?.progress ?? 0}
-              title={currentPhase === 'parsing' ? 'Parsing progress' : 'Analysis progress'}
-              style={{ marginBottom: '0.5rem' }}
-            />
-            <p style={{ fontSize: '0.8125rem', color: '#6A6E73', marginTop: '0.5rem' }}>
-              {currentPhase === 'parsing' 
-                ? '⚡ Fast deterministic parsing (no LLM) — issues will appear shortly'
-                : '🤖 AI is analyzing the report — this may take a few minutes'}
-            </p>
-          </CardBody>
-        </Card>
-      )}
-
+      {/* Main content (full width) */}
+      <div>
       {/* No issues yet (only show if not parsing/analyzing) */}
       {(!summary || summary.total === 0) && !migrating && !showParsingProgress && (
-        <Card>
+        <Card style={{ marginBottom: '1rem' }}>
           <CardBody>
             <EmptyState>
               <EmptyStateHeader
@@ -492,7 +556,7 @@ const Migration: React.FC = () => {
         <Card>
           <CardTitle>Migration Issues</CardTitle>
           <CardBody style={{ padding: 0 }}>
-            <Table aria-label="Migration issues" data-testid="migration-issues-table">
+            <Table aria-label="Migration issues" data-testid="migration-issues-table" style={{ tableLayout: 'fixed' }}>
               <Thead>
                 <Tr>
                   <Th>ID</Th>
@@ -500,11 +564,19 @@ const Migration: React.FC = () => {
                   <Th>Severity</Th>
                   <Th>Effort</Th>
                   <Th>Status</Th>
-                  <Th>Files</Th>
+                  <Th style={{ width: '25%', minWidth: 160 }}>Files</Th>
                 </Tr>
               </Thead>
               <Tbody>
-                {issues.map((issue) => (
+                {issues.map((issue) => {
+                  let filesText = '';
+                  try {
+                    const files = typeof issue.files === 'string' ? JSON.parse(issue.files) : issue.files;
+                    filesText = Array.isArray(files) ? files.join(', ') : String(issue.files ?? '');
+                  } catch {
+                    filesText = String(issue.files ?? '');
+                  }
+                  return (
                   <React.Fragment key={issue.id}>
                     <Tr
                       style={{ cursor: 'pointer' }}
@@ -521,15 +593,14 @@ const Migration: React.FC = () => {
                       <Td>
                         <Label color={statusColor(issue.status)}>{issue.status}</Label>
                       </Td>
-                      <Td>
-                        {(() => {
-                          try {
-                            const files = typeof issue.files === 'string' ? JSON.parse(issue.files) : issue.files;
-                            return Array.isArray(files) ? files.join(', ') : String(issue.files);
-                          } catch {
-                            return String(issue.files);
-                          }
-                        })()}
+                      <Td
+                        style={{
+                          wordBreak: 'break-word',
+                          whiteSpace: 'normal',
+                          maxWidth: '25%',
+                        }}
+                      >
+                        {filesText}
                       </Td>
                     </Tr>
                     {expandedIssue === issue.id && (
@@ -554,12 +625,14 @@ const Migration: React.FC = () => {
                       </Tr>
                     )}
                   </React.Fragment>
-                ))}
+                  );
+                })}
               </Tbody>
             </Table>
           </CardBody>
         </Card>
       )}
+      </div>
     </PageSection>
   );
 };

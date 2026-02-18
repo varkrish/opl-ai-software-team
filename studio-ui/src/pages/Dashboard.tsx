@@ -24,17 +24,20 @@ import {
   SelectOption,
   MenuToggle,
   SelectList,
+  Dropdown,
+  DropdownItem,
+  DropdownList,
 } from '@patternfly/react-core';
 import {
   CubesIcon,
   CheckCircleIcon,
   ClockIcon,
   ExclamationTriangleIcon,
-  FolderOpenIcon,
+  EllipsisVIcon,
 } from '@patternfly/react-icons';
-import { useNavigate, Link } from 'react-router-dom';
+import { useNavigate } from 'react-router-dom';
 import { usePolling } from '../hooks/usePolling';
-import { getStats, getJobs, getHealth, getJobProgress } from '../api/client';
+import { getStats, getJobs, getHealth, getJobProgress, restartJob } from '../api/client';
 import type { Stats, JobSummary, HealthCheck, ProgressMessage } from '../types';
 
 const jobStatusColor = (status: string): 'green' | 'red' | 'blue' | 'orange' | 'grey' => {
@@ -55,6 +58,7 @@ const Dashboard: React.FC = () => {
   const [health, setHealth] = useState<HealthCheck | null>(null);
   const [selectedJobId, setSelectedJobId] = useState<string | null>(null);
   const [jobSelectOpen, setJobSelectOpen] = useState(false);
+  const [actionsOpenJobId, setActionsOpenJobId] = useState<string | null>(null);
   const [activeJob, setActiveJob] = useState<{
     progress: number;
     current_phase: string;
@@ -384,10 +388,10 @@ const Dashboard: React.FC = () => {
                 <tr style={{ borderBottom: '2px solid #E8E8E8', textAlign: 'left' }}>
                   <th style={{ padding: '0.75rem 1rem', fontWeight: 600, color: '#6A6E73', width: '35%' }}>Vision</th>
                   <th style={{ padding: '0.75rem 1rem', fontWeight: 600, color: '#6A6E73', width: '9%' }}>Status</th>
-                  <th style={{ padding: '0.75rem 1rem', fontWeight: 600, color: '#6A6E73', width: '12%' }}>Phase</th>
+                  <th style={{ padding: '0.75rem 1rem', fontWeight: 600, color: '#6A6E73', width: '11%' }}>Phase</th>
                   <th style={{ padding: '0.75rem 1rem', fontWeight: 600, color: '#6A6E73', width: '14%' }}>Progress</th>
                   <th style={{ padding: '0.75rem 1rem', fontWeight: 600, color: '#6A6E73', width: '16%' }}>Created</th>
-                  <th style={{ padding: '0.75rem 1rem', fontWeight: 600, color: '#6A6E73', width: '14%' }}>Actions</th>
+                  <th style={{ padding: '0.75rem 1rem', fontWeight: 600, color: '#6A6E73', width: '5%' }}></th>
                 </tr>
               </thead>
               <tbody>
@@ -450,20 +454,65 @@ const Dashboard: React.FC = () => {
                       {new Date(job.created_at).toLocaleString()}
                     </td>
                     <td style={{ padding: '0.625rem 1rem' }}>
-                      <Link
-                        to={`/files?job=${job.id}`}
-                        style={{
-                          display: 'inline-flex',
-                          alignItems: 'center',
-                          gap: '0.35rem',
-                          fontSize: '0.875rem',
-                          color: 'var(--pf-v5-global--link--Color, #0066cc)',
-                          textDecoration: 'underline',
-                        }}
+                      <Dropdown
+                        isOpen={actionsOpenJobId === job.id}
+                        onSelect={() => setActionsOpenJobId(null)}
+                        onOpenChange={(isOpen) => { if (!isOpen) setActionsOpenJobId(null); }}
+                        toggle={(toggleRef) => (
+                          <MenuToggle
+                            ref={toggleRef}
+                            variant="plain"
+                            onClick={() => setActionsOpenJobId(actionsOpenJobId === job.id ? null : job.id)}
+                            isExpanded={actionsOpenJobId === job.id}
+                            style={{ padding: '0.25rem' }}
+                          >
+                            <EllipsisVIcon />
+                          </MenuToggle>
+                        )}
+                        popperProps={{ position: 'right' }}
                       >
-                        <FolderOpenIcon />
-                        {job.status === 'completed' ? 'View files & refine' : 'View files'}
-                      </Link>
+                        <DropdownList>
+                          <DropdownItem
+                            key="files"
+                            onClick={() => navigate(
+                              job.vision.startsWith('[MTA') ? `/migration/${job.id}` : `/files?job=${job.id}`
+                            )}
+                          >
+                            {job.vision.startsWith('[MTA') ? 'View migration' : 'View files'}
+                          </DropdownItem>
+                          {['failed', 'cancelled', 'quota_exhausted', 'completed'].includes(job.status) && (
+                            <DropdownItem
+                              key="restart"
+                              onClick={async () => {
+                                try {
+                                  await restartJob(job.id);
+                                  window.location.reload();
+                                } catch (err) {
+                                  console.error('Restart failed:', err);
+                                }
+                              }}
+                            >
+                              Restart job
+                            </DropdownItem>
+                          )}
+                          {job.vision.startsWith('[MTA') && job.status === 'failed' && (
+                            <DropdownItem
+                              key="retry-failed"
+                              onClick={async () => {
+                                try {
+                                  await restartJob(job.id);
+                                  window.location.reload();
+                                } catch (err) {
+                                  console.error('Retry failed tasks failed:', err);
+                                }
+                              }}
+                              style={{ color: '#C9190B' }}
+                            >
+                              Retry failed tasks
+                            </DropdownItem>
+                          )}
+                        </DropdownList>
+                      </Dropdown>
                     </td>
                   </tr>
                 ))}

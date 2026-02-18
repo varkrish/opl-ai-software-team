@@ -172,6 +172,7 @@ class JobDatabase:
         with self._get_conn() as conn:
             conn.execute("DELETE FROM refinements WHERE job_id = ?", (job_id,))
             conn.execute("DELETE FROM documents WHERE job_id = ?", (job_id,))
+            conn.execute("DELETE FROM migration_issues WHERE job_id = ?", (job_id,))
             cursor = conn.execute("DELETE FROM jobs WHERE id = ?", (job_id,))
             return cursor.rowcount > 0
 
@@ -464,6 +465,54 @@ class JobDatabase:
                 'failed': row['failed'] or 0,
                 'skipped': row['skipped'] or 0,
             }
+
+    def fail_stale_migrations(self, job_id: str) -> int:
+        """Mark any migration_issues still in 'running' state as 'failed'.
+
+        Returns the number of rows updated.  Called before restarting a
+        migration job or during startup cleanup.
+        """
+        now = datetime.now().isoformat()
+        with self._get_conn() as conn:
+            cursor = conn.execute(
+                "UPDATE migration_issues "
+                "SET status = 'failed', error = 'Stale — cleared on restart', completed_at = ? "
+                "WHERE job_id = ? AND status = 'running'",
+                (now, job_id),
+            )
+            return cursor.rowcount
+
+    def get_failed_migration_issues(self, job_id: str) -> List[Dict[str, Any]]:
+        """Return migration issues with status='failed' for the given job."""
+        with self._get_conn() as conn:
+            rows = conn.execute(
+                "SELECT * FROM migration_issues WHERE job_id = ? AND status = 'failed' ORDER BY created_at",
+                (job_id,),
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def reset_failed_migration_issues(self, job_id: str) -> int:
+        """Reset failed migration issues back to 'pending' so they can be retried.
+
+        Clears the error and completed_at fields. Returns the number of rows reset.
+        """
+        with self._get_conn() as conn:
+            cursor = conn.execute(
+                "UPDATE migration_issues "
+                "SET status = 'pending', error = NULL, completed_at = NULL "
+                "WHERE job_id = ? AND status = 'failed'",
+                (job_id,),
+            )
+            return cursor.rowcount
+
+    def delete_migration_issues(self, job_id: str) -> int:
+        """Delete ALL migration issues for a job (used before a clean re-run)."""
+        with self._get_conn() as conn:
+            cursor = conn.execute(
+                "DELETE FROM migration_issues WHERE job_id = ?",
+                (job_id,),
+            )
+            return cursor.rowcount
 
     def get_running_migration(self, job_id: str) -> Optional[Dict[str, Any]]:
         """Return the currently running migration issue for this job, if any."""

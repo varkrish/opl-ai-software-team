@@ -13,7 +13,7 @@ import {
   CubesIcon,
   OutlinedClockIcon,
 } from '@patternfly/react-icons';
-import { getJob, getJobFiles } from '../api/client';
+import { getJob, getJobFiles, restartJob } from '../api/client';
 import type { Job, WorkspaceFile, ProgressMessage } from '../types';
 
 /* ── Phase metadata ───────────────────────────────────────────────────────── */
@@ -60,6 +60,7 @@ const BuildProgress: React.FC<Props> = ({ jobId, vision }) => {
   const prevMsgCount = useRef(0);
 
   const isTerminal = job?.status === 'completed' || job?.status === 'failed' || job?.status === 'cancelled';
+  const isMta = job?.vision?.startsWith('[MTA') ?? false;
 
   /* ── Polling ───────────────────────────────────────────────────────────── */
   const poll = useCallback(async () => {
@@ -251,7 +252,7 @@ const BuildProgress: React.FC<Props> = ({ jobId, vision }) => {
       <p style={{ fontSize: '0.875rem', color: '#6A6E73', marginBottom: '1rem' }}>
         {files.length} files generated. View details in the dashboard.
       </p>
-      <div style={{ display: 'flex', gap: '0.75rem', justifyContent: 'center' }}>
+      <div style={{ display: 'flex', gap: '0.75rem', justifyContent: 'center', flexWrap: 'wrap' }}>
         <Button variant="primary" onClick={() => navigate('/dashboard')}
           style={{ backgroundColor: '#3E8635', border: 'none' }}
           icon={<CubesIcon />}>
@@ -261,9 +262,33 @@ const BuildProgress: React.FC<Props> = ({ jobId, vision }) => {
           icon={<CodeIcon />}>
           View Files
         </Button>
+        <Button variant="secondary" onClick={handleRestart}>
+          Run again
+        </Button>
+        {isMta && (
+          <>
+            <Button variant="link" onClick={handleRestart}
+              style={{ color: '#C9190B' }}>
+              Retry failed tasks
+            </Button>
+            <Button variant="link" onClick={() => navigate(`/migration/${job?.id}`)}>
+              View Migration
+            </Button>
+          </>
+        )}
       </div>
     </div>
   );
+
+  const handleRestart = async () => {
+    if (!job) return;
+    try {
+      await restartJob(job.id);
+      window.location.reload();
+    } catch (err) {
+      console.error('Failed to restart job:', err);
+    }
+  };
 
   const renderFailed = () => (
     <div style={{
@@ -281,9 +306,25 @@ const BuildProgress: React.FC<Props> = ({ jobId, vision }) => {
       <p style={{ fontSize: '0.8125rem', color: '#6A6E73', marginBottom: '0.5rem' }}>
         {job?.error || 'An unexpected error occurred'}
       </p>
-      <Button variant="secondary" onClick={() => navigate('/dashboard')}>
-        View Details
-      </Button>
+      <div style={{ display: 'flex', gap: '0.75rem', justifyContent: 'center', flexWrap: 'wrap' }}>
+        <Button variant="primary" onClick={handleRestart}>
+          Restart Job
+        </Button>
+        <Button variant="secondary" onClick={() => navigate('/dashboard')}>
+          View Details
+        </Button>
+        {isMta && (
+          <>
+            <Button variant="link" onClick={handleRestart}
+              style={{ color: '#C9190B' }}>
+              Retry failed tasks
+            </Button>
+            <Button variant="link" onClick={() => navigate(`/migration/${job?.id}`)}>
+              View Migration
+            </Button>
+          </>
+        )}
+      </div>
     </div>
   );
 

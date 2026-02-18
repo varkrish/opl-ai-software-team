@@ -1,0 +1,43 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Dev / staging overrides
+#
+# Usage:
+#   helm install crew-studio ./deploy/helm/crew-studio \
+#       -f deploy/helm/crew-studio/values-dev.yaml \
+#       --set llm.apiKey=$LLM_API_KEY
+# ─────────────────────────────────────────────────────────────────────────────
+
+backend:
+  image:
+    pullPolicy: Always
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: "1"
+      memory: 2Gi
+  route:
+    enabled: true
+    tls:
+      enabled: true
+
+frontend:
+  image:
+    pullPolicy: Always
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 250m
+      memory: 128Mi
+
+config:
+  flaskEnv: development
+
+persistence:
+  workspace:
+    size: 2Gi
+  data:
+    size: 512Mi
