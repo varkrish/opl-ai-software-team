@@ -3,43 +3,18 @@ name: Build & Push to Quay.io
 on:
   push:
     branches: [main]
-    tags: ['v*']
   workflow_dispatch:
-    inputs:
-      tag:
-        description: 'Image tag override (default: git sha short)'
-        required: false
-        type: string
 
 jobs:
   build-push:
-    name: Build & Push (${{ matrix.component }})
+    name: Build & Push
     runs-on: ubuntu-latest
     permissions:
       contents: read
 
-    strategy:
-      matrix:
-        include:
-          - component: backend
-            containerfile: Containerfile.backend
-          - component: frontend
-            containerfile: Containerfile.frontend
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
-      - name: Determine image tag
-        id: tag
-        run: |
-          if [[ -n "${{ inputs.tag }}" ]]; then
-            echo "tag=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
-          elif [[ "$GITHUB_REF" == refs/tags/v* ]]; then
-            echo "tag=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
-          else
-            echo "tag=latest" >> "$GITHUB_OUTPUT"
-          fi
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -51,19 +26,28 @@ jobs:
           username: ${{ secrets.QUAY_USERNAME }}
           password: ${{ secrets.QUAY_PASSWORD }}
 
-      - name: Build and push
+      - name: Build and push backend
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: ./${{ matrix.component == 'backend' && 'Containerfile.backend' || 'Containerfile.frontend' }}
+          file: ./Containerfile.backend
           push: true
           tags: |
-            ${{ secrets.QUAY_REPO }}/crew-${{ matrix.component }}:${{ steps.tag.outputs.tag }}
-            ${{ secrets.QUAY_REPO }}/crew-${{ matrix.component }}:${{ github.sha }}
-          cache-from: type=gha,scope=${{ matrix.component }}
-          cache-to: type=gha,mode=max,scope=${{ matrix.component }}
+            ${{ secrets.QUAY_REPO }}/crew-backend:latest
+            ${{ secrets.QUAY_REPO }}/crew-backend:${{ github.sha }}
+          cache-from: type=gha,scope=backend
+          cache-to: type=gha,mode=max,scope=backend
           platforms: linux/amd64
 
-      - name: Print image ref
-        run: |
-          echo "Pushed: ${{ secrets.QUAY_REPO }}/crew-${{ matrix.component }}:${{ steps.tag.outputs.tag }}"
+      - name: Build and push frontend
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Containerfile.frontend
+          push: true
+          tags: |
+            ${{ secrets.QUAY_REPO }}/crew-frontend:latest
+            ${{ secrets.QUAY_REPO }}/crew-frontend:${{ github.sha }}
+          cache-from: type=gha,scope=frontend
+          cache-to: type=gha,mode=max,scope=frontend
+          platforms: linux/amd64
