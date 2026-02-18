@@ -1,4 +1,4 @@
-.PHONY: setup agent-test studio-run studio-dev studio-build studio-test-component studio-test-e2e studio-test-open backend-test-api backend-test-e2e backend-test-e2e-quick backend-test-all refine-test refine-test-e2e reset-db compose-up compose-down compose-logs compose-clean container-build container-build-backend container-build-frontend container-run container-stop help
+.PHONY: setup agent-test studio-run studio-dev studio-build studio-test-component studio-test-e2e studio-test-open backend-test-api backend-test-e2e backend-test-e2e-quick backend-test-all refine-test refine-test-e2e reset-db compose-up compose-down compose-logs compose-clean container-build container-build-backend container-build-frontend container-run container-stop help ci-install test-quick test-coverage ci-test-e2e install-docs
 
 ROOT_DIR := $(shell pwd)
 
@@ -42,8 +42,31 @@ help:
 	@echo "  LLM_API_BASE_URL - MaaS endpoint URL"
 
 setup:
-	@echo "📦 Setting up Agent Framework..."
+	@echo "Setting up Agent Framework..."
 	cd agent && pip install -e .
+
+# ── CI Targets (used by GitHub Actions) ──────────────────────────────────────
+ci-install:
+	cd agent && pip install -e ".[test]"
+	@rm -rf agent/src/llamaindex_crew/web
+	@ln -sfn $(ROOT_DIR)/crew_studio agent/src/llamaindex_crew/web
+
+test-quick:
+	cd agent && pytest tests/unit/ -v --timeout=60 --junitxml=../pytest-results.xml
+
+test-coverage:
+	cd agent && pytest tests/unit/ tests/api/ -v --timeout=120 \
+		--cov=src --cov-report=xml:../coverage.xml --cov-report=html:../htmlcov \
+		--junitxml=../pytest-results.xml
+
+ci-test-e2e:
+	@rm -rf agent/src/llamaindex_crew/web
+	@ln -sfn $(ROOT_DIR)/crew_studio agent/src/llamaindex_crew/web
+	export PYTHONPATH=$(ROOT_DIR):$(ROOT_DIR)/agent:$(ROOT_DIR)/agent/src:$(PYTHONPATH) && \
+	cd agent && pytest tests/e2e/ -v -s --timeout=300
+
+install-docs:
+	pip install mkdocs mkdocs-material mkdocstrings[python]
 
 agent-test:
 	@echo "🧪 Running Agent Tests..."
