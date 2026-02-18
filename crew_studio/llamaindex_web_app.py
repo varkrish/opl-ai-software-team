@@ -1840,7 +1840,8 @@ if __name__ == '__main__':
     # Resume / clean-up any jobs that were in-flight when the server last stopped
     resume_pending_jobs()
 
-    port = int(os.getenv('PORT', 8080))
+    # Default 8081 to avoid conflict with JBoss/EAP on 8080
+    port = int(os.getenv('PORT', 8081))
     # use_reloader=False is critical: the Werkzeug reloader holds an import
     # lock that deadlocks background threads doing lazy imports (e.g. the
     # SoftwareDevWorkflow import inside run_job_async).  It also kills

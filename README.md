@@ -110,7 +110,7 @@ make compose-up
 # Or: podman-compose up -d --build
 
 # Frontend: http://localhost:3000
-# Backend API: http://localhost:8080
+# Backend API: http://localhost:8081 (8081 avoids conflict with JBoss on 8080)
 ```
 
 To stop: `make compose-down` (or `podman-compose down`).
@@ -131,7 +131,7 @@ The Crew Studio UI provides:
 
 *Option A — Local development (backend + React dev server):*
 ```bash
-# Terminal 1: start backend (Flask API on port 8080)
+# Terminal 1: start backend (Flask API on port 8081)
 make studio-run
 
 # Terminal 2: start frontend (Vite on port 3000)
@@ -143,7 +143,7 @@ Then open **http://localhost:3000** in your browser.
 ```bash
 make compose-up
 ```
-Then open **http://localhost:3000** (frontend) and **http://localhost:8080** (backend API/health).
+Then open **http://localhost:3000** (frontend) and **http://localhost:8081** (backend API/health).
 
 ## Deployment
 
@@ -159,8 +159,8 @@ make compose-clean       # Stop & remove volumes
 | Service | URL |
 |---------|-----|
 | Frontend (Crew Studio UI) | http://localhost:3000 |
-| Backend API | http://localhost:8080 |
-| Health check | http://localhost:8080/health |
+| Backend API | http://localhost:8081 |
+| Health check | http://localhost:8081/health |
 
 ### OpenShift / Kubernetes (Helm)
 
@@ -300,7 +300,7 @@ npm run cy:e2e         # E2E tests (requires dev server + backend)
 | Target | Description |
 |--------|-------------|
 | `make setup` | Install agent dependencies |
-| `make studio-run` | Start backend (Flask on port 8080) |
+| `make studio-run` | Start backend (Flask on port 8081) |
 | `make studio-dev` | Start frontend dev server (Vite on port 3000) |
 | `make agent-test` | Run agent framework tests |
 | `make backend-test-all` | Run all backend tests |

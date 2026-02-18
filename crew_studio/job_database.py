@@ -467,17 +467,19 @@ class JobDatabase:
             }
 
     def fail_stale_migrations(self, job_id: str) -> int:
-        """Mark any migration_issues still in 'running' state as 'failed'.
+        """Mark any migration_issues still in 'running' or 'pending' state as 'failed'.
 
         Returns the number of rows updated.  Called before restarting a
-        migration job or during startup cleanup.
+        migration job or during startup cleanup.  Pending issues are included
+        because they were queued by the previous (now-dead) run and won't
+        be picked up unless they go through the failed→retry path.
         """
         now = datetime.now().isoformat()
         with self._get_conn() as conn:
             cursor = conn.execute(
                 "UPDATE migration_issues "
                 "SET status = 'failed', error = 'Stale — cleared on restart', completed_at = ? "
-                "WHERE job_id = ? AND status = 'running'",
+                "WHERE job_id = ? AND status IN ('running', 'pending')",
                 (now, job_id),
             )
             return cursor.rowcount

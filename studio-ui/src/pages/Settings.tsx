@@ -39,7 +39,7 @@ const Settings: React.FC = () => {
 
   // API Settings
   const [apiKey, setApiKey] = useState('');
-  const [apiEndpoint, setApiEndpoint] = useState('http://localhost:8080');
+  const [apiEndpoint, setApiEndpoint] = useState('http://localhost:8081');
   const [modelSelectOpen, setModelSelectOpen] = useState(false);
   const [selectedModel, setSelectedModel] = useState('qwen3-14b');
 
@@ -158,7 +158,7 @@ const Settings: React.FC = () => {
                       id="api-endpoint"
                       value={apiEndpoint}
                       onChange={(_event, value) => setApiEndpoint(value)}
-                      placeholder="http://localhost:8080"
+                      placeholder="http://localhost:8081"
                     />
                     <p style={{ fontSize: '0.875rem', color: '#6A6E73', marginTop: '0.5rem' }}>
                       Backend API server URL

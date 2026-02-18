@@ -9,7 +9,7 @@ help:
 	@echo "Setup & Development:"
 	@echo "  setup           - Install agent dependencies"
 	@echo "  agent-test      - Run agent framework tests"
-	@echo "  studio-run      - Start backend (Flask on port 8080)"
+	@echo "  studio-run      - Start backend (Flask on port 8081)"
 	@echo "  studio-dev      - Start frontend dev server (Vite on port 3000)"
 	@echo "  studio-build    - Production build to studio-ui/dist/"
 	@echo ""
@@ -73,11 +73,12 @@ agent-test:
 	cd agent && pytest
 
 studio-run:
-	@echo "🚀 Starting Crew Studio UI..."
+	@echo "🚀 Starting Crew Studio backend (port 8081 to avoid conflict with JBoss on 8080)..."
 	@rm -rf agent/src/llamaindex_crew/web
 	@ln -sfn $(ROOT_DIR)/crew_studio agent/src/llamaindex_crew/web
 	export PYTHONPATH=$(ROOT_DIR)/agent:$(ROOT_DIR)/agent/src:$(PYTHONPATH) && \
 	export WORKSPACE_PATH=$(ROOT_DIR)/agent/workspace && \
+	export PORT=8081 && \
 	python3.10 -m src.llamaindex_crew.web.llamaindex_web_app
 
 # Studio UI (PatternFly React)

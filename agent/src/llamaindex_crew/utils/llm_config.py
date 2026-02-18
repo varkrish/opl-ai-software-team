@@ -77,45 +77,7 @@ class GenericLlamaLLM(LLM):
         
         # Filter out any kwargs that shouldn't go to the API
         api_kwargs = {k: v for k, v in kwargs.items() if k not in ["num_beams"]}
-        
-        # Ensure conversation roles alternate user/assistant
-        # Red Hat MaaS (LiteLLM) is strict about role alternation and 'system' role.
-        formatted_messages = []
-        last_role = None
-        
-        for m in messages:
-            role = m.role.value
-            content = m.content
-            
-            # Red Hat MaaS (LiteLLM) is strict about role alternation and 'system' role.
-            # Convert 'system' to 'user' if it's not the first message.
-            if role == "system" and last_role is not None:
-                role = "user"
-            
-            # If the role is the same as the last one, merge the content
-            if role == last_role and formatted_messages:
-                formatted_messages[-1]["content"] += f"\n\n{content}"
-            else:
-                formatted_messages.append({"role": role, "content": content})
-                last_role = role
-
-        # Ensure the conversation starts with a 'user' or 'system' message
-        if formatted_messages and (formatted_messages[0]["role"] == "assistant"):
-            formatted_messages.insert(0, {"role": "user", "content": "Continue."})
-            
-        # Ensure it ends with a 'user' message (some providers require this)
-        # BUT: If the last message is already a tool call (assistant), don't add a user message
-        # as it breaks the ReAct flow where the system expects to execute the tool first.
-        if formatted_messages and formatted_messages[-1]["role"] == "assistant":
-            # Only add "Please provide final answer" if it doesn't look like a tool call
-            last_content = formatted_messages[-1]["content"]
-            if "Action:" not in last_content and "Action Input:" not in last_content:
-                formatted_messages.append({"role": "user", "content": "Please provide your final answer or next step."})
-            else:
-                # If it IS a tool call, we MUST NOT add a user message, but we might need to 
-                # ensure the provider accepts the assistant message as the last one.
-                # Most OpenAI-compatible providers do.
-                pass
+        formatted_messages = self._format_messages_for_api(messages)
 
         payload = {
             "model": self.model,
@@ -128,6 +90,8 @@ class GenericLlamaLLM(LLM):
         max_retries = 5
         base_delay = 5
         max_delay = 120
+        # Long timeout for migration/large responses (MaaS can take 2–3 min for 8k tokens)
+        request_timeout = 300.0
         import random
         
         # Transient errors: connection/transport and timeouts (catch all timeout variants)
@@ -137,7 +101,7 @@ class GenericLlamaLLM(LLM):
         
         for attempt in range(max_retries):
             try:
-                with httpx.Client(timeout=120.0) as client:
+                with httpx.Client(timeout=request_timeout) as client:
                     logger.debug(f"Sending request to {url} with model {self.model} (Attempt {attempt + 1}/{max_retries})")
                     response = client.post(url, headers=headers, json=payload)
                     
@@ -176,6 +140,39 @@ class GenericLlamaLLM(LLM):
                 else:
                     logger.error(f"❌ LLM API failed after {max_retries} attempts: {e}")
                     raise
+            except Exception as e:
+                # Retry on "Server disconnected" / connection closed without response (e.g. MaaS timeout)
+                msg = str(e).lower()
+                if ("disconnect" in msg or "without sending" in msg or "connection" in msg) and attempt < max_retries - 1:
+                    delay = min(base_delay * (2 ** attempt) + random.uniform(0, 3), max_delay)
+                    logger.warning(
+                        f"⚠️ LLM API error ({type(e).__name__}): {e}. Retrying in {delay:.1f}s... (attempt {attempt + 1}/{max_retries})"
+                    )
+                    time.sleep(delay)
+                else:
+                    raise
+
+    def _format_messages_for_api(self, messages: list) -> list:
+        """Apply same role alternation and system→user rules as chat() so MaaS accepts the payload."""
+        formatted_messages = []
+        last_role = None
+        for m in messages:
+            role = m.role.value
+            content = m.content
+            if role == "system" and last_role is not None:
+                role = "user"
+            if role == last_role and formatted_messages:
+                formatted_messages[-1]["content"] += f"\n\n{content}"
+            else:
+                formatted_messages.append({"role": role, "content": content})
+                last_role = role
+        if formatted_messages and formatted_messages[0]["role"] == "assistant":
+            formatted_messages.insert(0, {"role": "user", "content": "Continue."})
+        if formatted_messages and formatted_messages[-1]["role"] == "assistant":
+            last_content = formatted_messages[-1]["content"]
+            if "Action:" not in last_content and "Action Input:" not in last_content:
+                formatted_messages.append({"role": "user", "content": "Please provide your final answer or next step."})
+        return formatted_messages
 
     async def achat(self, messages: list[ChatMessage], **kwargs) -> ChatResponse:
         import httpx
@@ -186,16 +183,18 @@ class GenericLlamaLLM(LLM):
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json"
         }
-        
+        formatted_messages = self._format_messages_for_api(messages)
+        api_kwargs = {k: v for k, v in kwargs.items() if k not in ["num_beams"]}
         payload = {
             "model": self.model,
-            "messages": [{"role": m.role.value, "content": m.content} for m in messages],
+            "messages": formatted_messages,
             "max_tokens": self.max_tokens,
             "temperature": self.temperature,
-            **kwargs
+            **api_kwargs
         }
         
-        async with httpx.AsyncClient(timeout=120.0) as client:
+        # Long timeout for migration/large responses
+        async with httpx.AsyncClient(timeout=300.0) as client:
             response = await client.post(url, headers=headers, json=payload)
             response.raise_for_status()
             data = response.json()

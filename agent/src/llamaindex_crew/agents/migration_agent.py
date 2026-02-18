@@ -15,11 +15,10 @@ from ..budget.tracker import EnhancedBudgetTracker
 from ..utils.prompt_loader import load_prompt
 from ..utils.llm_config import get_llm_for_agent
 
-# Migration execution needs higher max_tokens than default (2048) because
-# the agent must output complete file content.  16384 covers most Java files
-# while staying under typical provider limits.
-_MIGRATION_MIN_MAX_TOKENS = 8192
-_MIGRATION_MAX_TOKENS_CAP = 16384
+# Migration execution: balance output length vs MaaS limits. 8192 helps avoid truncation;
+# runner skips (does not fail) if still truncated after 6 attempts.
+_MIGRATION_MIN_MAX_TOKENS = 4096
+_MIGRATION_MAX_TOKENS_CAP = 8192
 
 logger = logging.getLogger(__name__)
 
@@ -34,11 +33,12 @@ ANALYSIS_BACKSTORY = (
 EXECUTION_BACKSTORY = (
     "You are a senior software engineer specializing in legacy code modernization. "
     "You apply migration changes precisely, respecting existing code patterns, "
-    "and always writing complete file content via the file_writer tool.\n\n"
+    "and always writing the COMPLETE file via the file_writer tool.\n\n"
     "CRITICAL RULES:\n"
-    "- Output the COMPLETE file. Every original line must appear in your output, "
-    "modified ONLY where required by the migration issues.\n"
-    "- Do NOT omit, summarize, abbreviate, or skip any code.\n"
+    "- You MUST output the ENTIRE file in one file_writer call. The written file "
+    "must be roughly the same size as the original (same line count).\n"
+    "- Do NOT truncate, summarize, abbreviate, or omit any part of the file.\n"
+    "- Every original line must appear in your output, modified ONLY where required.\n"
     "- Do NOT add methods, fields, or imports that are not in the original file.\n"
     "- Do NOT fabricate or hallucinate code that was not present.\n"
     "- Preserve ALL comments, formatting, and structure from the original.\n"
@@ -134,6 +134,7 @@ class MigrationExecutionAgent:
         workspace_path: Path,
         project_id: str,
         budget_tracker: Optional[EnhancedBudgetTracker] = None,
+        attempt: int = 1,
     ):
         self.workspace_path = Path(workspace_path)
         self.project_id = project_id
@@ -145,11 +146,17 @@ class MigrationExecutionAgent:
             "migration/apply_changes.txt", fallback=EXECUTION_BACKSTORY
         )
 
-        # Use higher max_tokens for migration (large file rewrites), but cap to avoid 400
         llm = get_llm_for_agent("worker")
+        # Attempt 1: temperature=0 for deterministic output.
+        # Retries: escalate temperature so the model produces genuinely different output
+        # instead of repeating the same truncated result.
+        temp = 0.0 if attempt <= 1 else min(0.1 * attempt, 0.7)
+        if hasattr(llm, "temperature"):
+            llm.temperature = temp
         if hasattr(llm, "max_tokens"):
             requested = max(llm.max_tokens, _MIGRATION_MIN_MAX_TOKENS)
             llm.max_tokens = min(requested, _MIGRATION_MAX_TOKENS_CAP)
+        logger.info("Migration execution: attempt=%d, temperature=%.1f, max_tokens=%s", attempt, temp, getattr(llm, "max_tokens", "?"))
 
         self.agent = BaseLlamaIndexAgent(
             role="Migration Execution Agent",
@@ -221,11 +228,13 @@ class MigrationExecutionAgent:
             f"## Instructions\n"
             f"Apply all the migration issues listed above to **{file_path}**.\n"
             f"Call `file_writer` with file_path=\"{file_path}\" and the COMPLETE updated content.\n\n"
-            f"IMPORTANT — your output MUST:\n"
+            f"CRITICAL — you MUST write the ENTIRE file in one file_writer call:\n"
+            f"- The written file must be the same length as the original (or very close).\n"
+            f"- Do NOT truncate, summarize, or omit any part of the file.\n"
             f"- Contain EVERY line of the original file (modified only where needed).\n"
             f"- Keep the same package, class name, all fields, all methods, all comments.\n"
             f"- NOT add any new methods, fields, or imports that were not in the original.\n"
-            f"- NOT omit or abbreviate any section of the file.\n\n"
+            f"- If you cannot output the full file in one go, the migration will fail.\n\n"
             f"Provide a Final Answer listing what you changed."
         )
 
