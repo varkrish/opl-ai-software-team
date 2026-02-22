@@ -20,3 +20,5 @@ agent/scripts/dist/
 crew_jobs.db
 agent/crew_jobs.db
 repomix-output.xml
+backend.log
+test_out.txt

@@ -81,6 +81,55 @@ def file_writer(file_path: str, content: str, workspace_path: Optional[str] = No
         return f"❌ Error writing to {file_path}: {str(e)}"
 
 
+def file_line_replacer(
+    file_path: str,
+    start_line: int,
+    end_line: int,
+    new_content: str,
+    workspace_path: Optional[str] = None
+) -> str:
+    """Replace a range of lines in a file. 
+    
+    Args:
+        file_path: Relative path to the file.
+        start_line: 1-indexed start line (inclusive).
+        end_line: 1-indexed end line (inclusive).
+        new_content: The new text to insert instead of the specified line range.
+        workspace_path: Optional workspace path.
+        
+    Returns:
+        Success or error message.
+    """
+    try:
+        workspace = _resolve_workspace(workspace_path)
+        full_path = workspace / file_path
+        
+        if not full_path.is_file():
+            return f"❌ File not found: {file_path}"
+        
+        lines = full_path.read_text(encoding="utf-8").splitlines(keepends=True)
+        total_lines = len(lines)
+        
+        if start_line < 1 or end_line > total_lines or start_line > end_line:
+            return f"❌ Invalid line range: {start_line}-{end_line} (file has {total_lines} lines)"
+        
+        # Adjust for 0-based indexing
+        # lines[start_line-1 : end_line] are the lines to be replaced
+        new_lines = new_content.splitlines(keepends=True)
+        # Ensure new_content ends with a newline if the original file did and we want to preserve structure
+        if new_content and not new_content.endswith('\n'):
+             new_lines[-1] = new_lines[-1] + '\n'
+             
+        lines[start_line - 1 : end_line] = new_lines
+        
+        full_path.write_text("".join(lines), encoding="utf-8")
+        
+        return f"✅ Successfully replaced lines {start_line}-{end_line} in {file_path}"
+    except Exception as e:
+        logger.error(f"Error replacing lines in {file_path}: {e}")
+        return f"❌ Error replacing lines in {file_path}: {str(e)}"
+
+
 def file_reader(file_path: str, workspace_path: Optional[str] = None) -> str:
     """Read content from a file in the workspace.
     
@@ -230,5 +279,10 @@ def create_workspace_file_tools(workspace_path: Path):
             fn=partial(file_deleter, workspace_path=ws),
             name="file_deleter",
             description="Delete a file from the workspace. Use when the user asks to remove or delete a file. Do NOT empty the file with file_writer — use file_deleter to remove it from the filesystem."
+        ),
+        FunctionTool.from_defaults(
+            fn=partial(file_line_replacer, workspace_path=ws),
+            name="file_line_replacer",
+            description="Replace a range of lines in a file. start_line and end_line are 1-indexed and inclusive."
         ),
     ]

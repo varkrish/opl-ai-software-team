@@ -192,16 +192,20 @@ class MigrationExecutionAgent:
         sections.append(f"## Migration goal\n{migration_goal}")
         sections.append(f"## Target file\nYou must ONLY modify: **{file_path}**")
 
+        # Add line numbers to content (crucial for surgical edits)
+        lines = file_content.splitlines()
+        numbered_content = "\n".join(f"{i+1:4}: {line}" for i, line in enumerate(lines))
+
         if truncated:
             sections.append(
                 f"## Current content of {file_path} (TRUNCATED)\n"
                 f"**WARNING**: The content below is truncated because the file is very large.\n"
-                f"You MUST call `file_reader` with file_path=\"{file_path}\" to read the COMPLETE "
+                f"You MUST call `file_reader` with file_path=\"{file_path}\" to read the full "
                 f"file content before making any changes.\n"
-                f"```\n{file_content}\n```"
+                f"```\n{numbered_content}\n```"
             )
         else:
-            sections.append(f"## Current content of {file_path}\n```\n{file_content}\n```")
+            sections.append(f"## Current content of {file_path}\n```\n{numbered_content}\n```")
 
         # Build issues section
         issues_text = []
@@ -224,19 +228,30 @@ class MigrationExecutionAgent:
         if user_notes:
             sections.append(f"## Additional instructions from the user\n{user_notes}")
 
-        sections.append(
-            f"## Instructions\n"
-            f"Apply all the migration issues listed above to **{file_path}**.\n"
-            f"Call `file_writer` with file_path=\"{file_path}\" and the COMPLETE updated content.\n\n"
-            f"CRITICAL — you MUST write the ENTIRE file in one file_writer call:\n"
-            f"- The written file must be the same length as the original (or very close).\n"
-            f"- Do NOT truncate, summarize, or omit any part of the file.\n"
-            f"- Contain EVERY line of the original file (modified only where needed).\n"
-            f"- Keep the same package, class name, all fields, all methods, all comments.\n"
-            f"- NOT add any new methods, fields, or imports that were not in the original.\n"
-            f"- If you cannot output the full file in one go, the migration will fail.\n\n"
-            f"Provide a Final Answer listing what you changed."
-        )
+        if truncated:
+            sections.append(
+                f"## Instructions\n"
+                f"Because this file is very large, do NOT use `file_writer` to rewrite the whole file.\n"
+                f"Instead, use `file_line_replacer` to make surgical changes to specific line ranges.\n\n"
+                f"1. Identify the line ranges that need to change.\n"
+                f"2. Call `file_line_replacer` one or more times to apply the issues.\n"
+                f"3. Make sure to preserve the surrounding structure and comments.\n\n"
+                f"Provide a Final Answer listing what you changed."
+            )
+        else:
+            sections.append(
+                f"## Instructions\n"
+                f"Apply all the migration issues listed above to **{file_path}**.\n"
+                f"Call `file_writer` with file_path=\"{file_path}\" and the COMPLETE updated content.\n\n"
+                f"CRITICAL — you MUST write the ENTIRE file in one file_writer call:\n"
+                f"- The written file must be the same length as the original (or very close).\n"
+                f"- Do NOT truncate, summarize, or omit any part of the file.\n"
+                f"- Contain EVERY line of the original file (modified only where needed).\n"
+                f"- Keep the same package, class name, all fields, all methods, all comments.\n"
+                f"- NOT add any new methods, fields, or imports that were not in the original.\n"
+                f"- If you cannot output the full file in one go, the migration will fail.\n\n"
+                f"Provide a Final Answer listing what you changed."
+            )
 
         return "\n\n".join(sections)
 
