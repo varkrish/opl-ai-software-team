@@ -26,6 +26,7 @@ const navItems = [
   { path: '/tasks', label: 'Tasks' },
   { path: '/files', label: 'Files' },
   { path: '/migration', label: 'MTA Migration' },
+  { path: '/refactor', label: 'Refactor' },
   { path: '/settings', label: 'Settings' },
 ];
 
@@ -121,7 +122,9 @@ const AppLayout: React.FC = () => {
                 isActive={
                   item.path === '/migration'
                     ? location.pathname.startsWith('/migration')
-                    : location.pathname === item.path
+                    : item.path === '/refactor'
+                      ? location.pathname.startsWith('/refactor')
+                      : location.pathname === item.path
                 }
               >
                 {item.label}

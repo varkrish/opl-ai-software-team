@@ -146,9 +146,9 @@ const Dashboard: React.FC = () => {
                 >
                   {selectedJobId
                     ? (() => {
-                        const j = jobs.find(job => job.id === selectedJobId);
-                        return j ? `${j.vision.substring(0, 25)}${j.vision.length > 25 ? '...' : ''}` : 'Select Job';
-                      })()
+                      const j = jobs.find(job => job.id === selectedJobId);
+                      return j ? `${j.vision.substring(0, 25)}${j.vision.length > 25 ? '...' : ''}` : 'Select Job';
+                    })()
                     : 'Select Job'}
                 </MenuToggle>
               )}
@@ -417,10 +417,14 @@ const Dashboard: React.FC = () => {
                         <span style={{ display: 'flex', alignItems: 'center', gap: '0.35rem', overflow: 'hidden' }}>
                           <Label isCompact color="blue" style={{ flexShrink: 0 }}>MTA</Label>
                           <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                            {/* Extract ZIP name + goal from vision string */}
-                            {job.vision
-                              .replace(/^\[MTA[^\]]*\]\s*/, '')  /* strip [MTA ...] prefix */
-                              || job.vision}
+                            {job.vision.replace(/^\[MTA[^\]]*\]\s*/, '') || job.vision}
+                          </span>
+                        </span>
+                      ) : job.vision.startsWith('[Refactor') ? (
+                        <span style={{ display: 'flex', alignItems: 'center', gap: '0.35rem', overflow: 'hidden' }}>
+                          <Label isCompact color="cyan" style={{ flexShrink: 0 }}>Refactor</Label>
+                          <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                            {job.vision.replace(/^\[Refactor[^\]]*\]\s*/, '') || job.vision}
                           </span>
                         </span>
                       ) : job.vision}
@@ -475,10 +479,14 @@ const Dashboard: React.FC = () => {
                           <DropdownItem
                             key="files"
                             onClick={() => navigate(
-                              job.vision.startsWith('[MTA') ? `/migration/${job.id}` : `/files?job=${job.id}`
+                              job.vision.startsWith('[MTA') ? `/migration/${job.id}` :
+                                job.vision.startsWith('[Refactor') ? `/refactor/${job.id}` :
+                                  `/files?job=${job.id}`
                             )}
                           >
-                            {job.vision.startsWith('[MTA') ? 'View migration' : 'View files'}
+                            {job.vision.startsWith('[MTA') ? 'View migration' :
+                              job.vision.startsWith('[Refactor') ? 'View refactor' :
+                                'View files'}
                           </DropdownItem>
                           {['failed', 'cancelled', 'quota_exhausted', 'completed'].includes(job.status) && (
                             <DropdownItem

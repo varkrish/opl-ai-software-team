@@ -384,6 +384,40 @@ export async function getMigrationChanges(jobId: string): Promise<MigrationChang
   return data;
 }
 
+// ── Refactor ─────────────────────────────────────────────────────────────────
+
+export interface RefactorTask {
+  id: string;
+  job_id: string;
+  file_path: string;
+  action: string;
+  instruction: string;
+  status: string;
+  error: string | null;
+  created_at: string;
+  completed_at: string | null;
+}
+
+export interface RefactorSummary {
+  total: number;
+  pending: number;
+  running: number;
+  completed: number;
+  failed: number;
+  skipped: number;
+}
+
+export interface RefactorStatus {
+  job_id: string;
+  summary: RefactorSummary;
+  tasks: RefactorTask[];
+}
+
+export async function getRefactorStatus(jobId: string): Promise<RefactorStatus> {
+  const { data } = await api.get<RefactorStatus>(`/api/jobs/${jobId}/refactor`);
+  return data;
+}
+
 // ── Health ───────────────────────────────────────────────────────────────────
 export async function getHealth(): Promise<HealthCheck> {
   const { data } = await api.get<HealthCheck>('/health');
