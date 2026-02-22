@@ -1415,6 +1415,13 @@ def list_workspace_files():
             if job:
                 # List files for specific job (resolve in case stored path is relative)
                 job_workspace = _resolve_job_workspace(job_id, job['workspace_path']) or Path(job['workspace_path'])
+                
+                # For refactor jobs, scope to 'refactored' subdirectory if it exists
+                # This ensures the UI only shows the target code, not legacy source.
+                if job.get('vision', '').startswith('[Refactor]') or job.get('current_phase') == 'refactoring':
+                    refactored_dir = job_workspace / "refactored"
+                    if refactored_dir.is_dir():
+                        job_workspace = refactored_dir
             else:
                 # Job not found, default to base workspace
                 job_workspace = base_workspace_path
@@ -1484,6 +1491,12 @@ def download_job_workspace(job_id):
     workspace_path = _resolve_job_workspace(job_id, job['workspace_path'])
     if not workspace_path:
         return jsonify({'error': 'Workspace not found'}), 404
+    
+    # For refactor jobs, only download the refactored results
+    if job.get('vision', '').startswith('[Refactor]') or job.get('current_phase') == 'refactoring':
+        refactored_dir = workspace_path / "refactored"
+        if refactored_dir.is_dir():
+            workspace_path = refactored_dir
     buf = io.BytesIO()
     workspace_resolved = workspace_path.resolve()
     with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as zf:
@@ -1529,6 +1542,13 @@ def get_file_content(file_path):
             if job:
                 # Get file from specific job workspace
                 job_workspace = Path(job['workspace_path'])
+                
+                # For refactor jobs, look in the 'refactored' subdirectory first
+                if job.get('vision', '').startswith('[Refactor]') or job.get('current_phase') == 'refactoring':
+                    refactored_dir = job_workspace / "refactored"
+                    if refactored_dir.is_dir():
+                        job_workspace = refactored_dir
+                        
                 full_path = job_workspace / file_path
             else:
                 # Job not found, fallback to base workspace

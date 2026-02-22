@@ -19,7 +19,8 @@ from agent.src.ai_software_dev_crew.refactor.agents.executor_agent import Refact
 
 logger = logging.getLogger(__name__)
 
-# Name of the subdirectory that holds refactored output.
+# Name of the subdirectories for isolation and output.
+ORIGINAL_SOURCE_DIR = "original_source"
 REFACTORED_OUTPUT_DIR = "refactored"
 
 # DevOps agent (Containerfile + Tekton) — optional import so refactor works if agent not installed
@@ -79,8 +80,47 @@ def run_refactor_job(
             job_db.update_progress(job_id, phase, percent, msg)
 
     try:
-        # 0. Create refactored/ subdir — starts EMPTY (greenfield). No bulk copy.
         ws = Path(workspace_path)
+        
+        # 0. Isolate legacy source code into ORIGINAL_SOURCE_DIR
+        # This keeps the root directory clean (only metadata and output subdirs).
+        original_source_path = ws / ORIGINAL_SOURCE_DIR
+        original_source_path.mkdir(exist_ok=True)
+        
+        # Move all files and folders that are NOT part of our system to original_source/
+        # System files to skip: refactored/, original_source/, crew_jobs.db, etc.
+        skip_items = {
+            REFACTORED_OUTPUT_DIR, ORIGINAL_SOURCE_DIR, 
+            "crew_jobs.db", ".git",
+            "current_architecture.md", "target_architecture.md",
+            "refactor_plan.json", "refactor_strategy.md"
+        }
+        
+        moved_count = 0
+        for item in ws.iterdir():
+            if item.name in skip_items:
+                continue
+            
+            target_item = original_source_path / item.name
+            try:
+                # If target already exists (e.g. from previous run), remove it
+                if target_item.exists():
+                    if target_item.is_dir():
+                        shutil.rmtree(target_item)
+                    else:
+                        target_item.unlink()
+                
+                shutil.move(str(item), str(target_item))
+                moved_count += 1
+            except Exception as move_err:
+                logger.warning(f"Failed to move legacy item {item.name} to {ORIGINAL_SOURCE_DIR}: {move_err}")
+        
+        if moved_count > 0:
+            logger.info(f"Isolated {moved_count} items into {ORIGINAL_SOURCE_DIR}/")
+            # Update source_path to point to the isolated original source
+            source_path = str(original_source_path)
+
+        # 1. Create refactored/ subdir — starts EMPTY (greenfield). No bulk copy.
         refactored_dir = ws / REFACTORED_OUTPUT_DIR
         if refactored_dir.exists():
             shutil.rmtree(refactored_dir)
@@ -89,15 +129,15 @@ def run_refactor_job(
             f"Refactored output dir {refactored_dir} created (greenfield — no legacy files copied)."
         )
 
-        # 1. Initialize Agents: architect reads original workspace, executor writes to refactored/
+        # 2. Initialize Agents: architect reads original workspace, executor writes to refactored/
         architect = RefactorArchitectAgent(workspace_path, job_id)
         executor = RefactorExecutorAgent(str(refactored_dir), job_id)
 
-        # 2. Analyze Phase (architect reads from original source)
+        # 3. Analyze Phase (architect reads from isolated source_path)
         update_progress("analysis", 10, "Analyzing source code structure...")
         architect.analyze(source_path)
 
-        # 3. Check for architecture artifact (written by architect to original workspace)
+        # 4. Check for architecture artifact (written by architect to original workspace)
         arch_path = ws / "current_architecture.md"
         if not arch_path.exists():
             logger.warning(
@@ -105,7 +145,7 @@ def run_refactor_job(
                 "The design phase will rely on conversation memory only."
             )
 
-        # 4. Design Phase — produce target_architecture.md (future state) in original workspace
+        # 5. Design Phase — produce target_architecture.md (future state) in original workspace
         update_progress("design", 20, f"Designing target architecture for {target_stack}...")
         architect.design(target_stack, tech_preferences)
 
@@ -116,11 +156,11 @@ def run_refactor_job(
                 "The planning phase will rely on conversation memory only."
             )
 
-        # 5. Planning Phase — produce refactor_plan.json in original workspace
+        # 6. Planning Phase — produce refactor_plan.json in original workspace
         update_progress("planning", 35, f"Creating refactor plan for {target_stack}...")
         architect.plan(target_stack, tech_preferences)
 
-        # 6. Read and validate the Plan (from original workspace)
+        # 7. Read and validate the Plan (from original workspace)
         plan_path = ws / "refactor_plan.json"
         if not plan_path.exists():
             raise FileNotFoundError("Refactor plan was not created by the architect.")
@@ -128,8 +168,27 @@ def run_refactor_job(
         with open(plan_path, "r") as f:
             plan = json.load(f)
 
-        tasks = plan.get("tasks", [])
-        _validate_plan(tasks)
+        tasks_from_plan = plan.get("tasks", [])
+        _validate_plan(tasks_from_plan)
+
+        # Populate DB tasks if database is available
+        if job_db:
+            job_db.delete_refactor_tasks(job_id)
+            for i, t in enumerate(tasks_from_plan):
+                db_task_id = f"refactor-{job_id[:8]}-{i}"
+                job_db.create_refactor_task(
+                    task_id=db_task_id,
+                    job_id=job_id,
+                    file_path=t.get("file", ""),
+                    action=t.get("action", "modify"),
+                    instruction=t.get("instruction", ""),
+                )
+            # Use DB tasks as the source of truth for execution
+            tasks = job_db.get_refactor_tasks(job_id)
+        else:
+            # Fallback for runs without a database (e.g. CLI tests)
+            tasks = tasks_from_plan
+
         total_tasks = len(tasks)
 
         # Copy architecture docs and plan into refactored/ for co-location with new code
@@ -147,9 +206,13 @@ def run_refactor_job(
 
         for i, task in enumerate(tasks):
             task_id = task.get("id", str(i))
-            file_path = task.get("file", "")
+            file_path = task.get("file_path" if job_db else "file", "")
             action = task.get("action", "modify")
             instruction = task.get("instruction", "")
+
+            # Update DB status to running
+            if job_db:
+                job_db.update_refactor_task_status(task_id, "running")
 
             progress = 50 + int((i / max(total_tasks, 1)) * 40)
             update_progress("execution", progress, f"Refactoring {file_path} ({action})...")
@@ -158,7 +221,8 @@ def run_refactor_job(
                 if action == "modify":
                     # Do NOT copy old code into refactored/. Pass original content to executor;
                     # executor writes only the refactored version.
-                    original_file = ws / file_path
+                    # Original file is now isolated in ORIGINAL_SOURCE_DIR.
+                    original_file = ws / ORIGINAL_SOURCE_DIR / file_path
                     source_content = None
                     if original_file.exists():
                         try:
@@ -166,23 +230,28 @@ def run_refactor_job(
                         except Exception as read_err:
                             logger.warning(f"Could not read original file for modify: {file_path}: {read_err}")
                     else:
-                        logger.warning(f"Original file not found for modify: {file_path}")
+                        logger.warning(f"Original file not found for modify: {original_file}")
+                    
                     executor.execute_task(
                         file_path, instruction, action="modify", source_content=source_content
                     )
-                    completed_tasks += 1
                 elif action == "create":
                     executor.execute_task(file_path, instruction, action="create")
-                    completed_tasks += 1
                 else:
                     # delete — greenfield: nothing to delete in refactored/
                     logger.info(
                         f"Skipping delete action for {file_path} "
                         "(greenfield — file not in refactored/)."
                     )
-                    completed_tasks += 1
+
+                if job_db:
+                    job_db.update_refactor_task_status(task_id, "completed")
+                completed_tasks += 1
+
             except Exception as task_err:
                 logger.error(f"Task {task_id} ({file_path}) failed: {task_err}")
+                if job_db:
+                    job_db.update_refactor_task_status(task_id, "failed", error=str(task_err))
                 failed_tasks.append({
                     "task_id": task_id,
                     "file": file_path,

@@ -164,3 +164,20 @@ def get_refactor_plan(job_id: str):
         return jsonify(plan)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+@refactor_bp.route("/api/jobs/<job_id>/refactor", methods=["GET"])
+def get_refactor_status(job_id: str):
+    """Get the status of a Refactor job, including task breakdown."""
+    job_db = _get_job_db()
+    job = job_db.get_job(job_id)
+    if not job:
+        return jsonify({"error": "Job not found"}), 404
+        
+    tasks = job_db.get_refactor_tasks(job_id)
+    summary = job_db.get_refactor_summary(job_id)
+    
+    return jsonify({
+        "job_id": job_id,
+        "summary": summary,
+        "tasks": tasks
+    })

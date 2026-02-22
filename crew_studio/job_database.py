@@ -105,6 +105,23 @@ class JobDatabase:
             conn.execute("CREATE INDEX IF NOT EXISTS idx_migration_issues_job ON migration_issues(job_id)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_migration_issues_migration ON migration_issues(migration_id)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_migration_issues_status ON migration_issues(status)")
+            # ── Refactor tasks table ──────────────────────────────────────
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS refactor_tasks (
+                    id TEXT PRIMARY KEY,
+                    job_id TEXT NOT NULL,
+                    file_path TEXT NOT NULL,
+                    action TEXT NOT NULL,
+                    instruction TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    error TEXT,
+                    created_at TEXT NOT NULL,
+                    completed_at TEXT,
+                    FOREIGN KEY (job_id) REFERENCES jobs(id)
+                )
+            """)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_refactor_tasks_job ON refactor_tasks(job_id)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_refactor_tasks_status ON refactor_tasks(status)")
     
     def create_job(self, job_id: str, vision: str, workspace_path: str) -> Dict[str, Any]:
         """Create a new job record."""
@@ -524,6 +541,111 @@ class JobDatabase:
                 (job_id,),
             ).fetchone()
             return dict(row) if row else None
+
+    # ── Refactor Tasks ───────────────────────────────────────────
+
+    def create_refactor_task(
+        self,
+        task_id: str,
+        job_id: str,
+        file_path: str,
+        action: str,
+        instruction: str,
+    ) -> Dict[str, Any]:
+        """Create a new refactor task record (status=pending)."""
+        now = datetime.now().isoformat()
+        with self._get_conn() as conn:
+            conn.execute(
+                """
+                INSERT INTO refactor_tasks (id, job_id, file_path, action, instruction, status, created_at)
+                VALUES (?, ?, ?, ?, ?, 'pending', ?)
+                """,
+                (task_id, job_id, file_path, action, instruction, now),
+            )
+        return {
+            "id": task_id,
+            "job_id": job_id,
+            "file_path": file_path,
+            "action": action,
+            "instruction": instruction,
+            "status": "pending",
+            "created_at": now,
+        }
+
+    def update_refactor_task_status(
+        self, task_id: str, status: str, error: Optional[str] = None
+    ) -> bool:
+        """Update a refactor task's status. Sets completed_at on terminal states."""
+        now = datetime.now().isoformat() if status in ("completed", "failed", "skipped") else None
+        with self._get_conn() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE refactor_tasks
+                SET status = ?, error = ?, completed_at = COALESCE(?, completed_at)
+                WHERE id = ?
+                """,
+                (status, error, now, task_id),
+            )
+            return cursor.rowcount > 0
+
+    def get_refactor_tasks(self, job_id: str) -> List[Dict[str, Any]]:
+        """Return all refactor tasks for a job."""
+        with self._get_conn() as conn:
+            rows = conn.execute(
+                "SELECT * FROM refactor_tasks WHERE job_id = ? ORDER BY created_at ASC",
+                (job_id,),
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def get_refactor_summary(self, job_id: str) -> Dict[str, int]:
+        """Return aggregated counts of refactor tasks by status."""
+        with self._get_conn() as conn:
+            rows = conn.execute(
+                "SELECT status, COUNT(*) as count FROM refactor_tasks WHERE job_id = ? GROUP BY status",
+                (job_id,),
+            ).fetchall()
+            
+            summary = {"total": 0, "pending": 0, "running": 0, "completed": 0, "failed": 0, "skipped": 0}
+            for row in rows:
+                status = row["status"]
+                count = row["count"]
+                if status in summary:
+                    summary[status] = count
+                summary["total"] += count
+            return summary
+
+    def get_running_refactor_task(self, job_id: str) -> Optional[Dict[str, Any]]:
+        """Return the currently running refactor task for this job, if any."""
+        with self._get_conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM refactor_tasks WHERE job_id = ? AND status = 'running' ORDER BY created_at DESC LIMIT 1",
+                (job_id,),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def fail_stale_refactor_tasks(self, job_id: str, error: str = "Interrupted") -> int:
+        """Mark any 'running' refactor tasks as failed (e.g. after a crash)."""
+        now = datetime.now().isoformat()
+        with self._get_conn() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE refactor_tasks
+                SET status = 'failed', error = ?, completed_at = ?
+                WHERE job_id = ? AND status = 'running'
+                """,
+                (error, now, job_id),
+            )
+            return cursor.rowcount
+
+    def delete_refactor_tasks(self, job_id: str) -> int:
+        """Delete ALL refactor tasks for a job."""
+        with self._get_conn() as conn:
+            cursor = conn.execute(
+                "DELETE FROM refactor_tasks WHERE job_id = ?",
+                (job_id,),
+            )
+            return cursor.rowcount
+
 
     def _row_to_dict(self, row: sqlite3.Row) -> Dict[str, Any]:
         """Convert SQLite row to dictionary, parsing JSON fields."""
