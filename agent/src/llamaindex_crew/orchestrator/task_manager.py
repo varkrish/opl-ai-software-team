@@ -35,6 +35,7 @@ class TaskDefinition:
     required: bool = True           # Must be completed
     dependencies: List[str] = None  # Task IDs that must complete first
     source: str = None              # Where task came from (feature file, tech_stack, etc.)
+    status: str = None              # Current status (registered, completed, etc.)
     metadata: Dict = None           # Additional task data
     
     def __post_init__(self):
@@ -252,7 +253,9 @@ class TaskManager:
                         '.gitignore', '.eslintrc.js', '.prettierrc',
                         'babel.config.js', 'metro.config.js', 'app.json',
                         'jest.config.js', 'tsconfig.json', 'eslint.config.js',
-                        'README.md', 'Dockerfile', 'docker-compose.yml'
+                        'README.md', 'Dockerfile', 'docker-compose.yml',
+                        'pom.xml', 'build.gradle', 'settings.gradle', 'mvnw', 'gradlew',
+                        'pyproject.toml'
                     ]
                     
                     if '/' in file_path:
@@ -327,8 +330,11 @@ class TaskManager:
             'missing_tasks': missing_tasks
         }
     
-    def validate_all_tasks_completed(self) -> Dict[str, Any]:
-        """Validate that all required tasks were completed"""
+    def validate_all_tasks_completed(self, workspace_path: Path = None) -> Dict[str, Any]:
+        """Validate that all required tasks were completed, with optional physical verification"""
+        if workspace_path:
+            self.reconcile_with_filesystem(workspace_path)
+            
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         
@@ -353,6 +359,38 @@ class TaskManager:
             'incomplete_tasks': incomplete,
             'failed_tasks': failed
         }
+
+    def reconcile_with_filesystem(self, workspace_path: Path):
+        """Cross-check incomplete file creation tasks with the actual filesystem"""
+        if not workspace_path.exists():
+            return
+            
+        incomplete_tasks = self.get_incomplete_tasks()
+        if not incomplete_tasks:
+            return
+            
+        # Get all files in workspace for quick lookup
+        all_files = {p.name: p for p in workspace_path.rglob("*") if p.is_file()}
+        
+        for task in incomplete_tasks:
+            if task.task_type == "file_creation":
+                file_path = (task.metadata or {}).get("file_path", "")
+                if not file_path:
+                    continue
+                
+                # Check exact path
+                full_path = workspace_path / file_path
+                if full_path.exists():
+                    logger.info(f"🛡️ Self-healing: Found file {file_path} for task {task.task_id} via physical check")
+                    self.update_task_status(task.task_id, "completed", f"File found on disk at {file_path}")
+                    continue
+                
+                # Check basename fallback (if agent moved it)
+                basename = Path(file_path).name
+                if basename in all_files:
+                    found_path = all_files[basename].relative_to(workspace_path)
+                    logger.info(f"🛡️ Self-healing: Found file {basename} at {found_path} for task {task.task_id} via basename check")
+                    self.update_task_status(task.task_id, "completed", f"File found on disk at {found_path}")
     
     def get_task_status(self, task_id: str) -> Optional[TaskStatus]:
         """Get current status of a task"""
@@ -372,7 +410,7 @@ class TaskManager:
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         cursor.execute("""
-            SELECT task_id, phase, task_type, description, required, source, metadata
+            SELECT task_id, phase, task_type, description, required, source, status, metadata
             FROM tasks 
             WHERE project_id = ? AND required = 1 
             AND status NOT IN (?, ?)
@@ -387,7 +425,8 @@ class TaskManager:
                 description=row[3] or "",
                 required=bool(row[4]),
                 source=row[5],
-                metadata=json.loads(row[6]) if row[6] else None
+                status=row[6],
+                metadata=json.loads(row[7]) if row[7] else None
             ))
         conn.close()
         return tasks
@@ -441,7 +480,7 @@ class TaskManager:
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         cursor.execute("""
-            SELECT task_id, phase, task_type, description, required, source, metadata
+            SELECT task_id, phase, task_type, description, required, source, status, metadata
             FROM tasks 
             WHERE project_id = ?
             ORDER BY created_at ASC
@@ -456,7 +495,8 @@ class TaskManager:
                 description=row[3] or "",
                 required=bool(row[4]),
                 source=row[5],
-                metadata=json.loads(row[6]) if row[6] else None
+                status=row[6],
+                metadata=json.loads(row[7]) if row[7] else None
             ))
         conn.close()
         return tasks
@@ -466,7 +506,7 @@ class TaskManager:
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         cursor.execute("""
-            SELECT task_id, phase, task_type, description, required, source, metadata
+            SELECT task_id, phase, task_type, description, required, source, status, metadata
             FROM tasks 
             WHERE project_id = ? AND status = ?
         """, (self.project_id, status.value))
@@ -480,7 +520,8 @@ class TaskManager:
                 description=row[3] or "",
                 required=bool(row[4]),
                 source=row[5],
-                metadata=json.loads(row[6]) if row[6] else None
+                status=row[6],
+                metadata=json.loads(row[7]) if row[7] else None
             ))
         conn.close()
         return tasks
@@ -492,6 +533,7 @@ class TaskManager:
         or '✅ Created <path>'.
         """
         import re
+        from pathlib import Path
         
         logger.debug(f"Scanning output for task updates: {output[:200]}...")
         
@@ -504,15 +546,37 @@ class TaskManager:
         ]
         
         found_any = False
+        # Get all registered/created tasks to use for fallback matching
+        all_tasks = self.get_all_tasks()
+        pending_tasks = [t for t in all_tasks if t.status in (TaskStatus.REGISTERED.value, TaskStatus.CREATED.value)]
+        
         for pattern in patterns:
             matches = re.findall(pattern, output)
             for file_path in matches:
-                # Clean up file path (remove trailing punctuation)
+                # Clean up file path
                 file_path = file_path.strip().rstrip('.').rstrip(')')
+                
+                # 1. Try exact task ID match
                 task_id = f"file_{self.normalize_file_path_for_task_id(file_path)}"
-                logger.info(f"🎯 Found completion marker for task: {task_id} (file: {file_path})")
-                self.update_task_status(task_id, "completed", f"File created: {file_path}")
-                found_any = True
+                if any(t.task_id == task_id for t in all_tasks):
+                    logger.info(f"🎯 Found exact completion marker for task: {task_id} (file: {file_path})")
+                    self.update_task_status(task_id, "completed", f"File created: {file_path}")
+                    found_any = True
+                    continue
+
+                # 2. Robust fallback: Search by metadata file_path or basename
+                target_basename = Path(file_path).name
+                for task in pending_tasks:
+                    task_file_path = (task.metadata or {}).get("file_path", "")
+                    if not task_file_path:
+                        continue
+                        
+                    # Match by full path or just basename if it's a file creation task
+                    if task_file_path == file_path or Path(task_file_path).name == target_basename:
+                        logger.info(f"🎯 Found fallback completion marker for task: {task.task_id} (matched {file_path} to {task_file_path})")
+                        self.update_task_status(task.task_id, "completed", f"File created: {file_path} (matched via {task_file_path})")
+                        found_any = True
+                        break
         
         if not found_any:
             logger.debug("No file creation markers found in output.")
