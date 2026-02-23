@@ -1136,20 +1136,44 @@ def delete_job_document(job_id, doc_id):
 
 @app.route('/api/jobs', methods=['GET'])
 def list_jobs():
-    """List all jobs"""
+    """List jobs with optional pagination, filtering, and sorting.
+
+    Query params: page, page_size, vision_contains, status, sort_by, sort_order.
+    """
+    page = max(1, int(request.args.get('page', 1)))
+    page_size = max(1, min(100, int(request.args.get('page_size', 10))))
+    vision_contains = request.args.get('vision_contains', None) or None
+    status = request.args.get('status', None) or None
+    sort_by = request.args.get('sort_by', None) or None
+    sort_order = request.args.get('sort_order', None) or None
+    offset = (page - 1) * page_size
+
+    total = job_db.get_jobs_count(vision_filter=vision_contains, status_filter=status)
+    jobs = job_db.get_jobs_paginated(
+        limit=page_size, offset=offset,
+        vision_filter=vision_contains, status_filter=status,
+        sort_by=sort_by, sort_order=sort_order,
+    )
+
+    def _summary(job):
+        vision = job['vision']
+        if len(vision) > 100:
+            vision = vision[:100] + '...'
+        return {
+            'id': job['id'],
+            'vision': vision,
+            'status': job['status'],
+            'progress': job['progress'],
+            'current_phase': job['current_phase'],
+            'created_at': job['created_at'],
+            'completed_at': job.get('completed_at'),
+        }
+
     return jsonify({
-        'jobs': [
-            {
-                'id': job['id'],
-                'vision': job['vision'][:100] + '...' if len(job['vision']) > 100 else job['vision'],
-                'status': job['status'],
-                'progress': job['progress'],
-                'current_phase': job['current_phase'],
-                'created_at': job['created_at'],
-                'completed_at': job.get('completed_at')
-            }
-            for job in job_db.get_all_jobs()
-        ]
+        'jobs': [_summary(j) for j in jobs],
+        'total': total,
+        'page': page,
+        'page_size': page_size,
     })
 
 

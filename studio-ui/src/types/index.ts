@@ -54,6 +54,14 @@ export interface JobSummary {
   completed_at: string | null;
 }
 
+/** Paginated jobs list response from GET /api/jobs?page=&page_size= */
+export interface JobsPageResponse {
+  jobs: JobSummary[];
+  total: number;
+  page: number;
+  page_size: number;
+}
+
 /** Phase-level task record from GET /api/jobs/<id>/tasks */
 export interface Task {
   task_id: string;

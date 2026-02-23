@@ -20,6 +20,7 @@ import {
     SplitItem,
     Progress,
     ProgressVariant,
+    Pagination,
 } from '@patternfly/react-core';
 import {
     FolderOpenIcon,
@@ -68,6 +69,9 @@ const Refactor: React.FC = () => {
     // ── List view state ──────────────────────────────────────────────────
     const [jobs, setJobs] = useState<JobSummary[]>([]);
     const [jobsLoading, setJobsLoading] = useState(false);
+    const [jobsTotal, setJobsTotal] = useState(0);
+    const [jobsPage, setJobsPage] = useState(1);
+    const [jobsPerPage, setJobsPerPage] = useState(10);
 
     // ── Detail view state ────────────────────────────────────────────────
     const [job, setJob] = useState<Job | null>(null);
@@ -80,28 +84,22 @@ const Refactor: React.FC = () => {
     const [progressAccordionExpanded, setProgressAccordionExpanded] = useState(false);
 
     // ── Load refactor projects (list view) ──────────────────────────────
+    const loadRefactorJobs = useCallback((page?: number, perPage?: number) => {
+        const p = page ?? jobsPage;
+        const pp = perPage ?? jobsPerPage;
+        setJobsLoading(true);
+        getJobs(p, pp, 'Refactor')
+            .then((res) => {
+                setJobs(res.jobs);
+                setJobsTotal(res.total);
+            })
+            .finally(() => setJobsLoading(false));
+    }, [jobsPage, jobsPerPage]);
+
     useEffect(() => {
         if (jobId) return;
-        let cancelled = false;
-        setJobsLoading(true);
-        getJobs()
-            .then((list) => {
-                if (!cancelled) {
-                    // Show refactor projects: those with "refactor" in vision or phase
-                    const refactorJobs = list.filter(
-                        (j) =>
-                            j.vision?.toLowerCase().includes('refactor') ||
-                            j.current_phase?.toLowerCase().includes('refactor') ||
-                            j.vision?.includes('[Refactor]')
-                    );
-                    setJobs(refactorJobs);
-                }
-            })
-            .finally(() => {
-                if (!cancelled) setJobsLoading(false);
-            });
-        return () => { cancelled = true; };
-    }, [jobId]);
+        loadRefactorJobs();
+    }, [jobId, loadRefactorJobs]);
 
     // ── Load detail + poll (detail view) ─────────────────────────────────
     const pollStatus = useCallback(async () => {
@@ -216,43 +214,64 @@ const Refactor: React.FC = () => {
                         </CardBody>
                     </Card>
                 ) : (
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
-                        {jobs.map((j) => {
-                            const goal = j.vision?.replace(/^\[Refactor[^\]]*\]\s*/, '') ?? j.id;
-                            return (
-                                <Card
-                                    key={j.id}
-                                    isClickable
-                                    isSelectable
-                                    onClick={() => navigate(`/refactor/${j.id}`)}
-                                    style={{ cursor: 'pointer' }}
-                                >
-                                    <CardTitle>
-                                        <Split hasGutter>
-                                            <SplitItem isFilled>
-                                                <span style={{ fontWeight: 600 }}>{goal.slice(0, 80)}{goal.length > 80 ? '…' : ''}</span>
-                                            </SplitItem>
-                                            <SplitItem>
-                                                <Label color={
-                                                    j.status === 'completed' ? 'green'
-                                                        : j.status === 'running' ? 'blue'
-                                                            : j.status === 'failed' ? 'red'
-                                                                : 'grey'
-                                                }>
-                                                    {j.status}
-                                                </Label>
-                                            </SplitItem>
-                                        </Split>
-                                    </CardTitle>
-                                    <CardBody>
-                                        <span style={{ fontSize: '0.8125rem', color: '#6A6E73' }}>
-                                            Created {new Date(j.created_at).toLocaleDateString()} · Job {j.id.slice(0, 8)}…
-                                        </span>
-                                    </CardBody>
-                                </Card>
-                            );
-                        })}
-                    </div>
+                    <>
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
+                            {jobs.map((j) => {
+                                const goal = j.vision?.replace(/^\[Refactor[^\]]*\]\s*/, '') ?? j.id;
+                                return (
+                                    <Card
+                                        key={j.id}
+                                        isClickable
+                                        isSelectable
+                                        onClick={() => navigate(`/refactor/${j.id}`)}
+                                        style={{ cursor: 'pointer' }}
+                                    >
+                                        <CardTitle>
+                                            <Split hasGutter>
+                                                <SplitItem isFilled>
+                                                    <span style={{ fontWeight: 600 }}>{goal.slice(0, 80)}{goal.length > 80 ? '…' : ''}</span>
+                                                </SplitItem>
+                                                <SplitItem>
+                                                    <Label color={
+                                                        j.status === 'completed' ? 'green'
+                                                            : j.status === 'running' ? 'blue'
+                                                                : j.status === 'failed' ? 'red'
+                                                                    : 'grey'
+                                                    }>
+                                                        {j.status}
+                                                    </Label>
+                                                </SplitItem>
+                                            </Split>
+                                        </CardTitle>
+                                        <CardBody>
+                                            <span style={{ fontSize: '0.8125rem', color: '#6A6E73' }}>
+                                                Created {new Date(j.created_at).toLocaleDateString()} · Job {j.id.slice(0, 8)}…
+                                            </span>
+                                        </CardBody>
+                                    </Card>
+                                );
+                            })}
+                        </div>
+                        {jobsTotal > 0 && (
+                            <Pagination
+                                itemCount={jobsTotal}
+                                page={jobsPage}
+                                perPage={jobsPerPage}
+                                perPageOptions={[{ title: '5', value: 5 }, { title: '10', value: 10 }, { title: '20', value: 20 }]}
+                                onSetPage={(_e, newPage) => {
+                                    setJobsPage(newPage);
+                                    loadRefactorJobs(newPage, jobsPerPage);
+                                }}
+                                onPerPageSelect={(_e, newPerPage, newPage) => {
+                                    setJobsPerPage(newPerPage);
+                                    setJobsPage(newPage);
+                                    loadRefactorJobs(newPage, newPerPage);
+                                }}
+                                variant="bottom"
+                                style={{ marginTop: '1rem' }}
+                            />
+                        )}
+                    </>
                 )}
             </PageSection>
         );

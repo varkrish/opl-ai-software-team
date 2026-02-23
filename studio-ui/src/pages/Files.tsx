@@ -15,14 +15,8 @@ import {
   Spinner,
   Split,
   SplitItem,
-  Select,
-  SelectOption,
-  MenuToggle,
-  MenuToggleElement,
-  SelectList,
   Flex,
   FlexItem,
-  Label,
 } from '@patternfly/react-core';
 import {
   FolderIcon,
@@ -45,6 +39,7 @@ import {
 import { buildFileTree } from '../utils/fileTree';
 import type { JobSummary, FileTreeNode } from '../types';
 import RefineChat from '../components/RefineChat';
+import JobSearchSelect from '../components/JobSearchSelect';
 
 /** Red Hat brand colors for Monaco theme */
 const REDHAT = {
@@ -120,7 +115,7 @@ const Files: React.FC = () => {
   const [selectedFile, setSelectedFile] = useState<{ path: string; content: string } | null>(null);
   const [loadingFile, setLoadingFile] = useState(false);
   const [loading, setLoading] = useState(true);
-  const [isSelectOpen, setIsSelectOpen] = useState(false);
+  // isSelectOpen removed - handled by JobSearchSelect
   const [downloading, setDownloading] = useState(false);
   const [downloadError, setDownloadError] = useState<string | null>(null);
   /* Refine state now lives in RefineChat component */
@@ -128,8 +123,8 @@ const Files: React.FC = () => {
   /** Load jobs list and file tree. Pass jobId to immediately load files for that project (e.g. after dropdown change). */
   const loadData = useCallback(async (overrideJobId?: string) => {
     try {
-      const j = await getJobs();
-      setJobs(j);
+      const res = await getJobs(1, 100);
+      setJobs(res.jobs);
 
       let jobId: string | null = overrideJobId ?? selectedJobId;
 
@@ -139,9 +134,9 @@ const Files: React.FC = () => {
         if (urlJobId && urlJobId !== selectedJobId) {
           jobId = urlJobId;
           setSelectedJobId(jobId);
-        } else if (!jobId || !j.find((job) => job.id === jobId)) {
-          const running = j.find((job) => job.status === 'running');
-          jobId = running?.id ?? j[0]?.id ?? null;
+        } else if (!jobId || !res.jobs.find((job) => job.id === jobId)) {
+          const running = res.jobs.find((job) => job.status === 'running');
+          jobId = running?.id ?? res.jobs[0]?.id ?? null;
           setSelectedJobId(jobId);
         }
       }
@@ -190,12 +185,9 @@ const Files: React.FC = () => {
     }
   };
 
-  const handleJobSelect = (_event: React.MouseEvent | undefined, value: string | number | undefined) => {
-    const newJobId = value as string;
+  const handleJobSelect = (newJobId: string) => {
     setSelectedJobId(newJobId);
     setSelectedFile(null);
-    setIsSelectOpen(false);
-    // Reload file tree immediately for the selected project
     loadData(newJobId);
   };
 
@@ -227,46 +219,13 @@ const Files: React.FC = () => {
         </SplitItem>
         <SplitItem>
           <Flex alignItems={{ default: 'alignItemsCenter' }} gap={{ default: 'gapSm' }}>
-            {jobs.length > 0 && (
-              <Select
-                isOpen={isSelectOpen}
-                selected={selectedJobId || undefined}
+            <FlexItem>
+              <JobSearchSelect
+                selectedJobId={selectedJobId}
                 onSelect={handleJobSelect}
-                onOpenChange={setIsSelectOpen}
-                toggle={(toggleRef: React.Ref<MenuToggleElement>) => (
-                  <MenuToggle
-                    ref={toggleRef}
-                    data-testid="files-project-select-toggle"
-                    onClick={() => setIsSelectOpen(!isSelectOpen)}
-                    isExpanded={isSelectOpen}
-                    style={{ minWidth: 200 }}
-                  >
-                    {jobs.find((j) => j.id === selectedJobId)?.vision.substring(0, 30) || 'Select Job'}
-                  </MenuToggle>
-                )}
-              >
-                <SelectList>
-                  {jobs.map((job) => (
-                    <SelectOption key={job.id} value={job.id}>
-                      <Flex justifyContent={{ default: 'justifyContentSpaceBetween' }}>
-                        <FlexItem>{job.vision.substring(0, 40)}{job.vision.length > 40 ? '...' : ''}</FlexItem>
-                        <FlexItem>
-                          <Label isCompact color={
-                            job.status === 'running' ? 'blue' :
-                            job.status === 'completed' ? 'green' :
-                            job.status === 'failed' || job.status === 'quota_exhausted' ? 'red' :
-                            job.status === 'cancelled' ? 'orange' :
-                            'grey'
-                          }>
-                            {job.status === 'quota_exhausted' ? 'quota' : job.status}
-                          </Label>
-                        </FlexItem>
-                      </Flex>
-                    </SelectOption>
-                  ))}
-                </SelectList>
-              </Select>
-            )}
+                data-testid="files-project-select-toggle"
+              />
+            </FlexItem>
             {selectedJobId && (
               <Button
                 variant="secondary"

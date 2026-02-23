@@ -3,6 +3,7 @@ import type {
   Stats,
   Job,
   JobSummary,
+  JobsPageResponse,
   JobProgress,
   Task,
   Agent,
@@ -30,9 +31,19 @@ export async function getBackends(): Promise<BackendOption[]> {
 }
 
 // ── Jobs ────────────────────────────────────────────────────────────────────
-export async function getJobs(): Promise<JobSummary[]> {
-  const { data } = await api.get<{ jobs: JobSummary[] }>('/api/jobs');
-  return data.jobs;
+export async function getJobs(
+  page = 1,
+  pageSize = 10,
+  visionContains?: string,
+  opts?: { status?: string; sortBy?: string; sortOrder?: 'asc' | 'desc' },
+): Promise<JobsPageResponse> {
+  const params: Record<string, string | number> = { page, page_size: pageSize };
+  if (visionContains) params.vision_contains = visionContains;
+  if (opts?.status) params.status = opts.status;
+  if (opts?.sortBy) params.sort_by = opts.sortBy;
+  if (opts?.sortOrder) params.sort_order = opts.sortOrder;
+  const { data } = await api.get<JobsPageResponse>('/api/jobs', { params });
+  return data;
 }
 
 export async function getJob(jobId: string): Promise<Job> {

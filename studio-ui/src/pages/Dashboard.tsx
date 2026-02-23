@@ -1,4 +1,4 @@
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useRef } from 'react';
 import {
   Card,
   CardTitle,
@@ -20,13 +20,18 @@ import {
   Spinner,
   Split,
   SplitItem,
-  Select,
-  SelectOption,
-  MenuToggle,
-  SelectList,
   Dropdown,
   DropdownItem,
   DropdownList,
+  Pagination,
+  Toolbar,
+  ToolbarContent,
+  ToolbarItem,
+  SearchInput,
+  MenuToggle,
+  Select,
+  SelectOption,
+  SelectList,
 } from '@patternfly/react-core';
 import {
   CubesIcon,
@@ -34,10 +39,13 @@ import {
   ClockIcon,
   ExclamationTriangleIcon,
   EllipsisVIcon,
+  SortAmountDownIcon,
+  SortAmountUpIcon,
 } from '@patternfly/react-icons';
 import { useNavigate } from 'react-router-dom';
 import { usePolling } from '../hooks/usePolling';
 import { getStats, getJobs, getHealth, getJobProgress, restartJob } from '../api/client';
+import JobSearchSelect from '../components/JobSearchSelect';
 import type { Stats, JobSummary, HealthCheck, ProgressMessage } from '../types';
 
 const jobStatusColor = (status: string): 'green' | 'red' | 'blue' | 'orange' | 'grey' => {
@@ -51,13 +59,25 @@ const jobStatusColor = (status: string): 'green' | 'red' | 'blue' | 'orange' | '
   }
 };
 
+const DEFAULT_PER_PAGE = 10;
+const PER_PAGE_OPTIONS = [
+  { value: 10, title: '10' },
+  { value: 20, title: '20' },
+  { value: 50, title: '50' },
+];
+
+const STATUS_OPTIONS = ['running', 'completed', 'failed', 'queued', 'cancelled', 'quota_exhausted'];
+type SortCol = 'vision' | 'status' | 'current_phase' | 'progress' | 'created_at';
+
 const Dashboard: React.FC = () => {
   const navigate = useNavigate();
   const [stats, setStats] = useState<Stats | null>(null);
   const [jobs, setJobs] = useState<JobSummary[]>([]);
+  const [jobsTotal, setJobsTotal] = useState(0);
+  const [jobsPage, setJobsPage] = useState(1);
+  const [jobsPerPage, setJobsPerPage] = useState(DEFAULT_PER_PAGE);
   const [health, setHealth] = useState<HealthCheck | null>(null);
   const [selectedJobId, setSelectedJobId] = useState<string | null>(null);
-  const [jobSelectOpen, setJobSelectOpen] = useState(false);
   const [actionsOpenJobId, setActionsOpenJobId] = useState<string | null>(null);
   const [activeJob, setActiveJob] = useState<{
     progress: number;
@@ -66,21 +86,45 @@ const Dashboard: React.FC = () => {
   } | null>(null);
   const [loading, setLoading] = useState(true);
 
-  const loadData = useCallback(async () => {
+  const [searchText, setSearchText] = useState('');
+  const [statusFilter, setStatusFilter] = useState<string>('');
+  const [statusFilterOpen, setStatusFilterOpen] = useState(false);
+  const [sortBy, setSortBy] = useState<SortCol>('created_at');
+  const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('desc');
+  const searchDebounceRef = useRef<ReturnType<typeof setTimeout>>();
+
+  const loadData = useCallback(async (overrides?: {
+    page?: number; perPage?: number; search?: string;
+    status?: string; sort?: SortCol; order?: 'asc' | 'desc';
+  }) => {
+    const page = overrides?.page ?? jobsPage;
+    const perPage = overrides?.perPage ?? jobsPerPage;
+    const search = overrides?.search ?? searchText;
+    const status = overrides?.status ?? statusFilter;
+    const sort = overrides?.sort ?? sortBy;
+    const order = overrides?.order ?? sortOrder;
     try {
-      const [s, j, h] = await Promise.all([getStats(), getJobs(), getHealth()]);
+      const [s, jobsResp, h] = await Promise.all([
+        getStats(),
+        getJobs(page, perPage, search || undefined, {
+          status: status || undefined,
+          sortBy: sort,
+          sortOrder: order,
+        }),
+        getHealth(),
+      ]);
       setStats(s);
-      setJobs(j);
+      setJobs(jobsResp.jobs);
+      setJobsTotal(jobsResp.total);
       setHealth(h);
 
-      // Auto-select job if none selected
-      if (!selectedJobId || !j.find(job => job.id === selectedJobId)) {
+      const j = jobsResp.jobs;
+      if (!selectedJobId || !j.find((job) => job.id === selectedJobId)) {
         const runningJob = j.find((job) => job.status === 'running');
         const best = runningJob || j[0];
         if (best) setSelectedJobId(best.id);
       }
 
-      // Fetch progress for selected job
       if (selectedJobId) {
         const progress = await getJobProgress(selectedJobId);
         setActiveJob(progress);
@@ -92,9 +136,33 @@ const Dashboard: React.FC = () => {
     } finally {
       setLoading(false);
     }
-  }, [selectedJobId]);
+  }, [selectedJobId, jobsPage, jobsPerPage, searchText, statusFilter, sortBy, sortOrder]);
 
   usePolling(loadData, 2000);
+
+  const handleSort = (col: SortCol) => {
+    const newOrder = sortBy === col && sortOrder === 'asc' ? 'desc' : 'asc';
+    setSortBy(col);
+    setSortOrder(newOrder);
+    setJobsPage(1);
+    loadData({ page: 1, sort: col, order: newOrder });
+  };
+
+  const handleSearch = (value: string) => {
+    setSearchText(value);
+    if (searchDebounceRef.current) clearTimeout(searchDebounceRef.current);
+    searchDebounceRef.current = setTimeout(() => {
+      setJobsPage(1);
+      loadData({ page: 1, search: value });
+    }, 300);
+  };
+
+  const handleStatusFilter = (value: string) => {
+    setStatusFilter(value);
+    setStatusFilterOpen(false);
+    setJobsPage(1);
+    loadData({ page: 1, status: value });
+  };
 
   if (loading) {
     return (
@@ -128,46 +196,18 @@ const Dashboard: React.FC = () => {
           <p style={{ color: '#6A6E73', marginTop: '0.25rem' }}>Overview of your AI development crew.</p>
         </SplitItem>
         <SplitItem>
-          {jobs.length > 0 && (
-            <Select
-              isOpen={jobSelectOpen}
-              selected={selectedJobId}
-              onSelect={(_event, value) => {
-                setSelectedJobId(value as string);
-                setJobSelectOpen(false);
-              }}
-              onOpenChange={(isOpen) => setJobSelectOpen(isOpen)}
-              toggle={(toggleRef) => (
-                <MenuToggle
-                  ref={toggleRef}
-                  onClick={() => setJobSelectOpen(!jobSelectOpen)}
-                  isExpanded={jobSelectOpen}
-                  style={{ minWidth: '220px', marginRight: '0.5rem' }}
-                >
-                  {selectedJobId
-                    ? (() => {
-                      const j = jobs.find(job => job.id === selectedJobId);
-                      return j ? `${j.vision.substring(0, 25)}${j.vision.length > 25 ? '...' : ''}` : 'Select Job';
-                    })()
-                    : 'Select Job'}
-                </MenuToggle>
-              )}
-            >
-              <SelectList>
-                {jobs.map((job) => (
-                  <SelectOption key={job.id} value={job.id}>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, alignItems: 'center' }}>
-                      <span style={{ fontSize: '0.85rem' }}>{job.vision.substring(0, 35)}{job.vision.length > 35 ? '...' : ''}</span>
-                      <Label isCompact color={jobStatusColor(job.status)}>
-                        {job.status}
-                      </Label>
-                    </div>
-                  </SelectOption>
-                ))}
-              </SelectList>
-            </Select>
-          )}
-          <Button variant="primary" onClick={() => window.location.href = '/'}>New Project</Button>
+          <Flex alignItems={{ default: 'alignItemsCenter' }} gap={{ default: 'gapSm' }}>
+            <FlexItem>
+              <JobSearchSelect
+                selectedJobId={selectedJobId}
+                onSelect={setSelectedJobId}
+                style={{ minWidth: 240 }}
+              />
+            </FlexItem>
+            <FlexItem>
+              <Button variant="primary" onClick={() => window.location.href = '/'}>New Project</Button>
+            </FlexItem>
+          </Flex>
         </SplitItem>
       </Split>
 
@@ -377,25 +417,88 @@ const Dashboard: React.FC = () => {
       </Grid>
 
       {/* Recent Jobs */}
-      {jobs.length > 0 && (
+      {(jobs.length > 0 || jobsTotal > 0) && (
         <Card style={{ marginTop: '1.5rem' }}>
           <CardHeader>
             <CardTitle>Recent Jobs</CardTitle>
+            {jobsTotal > 0 && (
+              <p style={{ fontSize: '0.75rem', color: '#6A6E73', marginTop: '0.25rem' }}>
+                {jobsTotal} job{jobsTotal !== 1 ? 's' : ''} total
+              </p>
+            )}
           </CardHeader>
           <CardBody style={{ padding: 0 }}>
+            <Toolbar style={{ padding: '0.5rem 1rem', borderBottom: '1px solid #E8E8E8' }}>
+              <ToolbarContent>
+                <ToolbarItem>
+                  <SearchInput
+                    placeholder="Search by vision..."
+                    value={searchText}
+                    onChange={(_e, value) => handleSearch(value)}
+                    onClear={() => handleSearch('')}
+                    style={{ minWidth: 220 }}
+                  />
+                </ToolbarItem>
+                <ToolbarItem>
+                  <Select
+                    isOpen={statusFilterOpen}
+                    selected={statusFilter || undefined}
+                    onSelect={(_e, value) => handleStatusFilter(value as string)}
+                    onOpenChange={setStatusFilterOpen}
+                    toggle={(ref) => (
+                      <MenuToggle
+                        ref={ref}
+                        onClick={() => setStatusFilterOpen(!statusFilterOpen)}
+                        isExpanded={statusFilterOpen}
+                        style={{ minWidth: 140 }}
+                      >
+                        {statusFilter || 'All statuses'}
+                      </MenuToggle>
+                    )}
+                  >
+                    <SelectList>
+                      <SelectOption value="">All statuses</SelectOption>
+                      {STATUS_OPTIONS.map((s) => (
+                        <SelectOption key={s} value={s}>
+                          <Label isCompact color={jobStatusColor(s)}>{s}</Label>
+                        </SelectOption>
+                      ))}
+                    </SelectList>
+                  </Select>
+                </ToolbarItem>
+              </ToolbarContent>
+            </Toolbar>
             <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.875rem', tableLayout: 'fixed' }}>
               <thead>
                 <tr style={{ borderBottom: '2px solid #E8E8E8', textAlign: 'left' }}>
-                  <th style={{ padding: '0.75rem 1rem', fontWeight: 600, color: '#6A6E73', width: '35%' }}>Vision</th>
-                  <th style={{ padding: '0.75rem 1rem', fontWeight: 600, color: '#6A6E73', width: '9%' }}>Status</th>
-                  <th style={{ padding: '0.75rem 1rem', fontWeight: 600, color: '#6A6E73', width: '11%' }}>Phase</th>
-                  <th style={{ padding: '0.75rem 1rem', fontWeight: 600, color: '#6A6E73', width: '14%' }}>Progress</th>
-                  <th style={{ padding: '0.75rem 1rem', fontWeight: 600, color: '#6A6E73', width: '16%' }}>Created</th>
+                  {([
+                    ['Vision', 'vision', '35%'],
+                    ['Status', 'status', '9%'],
+                    ['Phase', 'current_phase', '11%'],
+                    ['Progress', 'progress', '14%'],
+                    ['Created', 'created_at', '16%'],
+                  ] as [string, SortCol, string][]).map(([label, col, width]) => (
+                    <th
+                      key={col}
+                      onClick={() => handleSort(col)}
+                      style={{
+                        padding: '0.75rem 1rem', fontWeight: 600, color: '#6A6E73',
+                        width, cursor: 'pointer', userSelect: 'none',
+                      }}
+                    >
+                      <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                        {label}
+                        {sortBy === col && (
+                          sortOrder === 'asc' ? <SortAmountUpIcon style={{ fontSize: '0.7rem' }} /> : <SortAmountDownIcon style={{ fontSize: '0.7rem' }} />
+                        )}
+                      </span>
+                    </th>
+                  ))}
                   <th style={{ padding: '0.75rem 1rem', fontWeight: 600, color: '#6A6E73', width: '5%' }}></th>
                 </tr>
               </thead>
               <tbody>
-                {jobs.slice(0, 10).map((job) => (
+                {jobs.map((job) => (
                   <tr
                     key={job.id}
                     style={{
@@ -526,6 +629,25 @@ const Dashboard: React.FC = () => {
                 ))}
               </tbody>
             </table>
+            {jobsTotal > 0 && (
+              <Pagination
+                itemCount={jobsTotal}
+                page={jobsPage}
+                perPage={jobsPerPage}
+                perPageOptions={PER_PAGE_OPTIONS}
+                onSetPage={(_e, newPage) => {
+                  setJobsPage(newPage);
+                  loadData({ page: newPage });
+                }}
+                onPerPageSelect={(_e, newPerPage, newPage) => {
+                  setJobsPerPage(newPerPage);
+                  setJobsPage(newPage);
+                  loadData({ page: newPage, perPage: newPerPage });
+                }}
+                variant="bottom"
+                widgetId="dashboard-jobs-pagination"
+              />
+            )}
           </CardBody>
         </Card>
       )}

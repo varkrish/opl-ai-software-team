@@ -11,11 +11,6 @@ import {
   FormGroup,
   TextArea,
   Spinner,
-  Select,
-  SelectOption,
-  MenuToggle,
-  MenuToggleElement,
-  SelectList,
   Progress,
   ProgressMeasureLocation,
   ProgressVariant,
@@ -37,6 +32,7 @@ import { usePolling } from '../hooks/usePolling';
 import { getJobs, getJobTasks, createJob } from '../api/client';
 import { groupTasksIntoColumns } from '../utils/taskGrouping';
 import type { JobSummary, KanbanColumn, Task } from '../types';
+import JobSearchSelect from '../components/JobSearchSelect';
 
 /* ── Phase visual config ── */
 const agentIcons: Record<string, React.ReactNode> = {
@@ -72,17 +68,15 @@ const Tasks: React.FC = () => {
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [vision, setVision] = useState('');
   const [creating, setCreating] = useState(false);
-  const [isSelectOpen, setIsSelectOpen] = useState(false);
-
   const loadData = useCallback(async () => {
     try {
-      const j = await getJobs();
-      setJobs(j);
+      const res = await getJobs(1, 100);
+      setJobs(res.jobs);
 
       let jobId = selectedJobId;
-      if (!jobId || !j.find((job) => job.id === jobId)) {
-        const running = j.find((job) => job.status === 'running');
-        jobId = running?.id || j[0]?.id || null;
+      if (!jobId || !res.jobs.find((job) => job.id === jobId)) {
+        const running = res.jobs.find((job) => job.status === 'running');
+        jobId = running?.id || res.jobs[0]?.id || null;
         setSelectedJobId(jobId);
       }
 
@@ -116,9 +110,8 @@ const Tasks: React.FC = () => {
     }
   };
 
-  const handleJobSelect = (_event: React.MouseEvent | undefined, value: string | number | undefined) => {
-    setSelectedJobId(value as string);
-    setIsSelectOpen(false);
+  const handleJobSelect = (jobId: string) => {
+    setSelectedJobId(jobId);
   };
 
   if (loading) {
@@ -142,45 +135,10 @@ const Tasks: React.FC = () => {
           <p style={{ color: '#6A6E73', marginTop: '0.25rem' }}>Kanban view of agent activities by phase.</p>
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
-          {jobs.length > 0 && (
-            <Select
-              isOpen={isSelectOpen}
-              selected={selectedJobId || undefined}
-              onSelect={handleJobSelect}
-              onOpenChange={setIsSelectOpen}
-              toggle={(toggleRef: React.Ref<MenuToggleElement>) => (
-                <MenuToggle
-                  ref={toggleRef}
-                  onClick={() => setIsSelectOpen(!isSelectOpen)}
-                  isExpanded={isSelectOpen}
-                  style={{ minWidth: 200 }}
-                >
-                  {selectedJob
-                    ? selectedJob.vision.substring(0, 30) + (selectedJob.vision.length > 30 ? '...' : '')
-                    : 'Select Job'}
-                </MenuToggle>
-              )}
-            >
-              <SelectList>
-                {jobs.map((job) => (
-                  <SelectOption key={job.id} value={job.id}>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}>
-                      <span>{job.vision.substring(0, 40)}{job.vision.length > 40 ? '...' : ''}</span>
-                      <Label isCompact color={
-                        job.status === 'running' ? 'blue' :
-                        job.status === 'completed' ? 'green' :
-                        job.status === 'failed' || job.status === 'quota_exhausted' ? 'red' :
-                        job.status === 'cancelled' ? 'orange' :
-                        'grey'
-                      }>
-                        {job.status === 'quota_exhausted' ? 'quota' : job.status}
-                      </Label>
-                    </div>
-                  </SelectOption>
-                ))}
-              </SelectList>
-            </Select>
-          )}
+          <JobSearchSelect
+            selectedJobId={selectedJobId}
+            onSelect={handleJobSelect}
+          />
           <Button variant="primary" icon={<PlusCircleIcon />} onClick={() => setIsModalOpen(true)}>
             New Job
           </Button>

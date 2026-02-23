@@ -1,5 +1,5 @@
 import React, { useState, useCallback } from 'react';
-import { Label, Spinner, Title, Select, SelectOption, MenuToggle, SelectList } from '@patternfly/react-core';
+import { Label, Spinner, Title } from '@patternfly/react-core';
 import {
   CubesIcon,
   PencilAltIcon,
@@ -12,6 +12,7 @@ import {
 import { usePolling } from '../hooks/usePolling';
 import { getJobs, getJobAgents } from '../api/client';
 import type { Agent, JobSummary } from '../types';
+import JobSearchSelect from '../components/JobSearchSelect';
 
 /** Static agent definitions (fallback when no active job) */
 const STATIC_AGENTS: Agent[] = [
@@ -54,19 +55,18 @@ const Agents: React.FC = () => {
   const [loading, setLoading] = useState(true);
   const [jobs, setJobs] = useState<JobSummary[]>([]);
   const [selectedJobId, setSelectedJobId] = useState<string | null>(null);
-  const [jobSelectOpen, setJobSelectOpen] = useState(false);
 
   const loadData = useCallback(async () => {
     try {
-      const fetchedJobs = await getJobs();
-      setJobs(fetchedJobs);
-      
+      const res = await getJobs(1, 100);
+      setJobs(res.jobs);
+
       // Auto-select job if none selected or if selected job no longer exists
-      if (!selectedJobId || !fetchedJobs.find(j => j.id === selectedJobId)) {
+      if (!selectedJobId || !res.jobs.find((j) => j.id === selectedJobId)) {
         // Pick the most relevant job: running first, then most recent
-        const activeJob = fetchedJobs.find((j: JobSummary) => j.status === 'running')
-          || fetchedJobs.find((j: JobSummary) => j.status === 'completed')
-          || fetchedJobs[0];
+        const activeJob = res.jobs.find((j: JobSummary) => j.status === 'running')
+          || res.jobs.find((j: JobSummary) => j.status === 'completed')
+          || res.jobs[0];
         
         if (activeJob) {
           setSelectedJobId(activeJob.id);
@@ -109,49 +109,11 @@ const Agents: React.FC = () => {
             Crew Roster
           </Title>
           
-          {/* Job Selector */}
-          {jobs.length > 0 && (
-            <Select
-              isOpen={jobSelectOpen}
-              selected={selectedJobId}
-              onSelect={(_event, value) => {
-                setSelectedJobId(value as string);
-                setJobSelectOpen(false);
-              }}
-              onOpenChange={(isOpen) => setJobSelectOpen(isOpen)}
-              toggle={(toggleRef) => (
-                <MenuToggle
-                  ref={toggleRef}
-                  onClick={() => setJobSelectOpen(!jobSelectOpen)}
-                  isExpanded={jobSelectOpen}
-                  style={{ minWidth: '250px' }}
-                >
-                  {selectedJobId 
-                    ? (() => {
-                        const j = jobs.find(job => job.id === selectedJobId);
-                        return j ? `${j.vision.substring(0, 30)}${j.vision.length > 30 ? '...' : ''}` : 'Select Job';
-                      })()
-                    : 'Select Job'}
-                </MenuToggle>
-              )}
-            >
-              <SelectList>
-                {jobs.map((job) => {
-                  const statusIcon = job.status === 'running' ? '🟢' : 
-                                   job.status === 'completed' ? '✅' : 
-                                   job.status === 'failed' ? '❌' : '⏸️';
-                  return (
-                    <SelectOption key={job.id} value={job.id}>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                        <span>{statusIcon}</span>
-                        <span style={{ flex: 1 }}>{job.vision.substring(0, 40)}{job.vision.length > 40 ? '...' : ''}</span>
-                      </div>
-                    </SelectOption>
-                  );
-                })}
-              </SelectList>
-            </Select>
-          )}
+          <JobSearchSelect
+            selectedJobId={selectedJobId}
+            onSelect={setSelectedJobId}
+            style={{ minWidth: 250 }}
+          />
         </div>
         <p style={{ color: '#6A6E73', marginTop: '0.25rem' }}>
           Manage and monitor your specialized AI agents.

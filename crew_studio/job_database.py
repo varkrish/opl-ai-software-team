@@ -167,6 +167,60 @@ class JobDatabase:
         with self._get_conn() as conn:
             rows = conn.execute("SELECT * FROM jobs ORDER BY created_at DESC").fetchall()
             return [self._row_to_dict(row) for row in rows]
+
+    _SORTABLE_COLUMNS = {"created_at", "vision", "status", "progress", "current_phase"}
+
+    def _build_where(
+        self,
+        vision_filter: Optional[str] = None,
+        status_filter: Optional[str] = None,
+    ) -> tuple:
+        """Build WHERE clause and params from optional filters."""
+        clauses: list = []
+        params: list = []
+        if vision_filter:
+            clauses.append("vision LIKE ?")
+            params.append(f"%{vision_filter}%")
+        if status_filter:
+            clauses.append("status = ?")
+            params.append(status_filter)
+        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        return where, params
+
+    def get_jobs_count(
+        self,
+        vision_filter: Optional[str] = None,
+        status_filter: Optional[str] = None,
+    ) -> int:
+        """Return total number of jobs, optionally filtered."""
+        where, params = self._build_where(vision_filter, status_filter)
+        with self._get_conn() as conn:
+            row = conn.execute(
+                f"SELECT COUNT(*) FROM jobs{where}", params
+            ).fetchone()
+            return row[0] if row else 0
+
+    def get_jobs_paginated(
+        self,
+        limit: int = 10,
+        offset: int = 0,
+        vision_filter: Optional[str] = None,
+        status_filter: Optional[str] = None,
+        sort_by: Optional[str] = None,
+        sort_order: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """Get jobs with pagination, optional filters, and sorting."""
+        where, params = self._build_where(vision_filter, status_filter)
+
+        col = sort_by if sort_by in self._SORTABLE_COLUMNS else "created_at"
+        direction = "ASC" if sort_order == "asc" else "DESC"
+        collate = " COLLATE NOCASE" if col == "vision" else ""
+
+        sql = f"SELECT * FROM jobs{where} ORDER BY {col}{collate} {direction} LIMIT ? OFFSET ?"
+        params.extend([limit, offset])
+        with self._get_conn() as conn:
+            rows = conn.execute(sql, params).fetchall()
+            return [self._row_to_dict(row) for row in rows]
     
     def update_job(self, job_id: str, updates: Dict[str, Any]) -> bool:
         """Update job fields. Returns True if job was found and updated."""
