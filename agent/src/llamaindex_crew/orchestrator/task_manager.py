@@ -599,3 +599,237 @@ class TaskManager:
             normalized = normalized[6:]
             
         return normalized.replace('/', '_').replace('.', '_').replace('-', '_')
+
+    # ── Granular task decomposition ──────────────────────────────────────────
+
+    def register_granular_tasks(
+        self,
+        design_spec: str,
+        tech_stack_content: str,
+    ) -> List[TaskDefinition]:
+        """Decompose design spec + tech stack into per-file tasks with domain context.
+
+        Parses the file structure from tech_stack_content and cross-references
+        bounded contexts from design_spec to attach domain context to each task.
+        Model/core files are registered before views/controllers to express dependencies.
+        """
+        files = self._extract_files_from_content(tech_stack_content)
+        contexts = self._extract_bounded_contexts(design_spec)
+
+        model_tasks: List[TaskDefinition] = []
+        other_tasks: List[TaskDefinition] = []
+
+        for fp in files:
+            task_id = f"file_{self.normalize_file_path_for_task_id(fp)}"
+            domain = self._match_domain_context(fp, contexts)
+            is_model = any(kw in fp.lower() for kw in ("model", "schema", "entity"))
+
+            task = TaskDefinition(
+                task_id=task_id,
+                phase="development",
+                task_type="file_creation",
+                description=f"Create file: {fp}",
+                source="tech_stack",
+                metadata={"file_path": fp, "domain_context": domain},
+            )
+
+            if is_model:
+                model_tasks.append(task)
+            else:
+                other_tasks.append(task)
+
+        # Register model tasks first
+        for t in model_tasks:
+            self.register_task(t)
+
+        # Other tasks depend on their domain's model task
+        model_ids = [t.task_id for t in model_tasks]
+        for t in other_tasks:
+            deps = self._infer_dependencies(t, model_tasks)
+            t.dependencies = deps
+            self.register_task(t)
+
+        all_tasks = model_tasks + other_tasks
+        logger.info("Registered %d granular tasks (%d models, %d others)",
+                     len(all_tasks), len(model_tasks), len(other_tasks))
+        return all_tasks
+
+    def _extract_files_from_content(self, content: str) -> List[str]:
+        """Extract file paths from a tech_stack markdown string."""
+        # Delegate to existing parser via a temp file, or parse inline
+        file_paths = []
+        in_tree = False
+        for line in content.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("```"):
+                in_tree = not in_tree
+                continue
+            if not in_tree:
+                continue
+            match = re.search(
+                r'[├└│─\s]*([a-zA-Z0-9_/.\-]+\.[a-zA-Z0-9]+)',
+                line,
+            )
+            if match:
+                fp = match.group(1).strip()
+                if not fp.endswith('/'):
+                    file_paths.append(fp)
+        return list(dict.fromkeys(file_paths))  # dedupe preserving order
+
+    def _extract_bounded_contexts(self, design_spec: str) -> Dict[str, str]:
+        """Extract bounded context name -> description from design spec."""
+        contexts: Dict[str, str] = {}
+        pattern = re.compile(
+            r'\*\*([^*]+)\*\*\s*[-–—:]\s*(.*)',
+            re.IGNORECASE,
+        )
+        for m in pattern.finditer(design_spec):
+            name = m.group(1).strip()
+            desc = m.group(2).strip()
+            contexts[name.lower()] = f"{name}: {desc}"
+        return contexts
+
+    def _match_domain_context(self, file_path: str, contexts: Dict[str, str]) -> str:
+        """Match a file path to the best bounded context.
+
+        Matches against both the context key and full description, and also
+        checks if the file stem appears in the description (e.g. 'flight' in
+        'Flight availability tracking').
+        """
+        fp_lower = file_path.lower()
+        file_stem = Path(file_path).stem.lower().replace("_", " ")
+        stem_words = set(re.findall(r'\w+', file_stem))
+
+        best = ""
+        best_score = 0
+        for key, desc in contexts.items():
+            desc_lower = desc.lower()
+            key_words = set(re.findall(r'\w+', key))
+            desc_words = set(re.findall(r'\w+', desc_lower))
+            all_words = key_words | desc_words
+
+            score = sum(1 for kw in all_words if kw in fp_lower)
+            score += sum(2 for sw in stem_words if sw in desc_lower)
+
+            if score > best_score:
+                best_score = score
+                best = desc
+        return best
+
+    def _infer_dependencies(
+        self, task: TaskDefinition, model_tasks: List[TaskDefinition]
+    ) -> List[str]:
+        """Infer which model tasks a view/serializer task depends on."""
+        fp = (task.metadata or {}).get("file_path", "").lower()
+        deps = []
+        for mt in model_tasks:
+            mt_fp = (mt.metadata or {}).get("file_path", "").lower()
+            mt_stem = Path(mt_fp).stem
+            if mt_stem in fp or mt_stem.replace("_", "") in fp.replace("_", ""):
+                deps.append(mt.task_id)
+        return deps
+
+    # ── Per-task execution helpers ───────────────────────────────────────────
+
+    def get_next_actionable_task(self, phase: str) -> Optional[TaskDefinition]:
+        """Return the next registered task whose dependencies are all completed/skipped."""
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+
+        cursor.execute("""
+            SELECT task_id, phase, task_type, description, required, source, status, metadata
+            FROM tasks
+            WHERE project_id = ? AND phase = ? AND status = ?
+            ORDER BY created_at ASC
+        """, (self.project_id, phase, TaskStatus.REGISTERED.value))
+
+        for row in cursor.fetchall():
+            task_id = row["task_id"]
+            # Check dependencies
+            dep_rows = conn.execute(
+                "SELECT depends_on_task_id FROM task_dependencies WHERE task_id = ?",
+                (task_id,),
+            ).fetchall()
+
+            all_deps_met = True
+            for dr in dep_rows:
+                dep_status = conn.execute(
+                    "SELECT status FROM tasks WHERE task_id = ?",
+                    (dr["depends_on_task_id"],),
+                ).fetchone()
+                if dep_status is None or dep_status["status"] not in (
+                    TaskStatus.COMPLETED.value, TaskStatus.SKIPPED.value
+                ):
+                    all_deps_met = False
+                    break
+
+            if all_deps_met:
+                conn.close()
+                return TaskDefinition(
+                    task_id=row["task_id"],
+                    phase=row["phase"],
+                    task_type=row["task_type"],
+                    description=row["description"] or "",
+                    required=bool(row["required"]),
+                    source=row["source"],
+                    status=row["status"],
+                    metadata=json.loads(row["metadata"]) if row["metadata"] else None,
+                    dependencies=[dr["depends_on_task_id"] for dr in dep_rows] if dep_rows else [],
+                )
+
+        conn.close()
+        return None
+
+    def build_file_prompt(
+        self,
+        task: TaskDefinition,
+        tech_stack: str = "",
+        user_stories: str = "",
+        existing_files: Optional[Dict[str, str]] = None,
+    ) -> str:
+        """Build a focused prompt for generating a single file.
+
+        The prompt includes domain context, related existing files, and
+        the tech stack so the LLM produces a complete, contextual implementation.
+        """
+        meta = task.metadata or {}
+        file_path = meta.get("file_path", "unknown")
+        domain_ctx = meta.get("domain_context", "")
+
+        parts = [
+            f"Create the file `{file_path}` with a COMPLETE, production-quality implementation.",
+            "",
+        ]
+
+        if domain_ctx:
+            parts.append(f"Domain context: {domain_ctx}")
+            parts.append("")
+
+        if tech_stack:
+            parts.append(f"Technology stack: {tech_stack}")
+            parts.append("")
+
+        if user_stories:
+            parts.append(f"User stories:\n{user_stories}")
+            parts.append("")
+
+        if existing_files:
+            parts.append("Related files already created (use for imports/references):")
+            for fp, content_preview in existing_files.items():
+                parts.append(f"--- {fp} ---")
+                parts.append(content_preview[:500])
+            parts.append("")
+
+        parts.extend([
+            "REQUIREMENTS:",
+            "- Write COMPLETE implementation code, not stubs or placeholders.",
+            "- Include all necessary imports.",
+            "- Implement ALL methods with real logic (no `pass`, no TODO, no console.log stubs).",
+            "- Follow the patterns and conventions of the tech stack.",
+            f"- Save the file using: file_writer(file_path='{file_path}', content='...')",
+            "",
+            f"Create `{file_path}` now.",
+        ])
+
+        return "\n".join(parts)

@@ -253,8 +253,11 @@ class SoftwareDevWorkflow:
             with open(tech_stack_file, 'r', encoding='utf-8') as f:
                 self.tech_stack = f.read()
             
-            # Register file creation tasks from tech stack
-            self.task_manager.register_tasks_from_tech_stack(tech_stack_file)
+            # Register granular per-file tasks with domain context from design spec
+            self.task_manager.register_granular_tasks(
+                self.design_spec or "",
+                self.tech_stack,
+            )
             
             # Index tech stack for RAG
             self.document_indexer.index_artifacts(["tech_stack.md"])
@@ -263,111 +266,161 @@ class SoftwareDevWorkflow:
         return result
     
     def run_development_phase(self) -> str:
-        """Run Development phase to implement features"""
+        """Run Development phase: iterate per-task, generating one file at a time."""
         logger.info("🚀 Starting Development phase...")
-        self._report_progress('development', 75, "Implementing application logic...")
+        self._report_progress('development', 65, "Implementing application logic...")
         
-        # Ensure state is correct
+        from ..orchestrator.code_validator import CodeCompletenessValidator
+        
         if self.state_machine.get_current_state() != ProjectState.DEVELOPMENT:
             self.state_machine.transition(
                 ProjectState.DEVELOPMENT,
                 TransitionContext(phase="development", data={})
             )
         
-        # Parse features
+        # Register feature tasks if any Gherkin features exist
         features = parse_features_from_files(str(self.workspace_path))
         if features:
             self.task_manager.register_tasks_from_features(features)
         
-        # Create dev agent with custom backstory
+        # Create dev agent
         backstory = self.agent_backstories.get('developer')
         self.dev_agent = DevAgent(
             custom_backstory=backstory,
             budget_tracker=self.budget_tracker
         )
         
-        # Run dev agent
-        feature_names = [f['name'] for f in features] if features else ["main"]
-        result = self.dev_agent.run(
-            feature_names,
-            self.tech_stack or "",
-            self.user_stories
-        )
+        # Per-task iteration: pick one file task at a time
+        completed_files: dict = {}
+        max_tasks = 100
+        task_count = 0
         
-        # Update task status based on output
-        self.task_manager.update_task_status_by_output(result)
+        while task_count < max_tasks:
+            task = self.task_manager.get_next_actionable_task("development")
+            if task is None:
+                break
+            
+            task_count += 1
+            file_path = (task.metadata or {}).get("file_path", "")
+            logger.info("📝 Task %d: generating %s", task_count, file_path or task.description)
+            self._report_progress(
+                'development',
+                65 + min(20, task_count),
+                f"Creating {file_path or task.description}...",
+            )
+            
+            self.task_manager.mark_task_started(task.task_id)
+            
+            # Build focused prompt for this single file
+            prompt = self.task_manager.build_file_prompt(
+                task,
+                tech_stack=self.tech_stack or "",
+                user_stories=self.user_stories or "",
+                existing_files=completed_files,
+            )
+            
+            try:
+                result = self.dev_agent.agent.chat(prompt)
+                result_str = str(result)
+                self.task_manager.update_task_status_by_output(result_str)
+            except Exception as e:
+                logger.error("Task %s failed: %s", task.task_id, e)
+                self.task_manager.mark_task_executed(task.task_id, TaskStatus.FAILED, str(e))
+                continue
+            
+            # Verify file exists on disk and validate completeness
+            if file_path:
+                full_path = self.workspace_path / file_path
+                if not full_path.exists():
+                    # Basename fallback
+                    all_files = {p.name: p for p in self.workspace_path.rglob("*") if p.is_file()}
+                    if Path(file_path).name in all_files:
+                        full_path = all_files[Path(file_path).name]
+                
+                if full_path.exists():
+                    self.task_manager.update_task_status(task.task_id, "completed", f"File created: {file_path}")
+                    try:
+                        content = full_path.read_text(encoding="utf-8", errors="replace")
+                        completed_files[file_path] = content[:300]
+                    except Exception:
+                        pass
+                    
+                    # Quality check
+                    validation = CodeCompletenessValidator.validate_file(full_path)
+                    if not validation["complete"]:
+                        logger.warning("⚠️ File %s has quality issues: %s", file_path, validation["issues"])
+                else:
+                    self.task_manager.update_task_status(
+                        task.task_id, "skipped",
+                        f"File {file_path} was not created by the agent",
+                    )
         
-        # Check if all files were actually created on disk (fallback: exact path, then basename)
-        tech_stack_file = self.workspace_path / "tech_stack.md"
-        if tech_stack_file.exists():
-            tech_tasks = self.task_manager.get_incomplete_tasks()
-            all_files = {p.name: p for p in self.workspace_path.rglob("*") if p.is_file()} if tech_tasks else {}
-            for task in tech_tasks:
-                if task.task_type == "file_creation":
-                    file_path = task.metadata.get("file_path")
-                    if file_path:
-                        full_path = self.workspace_path / file_path
-                        if full_path.exists():
-                            logger.info(f"🔍 Fallback: Found file on disk for task {task.task_id}: {file_path}")
-                            self.task_manager.update_task_status(task.task_id, "completed", "File found on disk")
-                        elif Path(file_path).name in all_files:
-                            logger.info(f"🔍 Fallback (basename): task {task.task_id} matched {all_files[Path(file_path).name]}")
-                            self.task_manager.update_task_status(task.task_id, "completed", f"File found at {all_files[Path(file_path).name]}")
-
-        # Validate tasks
-        created_check = self.task_manager.validate_all_tasks_created()
-        if not created_check['valid']:
-            logger.warning(f"⚠️  Some tasks not created: {created_check['missing_tasks'][:5]}")
+        # Handle any remaining feature tasks
+        feature_tasks = [t for t in self.task_manager.get_incomplete_tasks() if t.task_type == "feature"]
+        if feature_tasks:
+            feature_names = [t.description for t in feature_tasks]
+            try:
+                result = self.dev_agent.run(feature_names, self.tech_stack or "", self.user_stories)
+                self.task_manager.update_task_status_by_output(result)
+            except Exception as e:
+                logger.error("Feature implementation failed: %s", e)
         
-        logger.info("✅ Development phase completed")
-        return result
+        logger.info("✅ Development phase completed (%d tasks processed)", task_count)
+        return f"Development phase completed: {task_count} tasks processed"
     
     def run_frontend_phase(self) -> str:
-        """Run Frontend phase to implement UI"""
+        """Run Frontend phase: handle remaining UI file tasks + monolithic fallback."""
         logger.info("🚀 Starting Frontend phase...")
         self._report_progress('frontend', 90, "Building user interface...")
         
-        # Ensure state is correct
         if self.state_machine.get_current_state() != ProjectState.FRONTEND:
             self.state_machine.transition(
                 ProjectState.FRONTEND,
                 TransitionContext(phase="frontend", data={})
             )
         
-        # Create frontend agent with custom backstory
         backstory = self.agent_backstories.get('frontend_developer')
         self.frontend_agent = FrontendAgent(
             custom_backstory=backstory,
             budget_tracker=self.budget_tracker
         )
         
-        # Run frontend agent
-        result = self.frontend_agent.run(
-            self.design_spec or "",
-            self.tech_stack or "",
-            self.user_stories
-        )
+        # Check for remaining incomplete file tasks after dev phase
+        remaining = self.task_manager.get_incomplete_tasks()
+        remaining_files = [t for t in remaining if t.task_type == "file_creation"]
         
-        # Update task status based on output
-        self.task_manager.update_task_status_by_output(result)
+        if remaining_files:
+            logger.info("Frontend phase: %d remaining file tasks from dev phase", len(remaining_files))
+            for task in remaining_files:
+                file_path = (task.metadata or {}).get("file_path", "")
+                prompt = self.task_manager.build_file_prompt(
+                    task,
+                    tech_stack=self.tech_stack or "",
+                    user_stories=self.user_stories or "",
+                )
+                try:
+                    result = self.frontend_agent.agent.chat(prompt)
+                    self.task_manager.update_task_status_by_output(str(result))
+                except Exception as e:
+                    logger.error("Frontend task %s failed: %s", task.task_id, e)
+                
+                full_path = self.workspace_path / file_path if file_path else None
+                if full_path and full_path.exists():
+                    self.task_manager.update_task_status(task.task_id, "completed", f"File created: {file_path}")
+        else:
+            # All file tasks done — run frontend agent for general UI polish
+            result = self.frontend_agent.run(
+                self.design_spec or "",
+                self.tech_stack or "",
+                self.user_stories
+            )
+            self.task_manager.update_task_status_by_output(result)
         
-        # Check if all files were actually created on disk (fallback: exact path, then basename)
-        tech_tasks = self.task_manager.get_incomplete_tasks()
-        all_files = {p.name: p for p in self.workspace_path.rglob("*") if p.is_file()} if tech_tasks else {}
-        for task in tech_tasks:
-            if task.task_type == "file_creation":
-                file_path = task.metadata.get("file_path")
-                if file_path:
-                    full_path = self.workspace_path / file_path
-                    if full_path.exists():
-                        logger.info(f"🔍 Fallback: Found file on disk for task {task.task_id}: {file_path}")
-                        self.task_manager.update_task_status(task.task_id, "completed", "File found on disk")
-                    elif Path(file_path).name in all_files:
-                        logger.info(f"🔍 Fallback (basename): task {task.task_id} matched {all_files[Path(file_path).name]}")
-                        self.task_manager.update_task_status(task.task_id, "completed", f"File found at {all_files[Path(file_path).name]}")
+        # Filesystem reconciliation for anything still incomplete
+        self.task_manager.reconcile_with_filesystem(self.workspace_path)
         
         logger.info("✅ Frontend phase completed")
-        return result
+        return "Frontend phase completed"
     
     def _run_phase_with_retry(self, phase_name: str, phase_fn: Callable[[], Any]) -> Any:
         """Run a phase with retries on transient LLM/network errors."""

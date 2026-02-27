@@ -42,7 +42,7 @@ class LLMConfig(BaseModel):
     model_reviewer: str = Field("gpt-4o-mini", description="Model for reviewer agents")
     
     # LLM parameters
-    max_tokens: int = Field(2048, description="Maximum tokens per request")
+    max_tokens: int = Field(8192, description="Maximum tokens per request")
     temperature: float = Field(0.7, description="Sampling temperature")
     embedding_model: str = Field("text-embedding-3-small", description="Embedding model")
     
@@ -292,7 +292,7 @@ class ConfigLoader:
                 "model_manager": os.getenv("LLM_MODEL_MANAGER", "gpt-4o-mini"),
                 "model_worker": os.getenv("LLM_MODEL_WORKER", "gpt-4o-mini"),
                 "model_reviewer": os.getenv("LLM_MODEL_REVIEWER", "gpt-4o-mini"),
-                "max_tokens": int(os.getenv("LLM_MAX_TOKENS", "2048")),
+                "max_tokens": int(os.getenv("LLM_MAX_TOKENS", "8192")),
                 "temperature": float(os.getenv("LLM_TEMPERATURE", "0.7")),
                 "embedding_model": os.getenv("LLM_EMBEDDING_MODEL", "text-embedding-3-small"),
                 "ollama_base_url": os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"),
