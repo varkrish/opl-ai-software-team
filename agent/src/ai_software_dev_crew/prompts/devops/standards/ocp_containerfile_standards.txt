@@ -1,0 +1,15 @@
+# Red Hat / OCP Containerfile standards (must follow)
+
+**Base images**: Use Red Hat UBI (Universal Base Image) only. Examples:
+- ubi9/ubi-minimal, ubi9/ubi
+- ubi8/ubi-minimal, ubi8/ubi
+Do not use non-UBI base images (e.g. no alpine, debian, ubuntu as base).
+
+**OpenShift / OCP best practices**:
+- Run as non-root: set USER to a numeric UID (e.g. 1001). Do not run as root (UID 0).
+- Use root group (GID 0) or appropriate group for file ownership so the container can run with runAsUser and fsGroup in Kubernetes.
+- No privileged ports: expose only ports > 1024 (e.g. 8080, 8443). Do not use 80, 443, 22, etc. as container ports unless the deployment explicitly maps them.
+- Do not use privileged containers or securityContext.privileged.
+- Set appropriate file permissions (e.g. group writable where needed) for the runtime user.
+
+**Summary**: UBI base only; non-root user; root group permissions where required; no privileged ports; no privileged containers.

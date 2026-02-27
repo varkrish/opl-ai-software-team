@@ -16,9 +16,70 @@ dist/
 agent/build/
 agent/scripts/build/
 agent/scripts/dist/
+
 # Runtime / generated
 crew_jobs.db
 agent/crew_jobs.db
 repomix-output.xml
 backend.log
 test_out.txt
+
+# Data artifacts / archives
+*.tar.gz
+*.zip
+*.json
+!package.json
+!package-lock.json
+!tsconfig.json
+!tsconfig.*.json
+!**/cypress.config.*
+!**/.eslintrc.json
+!**/agents.yaml
+!**/tasks.yaml
+
+# MTA / legacy app data
+mta-reports/
+mta-analysis-data/
+legacy-inventory-system/
+reminders-javaee/
+rh-ai-team/
+.tldr/
+
+# Scratch docs (not part of source)
+LEGACY_APP_GUIDE.md
+LEGACY_INVENTORY_READY.md
+MIGRATION_JOB_TESTS.md
+MIGRATION_STATUS.md
+MTA_ANALYSIS_COMPLETE.md
+MTA_QUICKSTART.md
+MTA_REPORT_STRUCTURE.md
+MTA_TESTING_READY.md
+MTA_UPLOAD_FILES.md
+MTA_UPLOAD_GUIDE.md
+PACKAGES_READY.md
+RUN_MTA_NOW.md
+TDD_IMPLEMENTATION_SUMMARY.md
+UPLOAD_READY.md
+UPLOAD_READY_FILES.md
+
+# Shell scripts for data extraction
+extract-mta-data.sh
+run-mta-analysis.sh
+
+# Test output / scratch
+test_job_*.txt
+
+# Generated design docs (workspace artifacts)
+/design_spec.md
+/requirements.md
+/tech_stack.md
+/user_stories.md
+/architecture/
+/features/
+/user_requirements/
+/user_stories/
+/src/
+
+# Lock files
+agent/uv.lock
+node_modules/

@@ -1,0 +1,13 @@
+# OpenShift Pipelines (Tekton) defaults
+
+**Pipeline technology**: OpenShift Pipelines (Tekton).
+
+**Output location**: Write Tekton Pipeline and optionally PipelineRun or Task YAML under .tekton/ (e.g. .tekton/pipeline.yaml, .tekton/tasks/).
+
+**Conventions**:
+- Use standard Tekton API (tekton.dev/v1beta1 or v1): Pipeline, PipelineRun, Task, TaskRun.
+- Pipeline should build the image (e.g. buildah, kaniko) and optionally push to a registry.
+- Use workspace declarations for source and output when appropriate.
+- Follow Red Hat / OpenShift Pipelines documentation for parameterization and triggers if needed.
+
+**Result**: The refactored or built project must have a runnable Tekton pipeline that produces a container image from the Containerfile.
