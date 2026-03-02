@@ -70,10 +70,12 @@ After deployment, documentation will be available at:
 https://<username>.github.io/<repository-name>/
 ```
 
-For this repository:
+For this repository (replace with your actual repo name):
 ```
-https://varkrish.github.io/crew-coding-bots/
+https://varkrish.github.io/opl-ai-software-team/
 ```
+
+Ensure **Settings → Pages** uses source **Deploy from a branch**, branch **gh-pages**, folder **/ (root)**.
 
 ## Workflow Triggers
 

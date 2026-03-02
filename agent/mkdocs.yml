@@ -1,11 +1,12 @@
 site_name: AI Software Development Crew
 site_description: Multi-agent AI software development system with LlamaIndex
 site_author: AI Software Dev Team
-site_url: https://varkrish.github.io/crew-coding-bots
+# GitHub Pages URL: https://<user>.github.io/<repo>/
+site_url: https://varkrish.github.io/opl-ai-software-team
 
-repo_name: varkrish/crew-coding-bots
-repo_url: https://github.com/varkrish/varkrish-crewai-opl-coder
-edit_uri: edit/main/docs/
+repo_name: varkrish/opl-ai-software-team
+repo_url: https://github.com/varkrish/opl-ai-software-team
+edit_uri: edit/main/agent/docs/
 
 theme:
   name: material

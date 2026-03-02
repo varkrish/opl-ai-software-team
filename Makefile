@@ -1,4 +1,4 @@
-.PHONY: setup agent-test studio-run studio-dev studio-build studio-test-component studio-test-e2e studio-test-open backend-test-api backend-test-e2e backend-test-e2e-quick backend-test-all refine-test refine-test-e2e reset-db compose-up compose-down compose-logs compose-clean container-build container-build-backend container-build-frontend container-run container-stop help ci-install test-quick test-coverage ci-test-e2e install-docs
+.PHONY: setup agent-test studio-run studio-dev studio-build studio-test-component studio-test-e2e studio-test-open backend-test-api backend-test-e2e backend-test-e2e-quick backend-test-all refine-test refine-test-e2e reset-db compose-up compose-down compose-logs compose-clean container-build container-build-backend container-build-frontend container-run container-stop help ci-install test-quick test-coverage ci-test-e2e install-docs docs docs-deploy
 
 ROOT_DIR := $(shell pwd)
 
@@ -67,6 +67,16 @@ ci-test-e2e:
 
 install-docs:
 	pip install mkdocs mkdocs-material mkdocstrings[python]
+
+# Build MkDocs site (output to ./site for CI artifact; run from repo root)
+docs:
+	@echo "Building documentation..."
+	cd agent && mkdocs build -d ../site
+
+# Deploy docs to GitHub Pages (gh-pages branch); run from repo root
+docs-deploy:
+	@echo "Deploying documentation to GitHub Pages..."
+	cd agent && mkdocs gh-deploy --force --clean --verbose
 
 agent-test:
 	@echo "🧪 Running Agent Tests..."

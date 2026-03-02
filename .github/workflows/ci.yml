@@ -195,7 +195,7 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
       
       - name: Build and deploy documentation
-        run: mkdocs gh-deploy --force --clean --verbose
+        run: cd agent && mkdocs gh-deploy --force --clean --verbose
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
