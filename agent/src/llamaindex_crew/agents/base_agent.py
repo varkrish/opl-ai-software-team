@@ -164,6 +164,16 @@ IMPORTANT INSTRUCTIONS:
         except Exception as e:
             logger.debug(f"Could not track budget from response: {e}")
     
+    def reset_chat(self) -> None:
+        """Clear the agent's chat history so subsequent calls start fresh.
+        Prevents context window overflow when making many sequential calls."""
+        if hasattr(self.agent, 'reset'):
+            self.agent.reset()
+        elif hasattr(self.agent, 'chat_history'):
+            self.agent.chat_history.clear()
+        elif hasattr(self.agent, 'memory') and hasattr(self.agent.memory, 'reset'):
+            self.agent.memory.reset()
+
     def chat(self, message: str, **kwargs) -> str:
         """
         Chat with the agent

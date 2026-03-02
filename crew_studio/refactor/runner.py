@@ -17,6 +17,12 @@ from typing import Any, Dict, List, Optional, Callable
 from agent.src.ai_software_dev_crew.refactor.agents.architect_agent import RefactorArchitectAgent
 from agent.src.ai_software_dev_crew.refactor.agents.executor_agent import RefactorExecutorAgent
 
+try:
+    from agent.src.llamaindex_crew.orchestrator.code_validator import CodeCompletenessValidator
+    CODE_VALIDATOR_AVAILABLE = True
+except ImportError:
+    CODE_VALIDATOR_AVAILABLE = False
+
 logger = logging.getLogger(__name__)
 
 # Name of the subdirectories for isolation and output.
@@ -248,6 +254,18 @@ def run_refactor_job(
                     job_db.update_refactor_task_status(task_id, "completed")
                 completed_tasks += 1
 
+                if CODE_VALIDATOR_AVAILABLE and file_path:
+                    written = refactored_dir / file_path
+                    if written.is_file():
+                        integ = CodeCompletenessValidator.validate_file_integration(
+                            written, refactored_dir
+                        )
+                        if not integ["valid"]:
+                            logger.warning(
+                                "⚠️ Refactor task %s (%s) has integration issues: %s",
+                                task_id, file_path, integ["issues"],
+                            )
+
             except Exception as task_err:
                 logger.error(f"Task {task_id} ({file_path}) failed: {task_err}")
                 if job_db:
@@ -257,6 +275,17 @@ def run_refactor_job(
                     "file": file_path,
                     "error": str(task_err),
                 })
+
+        # 7a. Workspace-wide integration check on refactored output
+        if CODE_VALIDATOR_AVAILABLE:
+            ws_result = CodeCompletenessValidator.validate_workspace(refactored_dir)
+            if ws_result["incomplete_files"]:
+                logger.warning(
+                    "⚠️ Refactored output has %d files with quality issues",
+                    len(ws_result["incomplete_files"]),
+                )
+                for inc in ws_result["incomplete_files"]:
+                    logger.warning("  - %s: %s", inc["file"], inc["issues"])
 
         # 7b. DevOps phase: add Containerfile and Tekton pipeline (modernized system must have them)
         devops_failed = False

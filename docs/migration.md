@@ -60,6 +60,11 @@ Navigate to `/migration/:jobId` to see:
 - Migration goal + notes input form
 - Real-time summary badges (pending, running, completed, failed)
 - Issues table with expandable detail rows (description, hint, errors)
+- Job selector uses the same **searchable dropdown** as Files/Tasks/Agents (see [Dashboard and UI](dashboard-and-ui.md))
+
+**Screenshot:**
+
+![Migration page with goal, notes, and issues table](images/migration-page.png)
 
 ## File Structure
 

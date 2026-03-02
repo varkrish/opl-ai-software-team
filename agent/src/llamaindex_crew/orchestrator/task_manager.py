@@ -612,14 +612,17 @@ class TaskManager:
         Parses the file structure from tech_stack_content and cross-references
         bounded contexts from design_spec to attach domain context to each task.
         Model/core files are registered before views/controllers to express dependencies.
+        File descriptions from tree comments are preserved in metadata.
         """
-        files = self._extract_files_from_content(tech_stack_content)
+        file_entries = self._extract_files_with_descriptions(tech_stack_content)
         contexts = self._extract_bounded_contexts(design_spec)
 
         model_tasks: List[TaskDefinition] = []
         other_tasks: List[TaskDefinition] = []
 
-        for fp in files:
+        for entry in file_entries:
+            fp = entry["path"]
+            file_desc = entry.get("description", "")
             task_id = f"file_{self.normalize_file_path_for_task_id(fp)}"
             domain = self._match_domain_context(fp, contexts)
             is_model = any(kw in fp.lower() for kw in ("model", "schema", "entity"))
@@ -630,7 +633,11 @@ class TaskManager:
                 task_type="file_creation",
                 description=f"Create file: {fp}",
                 source="tech_stack",
-                metadata={"file_path": fp, "domain_context": domain},
+                metadata={
+                    "file_path": fp,
+                    "domain_context": domain,
+                    "file_description": file_desc,
+                },
             )
 
             if is_model:
@@ -643,7 +650,6 @@ class TaskManager:
             self.register_task(t)
 
         # Other tasks depend on their domain's model task
-        model_ids = [t.task_id for t in model_tasks]
         for t in other_tasks:
             deps = self._infer_dependencies(t, model_tasks)
             t.dependencies = deps
@@ -655,26 +661,73 @@ class TaskManager:
         return all_tasks
 
     def _extract_files_from_content(self, content: str) -> List[str]:
-        """Extract file paths from a tech_stack markdown string."""
-        # Delegate to existing parser via a temp file, or parse inline
-        file_paths = []
+        """Extract file paths from a tech_stack markdown string, preserving directory hierarchy."""
+        entries = self._extract_files_with_descriptions(content)
+        return [e["path"] for e in entries]
+
+    def _extract_files_with_descriptions(self, content: str) -> List[Dict[str, str]]:
+        """Extract file paths with descriptions from a tree structure in markdown code blocks.
+
+        Tracks indentation to reconstruct full paths like ``api/models.py``
+        instead of just ``models.py``.  Also captures inline comments
+        (e.g. ``# Database connection``) as descriptions.
+
+        The root project directory (first entry ending with ``/``) is stripped
+        from paths so files are relative to the project root.
+        """
+        entries: List[Dict[str, str]] = []
         in_tree = False
+        dir_stack: List[tuple] = []  # (indent_level, dir_name)
+        root_dir: Optional[str] = None  # first directory in the tree
+
         for line in content.splitlines():
             stripped = line.strip()
             if stripped.startswith("```"):
                 in_tree = not in_tree
+                dir_stack = []
+                root_dir = None
                 continue
             if not in_tree:
                 continue
-            match = re.search(
-                r'[├└│─\s]*([a-zA-Z0-9_/.\-]+\.[a-zA-Z0-9]+)',
+
+            tree_chars = re.match(r'^([\s│]*[├└─\s]*)', line)
+            indent = len(tree_chars.group(1).replace('│', ' ').replace('├', ' ')
+                         .replace('└', ' ').replace('─', ' ')) if tree_chars else 0
+
+            entry_match = re.search(
+                r'[├└│─\s]*([a-zA-Z0-9_.\-][a-zA-Z0-9_/.\-]*/?)(?:\s+#\s*(.*))?',
                 line,
             )
-            if match:
-                fp = match.group(1).strip()
-                if not fp.endswith('/'):
-                    file_paths.append(fp)
-        return list(dict.fromkeys(file_paths))  # dedupe preserving order
+            if not entry_match:
+                continue
+
+            name = entry_match.group(1).strip()
+            description = (entry_match.group(2) or "").strip()
+
+            # Pop directories from stack that are at the same or deeper indent level
+            while dir_stack and dir_stack[-1][0] >= indent:
+                dir_stack.pop()
+
+            if name.endswith('/'):
+                dir_name = name.rstrip('/')
+                if root_dir is None and not dir_stack:
+                    root_dir = dir_name
+                dir_stack.append((indent, dir_name))
+            elif '.' in name:
+                prefix = "/".join(d[1] for d in dir_stack)
+                full_path = f"{prefix}/{name}" if prefix else name
+                # Strip the root project directory prefix
+                if root_dir and full_path.startswith(root_dir + "/"):
+                    full_path = full_path[len(root_dir) + 1:]
+                entries.append({"path": full_path, "description": description})
+
+        seen: set = set()
+        deduped: List[Dict[str, str]] = []
+        for e in entries:
+            if e["path"] not in seen:
+                seen.add(e["path"])
+                deduped.append(e)
+        return deduped
 
     def _extract_bounded_contexts(self, design_spec: str) -> Dict[str, str]:
         """Extract bounded context name -> description from design spec."""
@@ -787,27 +840,41 @@ class TaskManager:
         tech_stack: str = "",
         user_stories: str = "",
         existing_files: Optional[Dict[str, str]] = None,
+        project_vision: str = "",
     ) -> str:
         """Build a focused prompt for generating a single file.
 
-        The prompt includes domain context, related existing files, and
-        the tech stack so the LLM produces a complete, contextual implementation.
+        The prompt includes project vision, domain context, file description,
+        full content of related existing files, cross-file consistency rules,
+        and the tech stack so the LLM produces a complete, contextual
+        implementation.
         """
         meta = task.metadata or {}
         file_path = meta.get("file_path", "unknown")
         domain_ctx = meta.get("domain_context", "")
+        file_desc = meta.get("file_description", "")
 
-        parts = [
-            f"Create the file `{file_path}` with a COMPLETE, production-quality implementation.",
-            "",
-        ]
+        parts = []
+
+        if project_vision:
+            parts.append(f"PROJECT VISION: {project_vision}")
+            parts.append("")
+
+        parts.append(
+            f"Create the file `{file_path}` with a COMPLETE, production-quality implementation."
+        )
+        parts.append("")
+
+        if file_desc:
+            parts.append(f"File purpose: {file_desc}")
+            parts.append("")
 
         if domain_ctx:
             parts.append(f"Domain context: {domain_ctx}")
             parts.append("")
 
         if tech_stack:
-            parts.append(f"Technology stack: {tech_stack}")
+            parts.append(f"Technology stack:\n{tech_stack}")
             parts.append("")
 
         if user_stories:
@@ -816,10 +883,17 @@ class TaskManager:
 
         if existing_files:
             parts.append("Related files already created (use for imports/references):")
-            for fp, content_preview in existing_files.items():
+            for fp, content in existing_files.items():
                 parts.append(f"--- {fp} ---")
-                parts.append(content_preview[:500])
+                parts.append(content)
             parts.append("")
+            parts.extend([
+                "CROSS-FILE CONSISTENCY:",
+                "- Only import modules/symbols that exist in the files listed above or in the project file structure.",
+                "- If you reference a class from another file, match its exact name and attributes.",
+                "- Every local import must resolve to a real file in the project structure.",
+                "",
+            ])
 
         parts.extend([
             "REQUIREMENTS:",
@@ -827,7 +901,8 @@ class TaskManager:
             "- Include all necessary imports.",
             "- Implement ALL methods with real logic (no `pass`, no TODO, no console.log stubs).",
             "- Follow the patterns and conventions of the tech stack.",
-            f"- Save the file using: file_writer(file_path='{file_path}', content='...')",
+            f"- You MUST call file_writer(file_path='{file_path}', content='...') to create the file.",
+            "- Do NOT just show code in your response; you must use the file_writer tool.",
             "",
             f"Create `{file_path}` now.",
         ])

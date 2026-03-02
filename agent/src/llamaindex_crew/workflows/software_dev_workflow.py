@@ -7,6 +7,7 @@ import os
 import time
 from pathlib import Path
 from typing import Dict, Optional, Any, Callable
+from llama_index.core import Settings as _LISettings
 from ..agents import (
     MetaAgent, ProductOwnerAgent, DesignerAgent,
     TechArchitectAgent, DevAgent, FrontendAgent
@@ -17,8 +18,16 @@ from ..orchestrator.error_recovery import WorkflowErrorRecoveryEngine
 from ..budget.tracker import EnhancedBudgetTracker
 from ..utils.feature_parser import parse_features_from_files
 from ..utils.document_indexer import DocumentIndexer
+from ..utils.llm_config import get_embedding_model
 
 logger = logging.getLogger(__name__)
+
+# Force local HuggingFace embeddings globally so LlamaIndex never falls back to OpenAI
+try:
+    _LISettings.embed_model = get_embedding_model()
+    logger.info("Global embed_model set to local HuggingFace (BAAI/bge-small-en-v1.5)")
+except Exception as _e:
+    logger.warning("Could not set global embed_model: %s", _e)
 
 # Number of times to retry a phase on transient LLM/network errors
 PHASE_RETRY_ATTEMPTS = 3
@@ -311,49 +320,74 @@ class SoftwareDevWorkflow:
             
             self.task_manager.mark_task_started(task.task_id)
             
-            # Build focused prompt for this single file
-            prompt = self.task_manager.build_file_prompt(
-                task,
-                tech_stack=self.tech_stack or "",
-                user_stories=self.user_stories or "",
-                existing_files=completed_files,
-            )
+            MAX_FILE_RETRIES = 1
             
-            try:
-                result = self.dev_agent.agent.chat(prompt)
-                result_str = str(result)
-                self.task_manager.update_task_status_by_output(result_str)
-            except Exception as e:
-                logger.error("Task %s failed: %s", task.task_id, e)
-                self.task_manager.mark_task_executed(task.task_id, TaskStatus.FAILED, str(e))
-                continue
-            
-            # Verify file exists on disk and validate completeness
-            if file_path:
+            for attempt in range(MAX_FILE_RETRIES + 1):
+                self.dev_agent.agent.reset_chat()
+                
+                prompt = self.task_manager.build_file_prompt(
+                    task,
+                    tech_stack=self.tech_stack or "",
+                    user_stories=self.user_stories or "",
+                    existing_files=completed_files,
+                    project_vision=self.vision or "",
+                )
+                
+                if attempt > 0:
+                    prompt = retry_prompt  # noqa: F821 – set in the validation block below
+                
+                try:
+                    result = self.dev_agent.agent.chat(prompt)
+                    result_str = str(result)
+                    self.task_manager.update_task_status_by_output(result_str)
+                except Exception as e:
+                    logger.error("Task %s failed: %s", task.task_id, e)
+                    self.task_manager.mark_task_executed(task.task_id, TaskStatus.FAILED, str(e))
+                    break
+                
+                if not file_path:
+                    break
+                
                 full_path = self.workspace_path / file_path
                 if not full_path.exists():
-                    # Basename fallback
                     all_files = {p.name: p for p in self.workspace_path.rglob("*") if p.is_file()}
                     if Path(file_path).name in all_files:
                         full_path = all_files[Path(file_path).name]
                 
-                if full_path.exists():
+                if not full_path.exists():
+                    if attempt == MAX_FILE_RETRIES:
+                        self.task_manager.update_task_status(
+                            task.task_id, "skipped",
+                            f"File {file_path} was not created by the agent",
+                        )
+                    continue
+                
+                integration = CodeCompletenessValidator.validate_file_integration(
+                    full_path, self.workspace_path
+                )
+                completeness = CodeCompletenessValidator.validate_file(full_path)
+                all_issues = integration.get("issues", []) + completeness.get("issues", [])
+                
+                if not all_issues or attempt == MAX_FILE_RETRIES:
                     self.task_manager.update_task_status(task.task_id, "completed", f"File created: {file_path}")
                     try:
                         content = full_path.read_text(encoding="utf-8", errors="replace")
-                        completed_files[file_path] = content[:300]
+                        if len(content) <= 5120:
+                            completed_files[file_path] = content
+                        else:
+                            completed_files[file_path] = content[:5120] + "\n# ... truncated ..."
                     except Exception:
                         pass
-                    
-                    # Quality check
-                    validation = CodeCompletenessValidator.validate_file(full_path)
-                    if not validation["complete"]:
-                        logger.warning("⚠️ File %s has quality issues: %s", file_path, validation["issues"])
-                else:
-                    self.task_manager.update_task_status(
-                        task.task_id, "skipped",
-                        f"File {file_path} was not created by the agent",
-                    )
+                    if all_issues:
+                        logger.warning("⚠️ File %s still has issues after retry: %s", file_path, all_issues)
+                    break
+                
+                logger.warning("⚠️ File %s has issues (attempt %d), retrying: %s", file_path, attempt + 1, all_issues)
+                retry_prompt = (
+                    f"The file `{file_path}` you just created has these issues:\n"
+                    + "\n".join(f"- {i}" for i in all_issues)
+                    + f"\n\nPlease fix and rewrite `{file_path}` using file_writer."
+                )
         
         # Handle any remaining feature tasks
         feature_tasks = [t for t in self.task_manager.get_incomplete_tasks() if t.task_type == "feature"]
@@ -364,6 +398,23 @@ class SoftwareDevWorkflow:
                 self.task_manager.update_task_status_by_output(result)
             except Exception as e:
                 logger.error("Feature implementation failed: %s", e)
+        
+        # Workspace-wide integration check
+        ws_result = CodeCompletenessValidator.validate_workspace(self.workspace_path)
+        if ws_result["incomplete_files"]:
+            logger.warning(
+                "⚠️ Workspace has %d files with quality issues after development phase",
+                len(ws_result["incomplete_files"]),
+            )
+            for inc in ws_result["incomplete_files"]:
+                logger.warning("  - %s: %s", inc["file"], inc["issues"])
+        
+        _SRC_EXT = {".py", ".java", ".kt", ".js", ".jsx", ".ts", ".tsx", ".go"}
+        for src_file in sorted(self.workspace_path.rglob("*")):
+            if src_file.is_file() and src_file.suffix in _SRC_EXT:
+                integ = CodeCompletenessValidator.validate_file_integration(src_file, self.workspace_path)
+                if not integ["valid"]:
+                    logger.warning("⚠️ Integration issues in %s: %s", src_file, integ["issues"])
         
         logger.info("✅ Development phase completed (%d tasks processed)", task_count)
         return f"Development phase completed: {task_count} tasks processed"
@@ -390,6 +441,7 @@ class SoftwareDevWorkflow:
         remaining_files = [t for t in remaining if t.task_type == "file_creation"]
         
         if remaining_files:
+            from ..orchestrator.code_validator import CodeCompletenessValidator as _FEValidator
             logger.info("Frontend phase: %d remaining file tasks from dev phase", len(remaining_files))
             for task in remaining_files:
                 file_path = (task.metadata or {}).get("file_path", "")
@@ -397,8 +449,10 @@ class SoftwareDevWorkflow:
                     task,
                     tech_stack=self.tech_stack or "",
                     user_stories=self.user_stories or "",
+                    project_vision=self.vision or "",
                 )
                 try:
+                    self.frontend_agent.agent.reset_chat()
                     result = self.frontend_agent.agent.chat(prompt)
                     self.task_manager.update_task_status_by_output(str(result))
                 except Exception as e:

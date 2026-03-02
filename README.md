@@ -7,13 +7,17 @@ An intelligent software development crew that transforms your vision into produc
 ## Key Features
 
 - **Multi-Agent System** — Meta Agent, Product Owner, Designer, Tech Architect, Dev & Frontend crews
-- **Task-Level Tracking** — SQLite-backed task management with real-time dashboard
+- **Task-Level Tracking** — SQLite-backed granular task management with real-time dashboard
+- **Dashboard UI** — Paginated job list with **filtering** (vision search, status) and **sortable columns** ([docs](docs/dashboard-and-ui.md))
+- **Job search (typeahead)** — Searchable job dropdown on Files, Tasks, Agents, Migration, and Refactor pages for large job lists
+- **Code quality & validation** — Per-file and workspace-wide validation; **multi-language** (Python, Java, JS/TS); retry with feedback ([docs](docs/code-quality-and-validation.md))
+- **Red Hat MaaS & local embeddings** — LLM via Red Hat MaaS (or any OpenAI-compatible API); embeddings use local HuggingFace (no OpenAI dependency)
 - **Budget Control** — Real-time cost monitoring and limits
 - **TDD/BDD Workflow** — Test-Driven Development with Gherkin scenarios
 - **Secure Configuration** — File-based config with encryption support
-- **Professional UI** — Modern dashboard with phase progress and task tracking
-- **Pluggable LLMs** — Works with any OpenAI-compatible API (Red Hat MaaS, vLLM, Ollama, etc.)
+- **Refinement** — Natural-language refinements after a job completes ([docs](docs/REFINEMENT_AND_UI.md))
 - **MTA Migration** — Upload an MTA report and auto-migrate legacy code with per-file issue tracking ([docs](docs/migration.md))
+- **Refactor** — Target-stack refactoring with same task-tracking and validation as builds
 
 ## Quick Start
 
@@ -119,13 +123,16 @@ To stop: `make compose-down` (or `podman-compose down`).
 
 The Crew Studio UI provides:
 
+- **Dashboard** — Paginated job list with search (vision), status filter, and sortable columns (see [Dashboard and UI](docs/dashboard-and-ui.md))
+- **Job search** — Searchable dropdown (typeahead) when selecting a job on Files, Tasks, Agents, Migration, and Refactor pages
 - Monitor task completion percentages in real-time
-- Track phase-by-phase progress (Meta -> Product Owner -> Designer -> Tech Architect -> Dev -> Frontend)
+- Track phase-by-phase progress (Meta → Product Owner → Designer → Tech Architect → Dev → Frontend)
 - View Kanban-style task board (To Do, In Progress, Completed)
 - Browse generated files and code (per-project; switching project reloads the file tree)
 - Monitor budget and API costs
 - **Prompt-based refinement** — After a job completes, use the Refine panel to apply natural-language edits
 - **MTA Migration** — Upload MTA reports, run automated Java migration with retry support
+- **Screenshots** — Doc screenshots live in `docs/images/`; see [Screenshots guide](docs/SCREENSHOTS.md) for what to capture
 
 **Start the system:**
 
@@ -315,9 +322,19 @@ npm run cy:e2e         # E2E tests (requires dev server + backend)
 
 ## Documentation
 
-- **[Refinement & Studio UI](docs/REFINEMENT_AND_UI.md)** — Prompt-based refinement, file/project scope, dashboard tracking
+### Platform and UI
+
+- **[Platform overview](docs/platform-overview.md)** — Capabilities, architecture, workflow phases
+- **[Dashboard and UI](docs/dashboard-and-ui.md)** — Pagination, filtering, sorting, job search (typeahead)
+- **[Code quality and validation](docs/code-quality-and-validation.md)** — Multi-language validation, retries, embeddings
+- **[Refinement & Studio UI](docs/REFINEMENT_AND_UI.md)** — Prompt-based refinement, file/project scope
+- **[MTA Migration](docs/migration.md)** — Upload MTA report, two-phase pipeline, APIs
+- **[Screenshots guide](docs/SCREENSHOTS.md)** — Which screenshots to add and where (images go in `docs/images/`)
+
+### Setup and deployment
+
 - **[Getting Started Guide](agent/docs/getting-started/quickstart.md)** — Detailed setup instructions
-- **[LLM Configuration](agent/docs/guide/llm-configuration.md)** — Configure any OpenAI-compatible provider
+- **[LLM Configuration](agent/docs/guide/llm-configuration.md)** — Configure any OpenAI-compatible provider (Red Hat MaaS, Ollama, etc.)
 - **[Secure Config Patterns](agent/docs/deployment/secure-config-patterns.md)** — Production security best practices
 - **[Using Ollama](agent/docs/getting-started/ollama.md)** — Free local development setup
 - **[Full Agent Documentation](agent/README.md)** — Complete framework documentation

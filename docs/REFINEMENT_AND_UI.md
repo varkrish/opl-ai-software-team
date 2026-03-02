@@ -25,7 +25,11 @@ After a job completes (or fails), you can refine the generated code using natura
 
 - **Masthead:** Split layout — left: white area with Red Hat logo (red) and “AI Crew”; right: red bar with project breadcrumb, search, notifications.
 - **Sidebar:** Admin user with avatar (Red Hat red circle + initial) and email.
-- **Files page:** Project dropdown reloads the file tree immediately for the selected project; no need to wait for the next poll.
+- **Files page:** Job selector is a **searchable dropdown** (typeahead); selecting a job reloads the file tree immediately. See [Dashboard and UI](dashboard-and-ui.md).
+
+### Screenshot: Refine panel
+
+![Refine panel with prompt and file scope](images/refine.png)
 
 ## UI testing (Cypress)
 

@@ -407,3 +407,458 @@ class TestPerTaskFileGeneration:
         assert "flight.py" in prompt
         assert "Inventory Management" in prompt
         assert "Django" in prompt or "DRF" in prompt
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 4. File tree parsing preserves directory paths
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class TestFileTreeParsing:
+    """_extract_files_from_content must reconstruct full paths from tree structure."""
+
+    def test_nested_dirs_produce_full_paths(self, task_mgr):
+        """Files inside directories should have full paths like api/models.py."""
+        tech_stack = """
+## File Structure
+```
+fastapi-task-api/
+├── api/
+│   ├── __init__.py
+│   ├── database.py
+│   ├── models.py
+│   ├── routes.py
+│   └── main.py
+├── tests/
+│   ├── test_database.py
+│   ├── test_routes.py
+│   └── test_models.py
+├── requirements.txt
+├── setup.py
+└── README.md
+```
+"""
+        files = task_mgr._extract_files_from_content(tech_stack)
+        assert "api/database.py" in files
+        assert "api/models.py" in files
+        assert "api/routes.py" in files
+        assert "api/main.py" in files
+        assert "api/__init__.py" in files
+        assert "tests/test_database.py" in files
+        assert "tests/test_routes.py" in files
+        assert "tests/test_models.py" in files
+        assert "requirements.txt" in files
+        assert "setup.py" in files
+        assert "README.md" in files
+        # Should NOT include the root project dir as a file
+        assert "fastapi-task-api/" not in files
+
+    def test_deeply_nested_dirs(self, task_mgr):
+        """Multi-level nesting should produce correct paths."""
+        tech_stack = """
+```
+myproject/
+├── src/
+│   ├── core/
+│   │   ├── __init__.py
+│   │   └── engine.py
+│   └── utils/
+│       └── helpers.py
+└── tests/
+    └── test_engine.py
+```
+"""
+        files = task_mgr._extract_files_from_content(tech_stack)
+        assert "src/core/__init__.py" in files
+        assert "src/core/engine.py" in files
+        assert "src/utils/helpers.py" in files
+        assert "tests/test_engine.py" in files
+
+    def test_file_descriptions_extracted(self, task_mgr):
+        """Comments after file names should be captured as descriptions."""
+        tech_stack = """
+```
+myproject/
+├── app/
+│   ├── models.py          # SQLAlchemy models
+│   ├── routes.py          # API routes and endpoints
+│   └── main.py            # Application entry point
+```
+"""
+        files_with_desc = task_mgr._extract_files_with_descriptions(tech_stack)
+        assert any(f["path"] == "app/models.py" for f in files_with_desc)
+        models_entry = next(f for f in files_with_desc if f["path"] == "app/models.py")
+        assert "SQLAlchemy" in models_entry["description"]
+
+    def test_register_granular_tasks_preserves_full_paths(self, task_mgr):
+        """register_granular_tasks should create tasks with full directory paths."""
+        tech_stack = """
+## File Structure
+```
+project/
+├── api/
+│   ├── models.py
+│   └── routes.py
+└── tests/
+    └── test_models.py
+```
+"""
+        tasks = task_mgr.register_granular_tasks("", tech_stack)
+        paths = [t.metadata["file_path"] for t in tasks]
+        assert "api/models.py" in paths
+        assert "api/routes.py" in paths
+        assert "tests/test_models.py" in paths
+
+    def test_register_granular_stores_dependencies_in_db(self, task_mgr):
+        """Dependencies should be persisted in the task_dependencies table."""
+        tech_stack = """
+```
+src/
+├── models/
+│   └── user.py
+└── views/
+    └── user_views.py
+```
+"""
+        task_mgr.register_granular_tasks("", tech_stack)
+        import sqlite3
+        conn = sqlite3.connect(task_mgr.db_path)
+        deps = conn.execute("SELECT * FROM task_dependencies").fetchall()
+        conn.close()
+        assert len(deps) > 0, "Dependencies should be stored in DB"
+
+    def test_file_descriptions_in_build_prompt(self, task_mgr):
+        """build_file_prompt should include the file's description from the tree."""
+        t = TaskDefinition(
+            task_id="file_routes",
+            phase="development",
+            task_type="file_creation",
+            description="Create api/routes.py",
+            metadata={
+                "file_path": "api/routes.py",
+                "domain_context": "",
+                "file_description": "API routes and endpoints",
+            },
+        )
+        task_mgr.register_task(t)
+        prompt = task_mgr.build_file_prompt(t, tech_stack="FastAPI + SQLAlchemy")
+        assert "API routes and endpoints" in prompt
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 5. Agent chat reset between tasks
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class TestAgentChatReset:
+    """The dev agent should reset chat history between per-file tasks."""
+
+    def test_base_agent_has_reset_method(self):
+        """BaseLlamaIndexAgent should expose a method to clear chat history."""
+        from llamaindex_crew.agents.base_agent import BaseLlamaIndexAgent
+        assert hasattr(BaseLlamaIndexAgent, 'reset_chat'), \
+            "BaseLlamaIndexAgent must have reset_chat method"
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 6. Integration validation (syntax + import resolution)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class TestIntegrationValidation:
+    """CodeCompletenessValidator detects syntax errors and broken local imports."""
+
+    def test_syntax_error_detected(self, workspace):
+        from llamaindex_crew.orchestrator.code_validator import CodeCompletenessValidator
+
+        f = workspace / "bad_syntax.py"
+        f.write_text("def foo(\n    return 42\n")
+        result = CodeCompletenessValidator.validate_syntax(f)
+        assert result["valid"] is False
+        assert result["error"]
+
+    def test_valid_syntax_passes(self, workspace):
+        from llamaindex_crew.orchestrator.code_validator import CodeCompletenessValidator
+
+        f = workspace / "good.py"
+        f.write_text("def foo():\n    return 42\n")
+        result = CodeCompletenessValidator.validate_syntax(f)
+        assert result["valid"] is True
+        assert result["error"] == ""
+
+    def test_broken_local_import_detected(self, workspace):
+        from llamaindex_crew.orchestrator.code_validator import CodeCompletenessValidator
+
+        f = workspace / "routes.py"
+        f.write_text("from api.models import Task\nimport os\n")
+        result = CodeCompletenessValidator.validate_imports(f, workspace)
+        assert result["valid"] is False
+        assert any("api.models" in b["module"] for b in result["broken_imports"])
+
+    def test_stdlib_import_not_flagged(self, workspace):
+        from llamaindex_crew.orchestrator.code_validator import CodeCompletenessValidator
+
+        f = workspace / "util.py"
+        f.write_text("import os\nimport sys\nfrom pathlib import Path\n")
+        result = CodeCompletenessValidator.validate_imports(f, workspace)
+        assert result["valid"] is True
+        assert result["broken_imports"] == []
+
+    def test_third_party_import_not_flagged(self, workspace):
+        from llamaindex_crew.orchestrator.code_validator import CodeCompletenessValidator
+
+        (workspace / "requirements.txt").write_text("fastapi>=0.95\nsqlalchemy>=2.0\n")
+        f = workspace / "main.py"
+        f.write_text("from fastapi import FastAPI\nfrom sqlalchemy import Column\n")
+        result = CodeCompletenessValidator.validate_imports(f, workspace)
+        assert result["valid"] is True
+        assert result["broken_imports"] == []
+
+    def test_relative_import_to_existing_file(self, workspace):
+        from llamaindex_crew.orchestrator.code_validator import CodeCompletenessValidator
+
+        (workspace / "api").mkdir()
+        (workspace / "api" / "__init__.py").write_text("")
+        (workspace / "api" / "models.py").write_text("class Task: pass\n")
+        f = workspace / "api" / "routes.py"
+        f.write_text("from api.models import Task\n")
+        result = CodeCompletenessValidator.validate_imports(f, workspace)
+        assert result["valid"] is True
+
+    def test_validate_file_integration_combines_checks(self, workspace):
+        from llamaindex_crew.orchestrator.code_validator import CodeCompletenessValidator
+
+        f = workspace / "broken.py"
+        f.write_text("from nonexistent.module import Foo\ndef bar(\n  return 1\n")
+        result = CodeCompletenessValidator.validate_file_integration(f, workspace)
+        assert result["valid"] is False
+        assert len(result["issues"]) >= 1
+
+    # ── Multi-language support ────────────────────────────────────────────────
+
+    def test_java_syntax_unmatched_brace_detected(self, workspace):
+        from llamaindex_crew.orchestrator.code_validator import CodeCompletenessValidator
+
+        f = workspace / "TaskController.java"
+        f.write_text("""
+package com.example.controller;
+import javax.ws.rs.GET;
+public class TaskController {
+    @GET
+    public String list() {
+        return "tasks";
+    // missing closing brace for class
+""")
+        result = CodeCompletenessValidator.validate_syntax(f)
+        assert result["valid"] is False
+        assert "brace" in result["error"].lower() or "unmatched" in result["error"].lower()
+
+    def test_java_valid_syntax_passes(self, workspace):
+        from llamaindex_crew.orchestrator.code_validator import CodeCompletenessValidator
+
+        f = workspace / "Task.java"
+        f.write_text("""
+package com.example.model;
+
+public class Task {
+    private String title;
+    private boolean completed;
+
+    public Task(String title) {
+        this.title = title;
+        this.completed = false;
+    }
+
+    public String getTitle() { return title; }
+    public boolean isCompleted() { return completed; }
+}
+""")
+        result = CodeCompletenessValidator.validate_syntax(f)
+        assert result["valid"] is True
+
+    def test_java_broken_local_import_detected(self, workspace):
+        from llamaindex_crew.orchestrator.code_validator import CodeCompletenessValidator
+
+        f = workspace / "TaskController.java"
+        f.write_text("""
+package com.example.controller;
+import com.example.model.Task;
+import com.example.service.TaskService;
+import javax.ws.rs.GET;
+
+public class TaskController {
+    public String list() { return "ok"; }
+}
+""")
+        result = CodeCompletenessValidator.validate_imports(f, workspace)
+        assert result["valid"] is False
+        assert any("com.example.model.Task" in b["module"] for b in result["broken_imports"])
+
+    def test_java_stdlib_import_not_flagged(self, workspace):
+        from llamaindex_crew.orchestrator.code_validator import CodeCompletenessValidator
+
+        f = workspace / "Util.java"
+        f.write_text("""
+import java.util.List;
+import java.io.IOException;
+import javax.ws.rs.GET;
+
+public class Util {}
+""")
+        result = CodeCompletenessValidator.validate_imports(f, workspace)
+        assert result["valid"] is True
+
+    def test_java_import_resolves_to_existing_file(self, workspace):
+        from llamaindex_crew.orchestrator.code_validator import CodeCompletenessValidator
+
+        model_dir = workspace / "com" / "example" / "model"
+        model_dir.mkdir(parents=True)
+        (model_dir / "Task.java").write_text("package com.example.model;\npublic class Task {}\n")
+        f = workspace / "TaskController.java"
+        f.write_text("import com.example.model.Task;\npublic class TaskController {}\n")
+        result = CodeCompletenessValidator.validate_imports(f, workspace)
+        assert result["valid"] is True
+
+    def test_js_syntax_unmatched_brace_detected(self, workspace):
+        from llamaindex_crew.orchestrator.code_validator import CodeCompletenessValidator
+
+        f = workspace / "app.js"
+        f.write_text("""
+function greet(name) {
+    if (name) {
+        console.log(name)
+    // missing closing brace for function
+""")
+        result = CodeCompletenessValidator.validate_syntax(f)
+        assert result["valid"] is False
+
+    def test_js_valid_syntax_passes(self, workspace):
+        from llamaindex_crew.orchestrator.code_validator import CodeCompletenessValidator
+
+        f = workspace / "utils.ts"
+        f.write_text("""
+export function add(a: number, b: number): number {
+    return a + b;
+}
+
+export function subtract(a: number, b: number): number {
+    return a - b;
+}
+""")
+        result = CodeCompletenessValidator.validate_syntax(f)
+        assert result["valid"] is True
+
+    def test_js_broken_relative_import_detected(self, workspace):
+        from llamaindex_crew.orchestrator.code_validator import CodeCompletenessValidator
+
+        f = workspace / "routes.ts"
+        f.write_text("""
+import { Task } from './models/Task';
+import { db } from './database';
+import express from 'express';
+
+const router = express.Router();
+""")
+        result = CodeCompletenessValidator.validate_imports(f, workspace)
+        assert result["valid"] is False
+        assert len(result["broken_imports"]) >= 1
+
+    def test_js_npm_import_not_flagged(self, workspace):
+        from llamaindex_crew.orchestrator.code_validator import CodeCompletenessValidator
+
+        pkg = {"dependencies": {"express": "^4.18.0", "cors": "^2.8.0"}}
+        import json
+        (workspace / "package.json").write_text(json.dumps(pkg))
+        f = workspace / "app.js"
+        f.write_text("const express = require('express');\nconst cors = require('cors');\n")
+        result = CodeCompletenessValidator.validate_imports(f, workspace)
+        assert result["valid"] is True
+
+    def test_js_relative_import_resolves(self, workspace):
+        from llamaindex_crew.orchestrator.code_validator import CodeCompletenessValidator
+
+        (workspace / "models").mkdir()
+        (workspace / "models" / "Task.ts").write_text("export class Task {}\n")
+        f = workspace / "routes.ts"
+        f.write_text("import { Task } from './models/Task';\n")
+        result = CodeCompletenessValidator.validate_imports(f, workspace)
+        assert result["valid"] is True
+
+    def test_maven_dependency_not_flagged(self, workspace):
+        from llamaindex_crew.orchestrator.code_validator import CodeCompletenessValidator
+
+        pom = """<project>
+  <dependencies>
+    <dependency>
+      <groupId>io.quarkus</groupId>
+      <artifactId>quarkus-resteasy</artifactId>
+    </dependency>
+  </dependencies>
+</project>"""
+        (workspace / "pom.xml").write_text(pom)
+        f = workspace / "TaskResource.java"
+        f.write_text("""
+import javax.ws.rs.GET;
+import javax.ws.rs.Path;
+import io.quarkus.hibernate.orm.panache.PanacheEntity;
+
+@Path("/tasks")
+public class TaskResource {}
+""")
+        result = CodeCompletenessValidator.validate_imports(f, workspace)
+        assert result["valid"] is True
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 7. Enriched prompt (vision + full dependency content)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class TestEnrichedPrompt:
+    """build_file_prompt should include project vision and full dependency content."""
+
+    def test_build_file_prompt_includes_vision(self, task_mgr):
+        t = TaskDefinition(
+            task_id="file_routes",
+            phase="development",
+            task_type="file_creation",
+            description="Create api/routes.py",
+            metadata={"file_path": "api/routes.py"},
+        )
+        task_mgr.register_task(t)
+        prompt = task_mgr.build_file_prompt(
+            t,
+            tech_stack="FastAPI",
+            project_vision="Create a Task Management REST API with filtering and CRUD",
+        )
+        assert "Task Management REST API" in prompt
+
+    def test_build_file_prompt_full_dependency_content(self, task_mgr):
+        """Existing file content should not be truncated."""
+        long_content = "class Task:\n" + "    field = 'x'\n" * 100
+        t = TaskDefinition(
+            task_id="file_routes",
+            phase="development",
+            task_type="file_creation",
+            description="Create routes.py",
+            metadata={"file_path": "routes.py"},
+        )
+        task_mgr.register_task(t)
+        prompt = task_mgr.build_file_prompt(
+            t,
+            existing_files={"models.py": long_content},
+        )
+        assert long_content[:500] in prompt
+
+    def test_build_file_prompt_cross_file_instructions(self, task_mgr):
+        """Prompt should contain cross-file consistency instructions."""
+        t = TaskDefinition(
+            task_id="file_routes",
+            phase="development",
+            task_type="file_creation",
+            description="Create routes.py",
+            metadata={"file_path": "routes.py"},
+        )
+        task_mgr.register_task(t)
+        prompt = task_mgr.build_file_prompt(
+            t,
+            existing_files={"models.py": "class Task: pass"},
+        )
+        assert "import" in prompt.lower()
+        assert "resolve" in prompt.lower() or "exist" in prompt.lower()

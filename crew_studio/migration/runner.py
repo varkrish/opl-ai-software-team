@@ -12,6 +12,12 @@ from typing import Callable, Optional, Dict, Any, List
 
 from .utils import git_snapshot, workspace_has_changes, load_migration_rules
 
+try:
+    from agent.src.llamaindex_crew.orchestrator.code_validator import CodeCompletenessValidator
+    CODE_VALIDATOR_AVAILABLE = True
+except ImportError:
+    CODE_VALIDATOR_AVAILABLE = False
+
 logger = logging.getLogger(__name__)
 
 
@@ -482,6 +488,13 @@ def run_migration(
                             struct_err = _validate_java_structural(raw_content, new_content, file_path)
                             if struct_err:
                                 raise ValueError(f"Structural validation failed: {struct_err}")
+                            if CODE_VALIDATOR_AVAILABLE:
+                                integ = CodeCompletenessValidator.validate_file_integration(abs_path, ws)
+                                if not integ["valid"]:
+                                    logger.warning(
+                                        "⚠️ Migration file %s has integration issues: %s",
+                                        file_path, integ["issues"],
+                                    )
                             git_snapshot(ws, f"migration: {file_path} ({iid[:12]})")
                             job_db.update_migration_issue_status(iid, "completed")
                             issue_done = True
@@ -567,6 +580,15 @@ def run_migration(
                 job_db=job_db,
                 progress_callback=progress_callback,
             )
+
+        # ── Workspace-wide integration check ─────────────────────────
+        if CODE_VALIDATOR_AVAILABLE:
+            ws_result = CodeCompletenessValidator.validate_workspace(ws)
+            if ws_result["incomplete_files"]:
+                logger.warning(
+                    "⚠️ Post-migration workspace has %d files with quality issues",
+                    len(ws_result["incomplete_files"]),
+                )
 
         # ── Done ──────────────────────────────────────────────────────
         git_snapshot(ws, "post-migration snapshot")
