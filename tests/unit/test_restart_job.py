@@ -194,6 +194,43 @@ class TestRestartEndpoint:
 
         assert resp.status_code == 404
 
+    def test_restart_build_job_with_resume_true_invokes_run_job_async_with_resume(self, tmp_path):
+        """POST /restart with JSON body {"resume": true} for failed build job passes resume=True to run_job_async."""
+        job_db = _make_db(tmp_path)
+        job_id = _create_job(job_db, "failed", "error", "Build a REST API")
+
+        from crew_studio.llamaindex_web_app import app
+        with app.test_client() as client:
+            with patch("crew_studio.llamaindex_web_app.job_db", job_db), \
+                 patch("crew_studio.llamaindex_web_app.threading.Thread") as MockThread:
+                MockThread.return_value.start = MagicMock()
+                resp = client.post(
+                    f"/api/jobs/{job_id}/restart",
+                    json={"resume": True},
+                    content_type="application/json",
+                )
+        assert resp.status_code == 202
+        assert resp.get_json().get("job_type") == "build"
+        MockThread.assert_called_once()
+        # Thread target is run_job_async; args/kwargs should include resume=True
+        call_kw = MockThread.call_args[1]
+        assert call_kw.get("kwargs", {}).get("resume") is True
+
+    def test_restart_build_job_without_resume_uses_resume_false(self, tmp_path):
+        """POST /restart without body or resume=false does not pass resume (full restart)."""
+        job_db = _make_db(tmp_path)
+        job_id = _create_job(job_db, "failed", "error", "Build a REST API")
+
+        from crew_studio.llamaindex_web_app import app
+        with app.test_client() as client:
+            with patch("crew_studio.llamaindex_web_app.job_db", job_db), \
+                 patch("crew_studio.llamaindex_web_app.threading.Thread") as MockThread:
+                MockThread.return_value.start = MagicMock()
+                resp = client.post(f"/api/jobs/{job_id}/restart")
+        assert resp.status_code == 202
+        call_kw = MockThread.call_args[1]
+        assert call_kw.get("kwargs", {}).get("resume") is not True
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # resume_pending_jobs clears stale migration_issues

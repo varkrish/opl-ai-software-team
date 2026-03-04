@@ -592,19 +592,36 @@ const Dashboard: React.FC = () => {
                                 'View files'}
                           </DropdownItem>
                           {['failed', 'cancelled', 'quota_exhausted', 'completed'].includes(job.status) && (
-                            <DropdownItem
-                              key="restart"
-                              onClick={async () => {
-                                try {
-                                  await restartJob(job.id);
-                                  window.location.reload();
-                                } catch (err) {
-                                  console.error('Restart failed:', err);
-                                }
-                              }}
-                            >
-                              Restart job
-                            </DropdownItem>
+                            <>
+                              <DropdownItem
+                                key="restart"
+                                onClick={async () => {
+                                  try {
+                                    await restartJob(job.id);
+                                    window.location.reload();
+                                  } catch (err) {
+                                    console.error('Restart failed:', err);
+                                  }
+                                }}
+                              >
+                                Restart job
+                              </DropdownItem>
+                              {!job.vision.startsWith('[MTA') && !job.vision.startsWith('[Refactor') && (
+                                <DropdownItem
+                                  key="resume"
+                                  onClick={async () => {
+                                    try {
+                                      await restartJob(job.id, { resume: true });
+                                      window.location.reload();
+                                    } catch (err) {
+                                      console.error('Resume failed:', err);
+                                    }
+                                  }}
+                                >
+                                  Resume from where it left off
+                                </DropdownItem>
+                              )}
+                            </>
                           )}
                           {job.vision.startsWith('[MTA') && job.status === 'failed' && (
                             <DropdownItem

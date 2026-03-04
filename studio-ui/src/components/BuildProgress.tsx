@@ -290,6 +290,16 @@ const BuildProgress: React.FC<Props> = ({ jobId, vision }) => {
     }
   };
 
+  const handleResume = async () => {
+    if (!job) return;
+    try {
+      await restartJob(job.id, { resume: true });
+      window.location.reload();
+    } catch (err) {
+      console.error('Failed to resume job:', err);
+    }
+  };
+
   const renderFailed = () => (
     <div style={{
       textAlign: 'center', padding: '1.5rem',
@@ -310,6 +320,11 @@ const BuildProgress: React.FC<Props> = ({ jobId, vision }) => {
         <Button variant="primary" onClick={handleRestart}>
           Restart Job
         </Button>
+        {!isMta && (
+          <Button variant="secondary" onClick={handleResume}>
+            Resume from where it left off
+          </Button>
+        )}
         <Button variant="secondary" onClick={() => navigate('/dashboard')}>
           View Details
         </Button>

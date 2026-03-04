@@ -182,7 +182,7 @@ def run_job_with_backend(job_id: str, vision: str, backend):
         job_db.mark_failed(job_id, error_msg)
 
 
-def run_job_async(job_id: str, vision: str, job_config: SecretConfig = None):
+def run_job_async(job_id: str, vision: str, job_config: SecretConfig = None, resume: bool = False):
     """Run workflow in a separate thread with job-specific workspace"""
     import traceback
     import logging
@@ -291,6 +291,7 @@ def run_job_async(job_id: str, vision: str, job_config: SecretConfig = None):
             config=job_config,
             progress_callback=progress_callback,
             job_db=job_db,
+            resume=resume,
         )
 
         # Mark job as completed or failed based on task validation
@@ -1733,6 +1734,8 @@ def restart_job(job_id):
 
     phase = job.get('current_phase', '')
     vision = job.get('vision', '')
+    body = request.get_json(silent=True) or {}
+    resume = body.get('resume', False) is True
 
     # ── Migration job ─────────────────────────────────────────────────────
     if phase in _MIGRATION_JOB_PHASES or vision.startswith('[MTA]'):
@@ -1858,6 +1861,7 @@ def restart_job(job_id):
     thread = threading.Thread(
         target=run_job_async,
         args=(job_id, vision, config),
+        kwargs={'resume': resume},
         daemon=True,
     )
     thread.start()

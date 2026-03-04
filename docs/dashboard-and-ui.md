@@ -56,6 +56,24 @@ The Files page shows the searchable job dropdown and the file tree for the selec
 
 ---
 
+## Restart and resume (build jobs)
+
+Failed or cancelled **build** jobs can be restarted in two ways:
+
+- **Restart job** — Full restart from the beginning (meta → product owner → designer → tech architect → development → frontend).
+- **Resume from where it left off** — Resumes from the last persisted phase (e.g. if the job failed in the frontend phase, only the frontend phase and completion run again). Phase artifacts (user stories, design spec, tech stack, agent backstories) are loaded from the job workspace.
+
+**Where it appears**
+
+- **Dashboard:** For build jobs (not MTA, not Refactor), the row ⋮ menu shows both "Restart job" and "Resume from where it left off".
+- **Build progress page:** When a build has failed, the failed-state panel shows "Restart Job" and "Resume from where it left off" (resume only for build jobs, not MTA).
+
+**API**
+
+- `POST /api/jobs/:id/restart` — Optional JSON body: `{ "resume": true }`. Omit or `resume: false` for full restart; `resume: true` for resume from checkpoint.
+
+---
+
 ## API Summary
 
 | Endpoint | Query params | Purpose |
@@ -65,5 +83,6 @@ The Files page shows the searchable job dropdown and the file tree for the selec
 | `GET /api/jobs/:id/progress` | — | Progress, phase, last message |
 | `GET /api/jobs/:id/files` | — | Workspace file list for job |
 | `GET /api/workspace/files` | `job_id` | Workspace files for a job |
+| `POST /api/jobs/:id/restart` | Body: `{ "resume": true }` (optional) | Restart (full) or resume from checkpoint (build jobs) |
 
 See [README](../README.md) and [REFINEMENT_AND_UI.md](REFINEMENT_AND_UI.md) for refinement and file-tree behavior.

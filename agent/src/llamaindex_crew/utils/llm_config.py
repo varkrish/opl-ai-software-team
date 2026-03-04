@@ -373,6 +373,10 @@ def _get_production_llm(agent_type: str, config: SecretConfig, budget_callback: 
     # Use our truly generic Llama-based LLM wrapper
     if config.llm.api_base_url:
         llm_kwargs["api_base"] = config.llm.api_base_url
+        # MaaS LiteLLM proxy often rejects requests with high max_tokens (400 Bad Request)
+        if "maas" in config.llm.api_base_url.lower() or "redhatworkshops" in config.llm.api_base_url.lower():
+            llm_kwargs["max_tokens"] = min(llm_kwargs["max_tokens"], 8192)
+            logger.info("   MaaS endpoint detected: capping max_tokens to %s", llm_kwargs["max_tokens"])
         
         # Set context window based on model info
         if "codellama" in model.lower() or "phi-4" in model.lower():

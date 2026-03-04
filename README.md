@@ -18,6 +18,7 @@ An intelligent software development crew that transforms your vision into produc
 - **Refinement** — Natural-language refinements after a job completes ([docs](docs/REFINEMENT_AND_UI.md))
 - **MTA Migration** — Upload an MTA report and auto-migrate legacy code with per-file issue tracking ([docs](docs/migration.md))
 - **Refactor** — Target-stack refactoring with same task-tracking and validation as builds
+- **Restart & resume** — For failed/cancelled build jobs: full restart or resume from last phase ([docs](docs/dashboard-and-ui.md#restart-and-resume-build-jobs))
 
 ## Quick Start
 

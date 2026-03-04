@@ -197,8 +197,15 @@ export async function cancelJob(jobId: string): Promise<{ status: string }> {
   return data;
 }
 
-export async function restartJob(jobId: string): Promise<{ status: string; job_type: string; job_id: string }> {
-  const { data } = await api.post<{ status: string; job_type: string; job_id: string }>(`/api/jobs/${jobId}/restart`);
+export async function restartJob(
+  jobId: string,
+  options?: { resume?: boolean }
+): Promise<{ status: string; job_type: string; job_id: string }> {
+  const body = options?.resume ? { resume: true } : undefined;
+  const { data } = await api.post<{ status: string; job_type: string; job_id: string }>(
+    `/api/jobs/${jobId}/restart`,
+    body
+  );
   return data;
 }
 

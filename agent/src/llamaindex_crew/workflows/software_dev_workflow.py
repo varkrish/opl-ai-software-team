@@ -33,6 +33,16 @@ except Exception as _e:
 PHASE_RETRY_ATTEMPTS = 3
 PHASE_RETRY_DELAY_SEC = 10
 
+# Ordered phases for resume-from-checkpoint (first phase that runs is at this index)
+_RESUMABLE_PHASES = [
+    ProjectState.META,
+    ProjectState.PRODUCT_OWNER,
+    ProjectState.DESIGNER,
+    ProjectState.TECH_ARCHITECT,
+    ProjectState.DEVELOPMENT,
+    ProjectState.FRONTEND,
+]
+
 
 def _is_transient_llm_error(e: Exception) -> bool:
     """True if the error is a transient LLM/network error we should retry."""
@@ -101,9 +111,12 @@ class SoftwareDevWorkflow:
         self.dev_agent = None
         self.frontend_agent = None
         
-        # Store phase outputs
+        # Store phase outputs (loaded from workspace on resume)
         self.project_context = None
         self.agent_backstories = {}
+        self.user_stories = None
+        self.design_spec = None
+        self.tech_stack = None
     
     def _report_progress(self, phase: str, progress: int, message: str = None):
         """Report progress via callback if available"""
@@ -112,9 +125,29 @@ class SoftwareDevWorkflow:
                 self.progress_callback(phase, progress, message)
             except Exception as e:
                 logger.warning(f"Progress callback failed: {e}")
-        self.user_stories = None
-        self.design_spec = None
-        self.tech_stack = None
+
+    def _load_phase_artifacts(self) -> None:
+        """Load user_stories, design_spec, tech_stack, agent_backstories from workspace (for resume)."""
+        for path, attr in [
+            ("user_stories.md", "user_stories"),
+            ("design_spec.md", "design_spec"),
+            ("tech_stack.md", "tech_stack"),
+        ]:
+            fpath = self.workspace_path / path
+            if fpath.exists():
+                try:
+                    setattr(self, attr, fpath.read_text(encoding="utf-8", errors="replace"))
+                    logger.info("Resume: loaded %s", path)
+                except Exception as e:
+                    logger.warning("Resume: could not load %s: %s", path, e)
+        backstories_file = self.workspace_path / "agent_backstories.json"
+        if backstories_file.exists():
+            try:
+                import json as _json
+                self.agent_backstories = _json.loads(backstories_file.read_text(encoding="utf-8"))
+                logger.info("Resume: loaded agent_backstories.json")
+            except Exception as e:
+                logger.warning("Resume: could not load agent_backstories.json: %s", e)
     
     def run_meta_phase(self, retry_count: int = 0) -> Dict[str, str]:
         """Run Meta phase to generate agent backstories"""
@@ -135,6 +168,14 @@ class SoftwareDevWorkflow:
             # Run meta agent
             backstories = self.meta_agent.run(self.vision)
             self.agent_backstories = backstories
+            # Persist for resume-from-checkpoint
+            try:
+                import json as _json
+                (self.workspace_path / "agent_backstories.json").write_text(
+                    _json.dumps(backstories, indent=2), encoding="utf-8"
+                )
+            except Exception as e:
+                logger.warning("Could not save agent_backstories.json: %s", e)
             
             # Extract project context from meta agent analysis
             self.project_context = self.meta_agent.analyze_vision(self.vision)
@@ -495,23 +536,50 @@ class SoftwareDevWorkflow:
         if last_error is not None:
             raise last_error
 
-    def run(self) -> Dict[str, Any]:
+    def run(self, resume: bool = False) -> Dict[str, Any]:
         """
-        Run complete workflow
-        
-        Returns:
-            Dictionary with workflow results
+        Run complete workflow.
+
+        When resume=True, loads persisted artifacts and runs only from the
+        current state (e.g. if state is FRONTEND, re-runs frontend then completes).
         """
         try:
-            # Phase 1: Meta (has its own retry logic)
-            backstories = self.run_meta_phase()
-
-            # Phases 2–6: run with retry on transient LLM/network errors
-            self._run_phase_with_retry("product_owner", self.run_product_owner_phase)
-            self._run_phase_with_retry("designer", self.run_designer_phase)
-            self._run_phase_with_retry("tech_architect", self.run_tech_architect_phase)
-            self._run_phase_with_retry("development", self.run_development_phase)
-            self._run_phase_with_retry("frontend", self.run_frontend_phase)
+            if resume:
+                self._load_phase_artifacts()
+                current = self.state_machine.get_current_state()
+                if current in (ProjectState.COMPLETED, ProjectState.FAILED):
+                    logger.info("Resume: state already %s; running full workflow", current.value)
+                    resume = False
+                else:
+                    try:
+                        start_idx = _RESUMABLE_PHASES.index(current)
+                    except ValueError:
+                        start_idx = 0
+                    logger.info("Resume: starting from phase %s (index %d)", current.value, start_idx)
+                    for phase_state in _RESUMABLE_PHASES[start_idx:]:
+                        phase_name = phase_state.value
+                        if phase_state == ProjectState.META:
+                            self.run_meta_phase()
+                        elif phase_state == ProjectState.PRODUCT_OWNER:
+                            self._run_phase_with_retry("product_owner", self.run_product_owner_phase)
+                        elif phase_state == ProjectState.DESIGNER:
+                            self._run_phase_with_retry("designer", self.run_designer_phase)
+                        elif phase_state == ProjectState.TECH_ARCHITECT:
+                            self._run_phase_with_retry("tech_architect", self.run_tech_architect_phase)
+                        elif phase_state == ProjectState.DEVELOPMENT:
+                            self._run_phase_with_retry("development", self.run_development_phase)
+                        elif phase_state == ProjectState.FRONTEND:
+                            self._run_phase_with_retry("frontend", self.run_frontend_phase)
+                    # Fall through to transition to completed + final sweep below
+            if not resume:
+                # Phase 1: Meta (has its own retry logic)
+                self.run_meta_phase()
+                # Phases 2–6: run with retry on transient LLM/network errors
+                self._run_phase_with_retry("product_owner", self.run_product_owner_phase)
+                self._run_phase_with_retry("designer", self.run_designer_phase)
+                self._run_phase_with_retry("tech_architect", self.run_tech_architect_phase)
+                self._run_phase_with_retry("development", self.run_development_phase)
+                self._run_phase_with_retry("frontend", self.run_frontend_phase)
 
             # Transition to completed
             self.state_machine.transition(

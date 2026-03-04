@@ -22,6 +22,7 @@ def run_build_pipeline(
     config: SecretConfig,
     progress_callback: Callable[[str, int, Optional[str]], None],
     job_db: Any,
+    resume: bool = False,
 ) -> Dict[str, Any]:
     """
     Run the SoftwareDevWorkflow on the given workspace with the given vision.
@@ -51,7 +52,7 @@ def run_build_pipeline(
             progress_callback=progress_callback,
         )
         progress_callback("meta", 10, "Starting Meta phase...")
-        results = workflow.run()
+        results = workflow.run(resume=resume)
 
         with open(error_log_path, "a") as f:
             f.write(f"\n{'='*80}\n")
