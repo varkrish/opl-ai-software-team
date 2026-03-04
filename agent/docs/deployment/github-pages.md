@@ -8,13 +8,25 @@ This project uses **GitHub Actions** to automatically deploy documentation to **
 
 ### 1. Enable GitHub Pages
 
+The **gh-pages** branch is required. It is created when you run `make docs-deploy` (or when the Deploy Documentation CI job runs). A placeholder branch may already exist so that the docs URL works immediately.
+
 1. Go to your repository on GitHub
 2. Navigate to **Settings** → **Pages**
 3. Under **Source**, select:
    - **Source**: Deploy from a branch
-   - **Branch**: `gh-pages`
-   - **Folder**: `/ (root)`
+   - **Branch**: `gh-pages` (create or select it)
+   - **Folder**: `/ (root)` (not `/docs`)
 4. Click **Save**
+
+**Verify with gh:**
+
+```bash
+# List branches (gh-pages should appear)
+git branch -a
+
+# Check current Pages config
+gh api repos/OWNER/REPO/pages
+```
 
 ### 2. Configure Repository Permissions
 

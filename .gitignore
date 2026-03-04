@@ -45,6 +45,10 @@ reminders-javaee/
 rh-ai-team/
 .tldr/
 
+# Jira connector (separate repo)
+crew_jira_connector/
+crew_jira_connector.egg-info/
+
 # Scratch docs (not part of source)
 LEGACY_APP_GUIDE.md
 LEGACY_INVENTORY_READY.md
