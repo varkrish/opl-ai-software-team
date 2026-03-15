@@ -68,6 +68,26 @@ class LoggingConfig(BaseModel):
     level: str = Field("INFO", description="Log level")
 
 
+class PromptLimitsConfig(BaseModel):
+    """Prompt/context length limits to avoid API 400 (tune for larger models)."""
+    max_enriched_vision_chars: int = Field(
+        24_000,
+        description="Max total chars for vision + reference docs passed into the pipeline.",
+    )
+    max_reference_doc_chars: int = Field(
+        12_000,
+        description="Max chars per uploaded reference doc (non-repomix) when building enriched vision.",
+    )
+    max_reference_doc_chars_repomix: int = Field(
+        200_000,
+        description="Max chars per repomix/GitHub packed repo when building enriched vision.",
+    )
+    max_project_vision_chars: int = Field(
+        14_000,
+        description="Max project_vision chars in file-generation prompts (dev/frontend).",
+    )
+
+
 class SecretConfig(BaseModel):
     """
     Main configuration model with validation
@@ -79,6 +99,7 @@ class SecretConfig(BaseModel):
     budget: BudgetConfig = Field(default_factory=BudgetConfig)
     workspace: WorkspaceConfig = Field(default_factory=WorkspaceConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
+    prompt_limits: PromptLimitsConfig = Field(default_factory=PromptLimitsConfig)
     
     # Encryption key for encrypted values
     _encryption_key: Optional[bytes] = None

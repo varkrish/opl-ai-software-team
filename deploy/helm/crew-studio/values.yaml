@@ -120,6 +120,29 @@ budget:
   maxCostPerHour: 10.0
   alertThreshold: 0.8
 
+# ── Smoke Test ─────────────────────────────────────────────────────────────
+# Controls how generated code is validated after the development phase.
+# The backend pod reads SMOKE_TEST_BACKEND from the ConfigMap.
+smokeTest:
+  enabled: false
+  # syntax_only — static analysis only, safe everywhere (default)
+  # podman      — local container (dev machines with podman/docker)
+  # k8s_job     — Kubernetes Job (OCP / cluster deployments)
+  backend: syntax_only
+  k8sJob:
+    # Namespace for smoke-test Jobs (defaults to release namespace)
+    namespace: ""
+    # PVC name to mount as the workspace inside the Job pod.
+    # Must be ReadWriteMany for multi-node clusters.
+    pvcName: ""
+    images:
+      node: "registry.access.redhat.com/ubi9/nodejs-20:latest"
+      python: "registry.access.redhat.com/ubi9/python-311:latest"
+      javaMaven: "registry.access.redhat.com/ubi9/openjdk-21:latest"
+      javaGradle: "registry.access.redhat.com/ubi9/openjdk-21:latest"
+    timeoutSeconds: 180
+    ttlSecondsAfterFinished: 60
+
 # ── Service Account ────────────────────────────────────────────────────────
 serviceAccount:
   create: true

@@ -2,11 +2,14 @@
 Software Development Workflow
 Sequential workflow orchestrating all agents
 """
+import json as _json
 import logging
 import os
+import re
 import time
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, Optional, Any, Callable
+from typing import Dict, List, Optional, Any, Callable
 from llama_index.core import Settings as _LISettings
 from ..agents import (
     MetaAgent, ProductOwnerAgent, DesignerAgent,
@@ -64,6 +67,151 @@ def _is_transient_llm_error(e: Exception) -> bool:
         or "504" in msg
         or "remoteprotocolerror" in msg
     )
+
+
+def _extract_vision_keywords(vision: str) -> List[str]:
+    """Extract meaningful keywords from the vision for coherence checking."""
+    stop_words = {
+        "a", "an", "the", "and", "or", "but", "in", "on", "at", "to", "for",
+        "of", "with", "by", "from", "is", "are", "was", "were", "be", "been",
+        "being", "have", "has", "had", "do", "does", "did", "will", "would",
+        "could", "should", "may", "might", "shall", "can", "need", "must",
+        "that", "this", "these", "those", "it", "its", "i", "we", "you",
+        "he", "she", "they", "my", "our", "your", "all", "each", "every",
+        "any", "some", "no", "not", "so", "as", "if", "then", "than", "too",
+        "very", "just", "about", "up", "out", "into", "over", "after",
+        "create", "build", "make", "implement", "develop", "add", "use",
+        "using", "based", "simple", "new", "also", "include", "ensure",
+    }
+    words = re.findall(r'[a-z]+', vision.lower())
+    return [w for w in words if len(w) > 2 and w not in stop_words]
+
+
+def _check_vision_coherence(vision: str, artifact_text: str, artifact_name: str,
+                             min_keyword_ratio: float = 0.25) -> bool:
+    """
+    Check that an artifact is coherent with the original vision by verifying
+    that a reasonable fraction of vision keywords appear in the artifact.
+
+    Returns True if coherent, False if the artifact seems off-topic.
+    """
+    keywords = _extract_vision_keywords(vision)
+    if not keywords:
+        return True  # nothing to check
+    artifact_lower = artifact_text.lower()
+    matched = sum(1 for kw in keywords if kw in artifact_lower)
+    ratio = matched / len(keywords)
+    logger.info(
+        "Coherence check [%s]: %d/%d vision keywords matched (%.0f%%, threshold %.0f%%)",
+        artifact_name, matched, len(keywords), ratio * 100, min_keyword_ratio * 100,
+    )
+    if ratio < min_keyword_ratio:
+        logger.warning(
+            "⚠️ Coherence FAILED for %s: only %.0f%% of vision keywords found. "
+            "Artifact may not match the project vision.",
+            artifact_name, ratio * 100,
+        )
+        return False
+    return True
+
+
+_MIN_ARTIFACT_LINES = 3
+
+_SUMMARY_PATTERNS = re.compile(
+    r"^(?:I(?:'ve| have) created|Here (?:are|is) the|The (?:following )?files (?:have been|were)|"
+    r"I(?:'ve| have) (?:generated|written|saved)|Let me know if|"
+    r"All (?:files|content) (?:have been|align))",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+
+def _is_agent_summary(text: str) -> bool:
+    """Return True if *text* looks like a meta-summary instead of real artifact content."""
+    first_200 = text[:200]
+    return bool(_SUMMARY_PATTERNS.search(first_200))
+
+
+def _persist_phase_artifact(
+    workspace: Path,
+    filename: str,
+    agent_response: str,
+) -> bool:
+    """Write a phase artifact to disk if the agent didn't create it via file_writer.
+
+    Returns True if the file was written, False if skipped.
+
+    Skips when:
+    - The file already exists (agent wrote it correctly)
+    - The response is empty or too short to be useful content
+    - The response looks like a meta-summary ("I've created the following files…")
+    """
+    target = workspace / filename
+    if target.exists():
+        return False
+
+    if not agent_response or not agent_response.strip():
+        return False
+
+    stripped = agent_response.strip()
+
+    if stripped.count("\n") < _MIN_ARTIFACT_LINES:
+        return False
+
+    if _is_agent_summary(stripped):
+        logger.warning(
+            "⚠️ Skipping fallback write for %s — response looks like a summary, not artifact content",
+            filename,
+        )
+        return False
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(stripped + "\n", encoding="utf-8")
+    logger.info("📝 Fallback write: saved agent response to %s (%d chars)", filename, len(stripped))
+    return True
+
+
+def _extract_gherkin_features(text: str) -> Dict[str, str]:
+    """Extract Gherkin Feature blocks from free-form text (e.g. user stories markdown).
+
+    Returns a dict mapping a slugified filename to the feature text.
+    """
+    blocks: Dict[str, str] = {}
+    pattern = re.compile(
+        r"(Feature:\s*.+?)(?=\nFeature:|\Z)", re.DOTALL | re.IGNORECASE
+    )
+    for m in pattern.finditer(text):
+        block = m.group(1).strip()
+        title_match = re.match(r"Feature:\s*(.+?)(?:\n|$)", block, re.IGNORECASE)
+        if not title_match:
+            continue
+        slug = re.sub(r"[^a-z0-9]+", "_", title_match.group(1).strip().lower()).strip("_")
+        if not slug:
+            slug = f"feature_{len(blocks) + 1}"
+        blocks[slug] = block
+    return blocks
+
+
+def _ensure_feature_files(workspace: Path, user_stories_text: str) -> int:
+    """Guarantee that features/ contains .feature files.
+
+    If none exist, attempt to extract Gherkin blocks from *user_stories_text*
+    and write them.  Returns the number of feature files present after the call.
+    """
+    features_dir = workspace / "features"
+    existing = list(features_dir.glob("*.feature")) if features_dir.exists() else []
+    if existing:
+        return len(existing)
+
+    extracted = _extract_gherkin_features(user_stories_text)
+    if not extracted:
+        return 0
+
+    features_dir.mkdir(parents=True, exist_ok=True)
+    for slug, content in extracted.items():
+        path = features_dir / f"{slug}.feature"
+        path.write_text(content + "\n", encoding="utf-8")
+        logger.info("📄 Extracted feature file: %s", path.name)
+    return len(extracted)
 
 
 class SoftwareDevWorkflow:
@@ -199,39 +347,127 @@ class SoftwareDevWorkflow:
                 logger.error(f"❌ Meta phase failed after {retry_count + 1} attempts")
                 raise
     
+    _PO_FEATURE_RETRY_PROMPT = (
+        "CRITICAL: You MUST use the file_writer tool to create EACH file individually. "
+        "Do NOT describe what you would create — actually call file_writer for every file.\n\n"
+        "Project Vision: {vision}\n"
+        "Project Context: {context_digest}\n\n"
+        "Create these files using file_writer:\n"
+        "1. 'requirements.md' — high-level requirements\n"
+        "2. 'user_stories.md' — detailed user stories with acceptance criteria "
+        "(As a… I want… So that… / Given… When… Then…)\n"
+        "3. One 'features/<name>.feature' file per feature in proper Gherkin syntax "
+        "(Feature / Scenario / Given / When / Then)\n\n"
+        "Call file_writer once for EACH file. Do not skip any."
+    )
+
     def run_product_owner_phase(self) -> str:
-        """Run Product Owner phase to create user stories"""
+        """Run Product Owner phase to create user stories and BDD feature files."""
         logger.info("🚀 Starting Product Owner phase...")
         self._report_progress('product_owner', 30, "Creating user stories...")
-        
-        # Ensure state is correct (meta phase should have already transitioned us here)
+
         if self.state_machine.get_current_state() != ProjectState.PRODUCT_OWNER:
             self.state_machine.transition(
                 ProjectState.PRODUCT_OWNER,
                 TransitionContext(phase="product_owner", data={})
             )
-        
-        # Create product owner agent with custom backstory
+
         backstory = self.agent_backstories.get('product_owner')
-        self.product_owner_agent = ProductOwnerAgent(
-            custom_backstory=backstory,
-            budget_tracker=self.budget_tracker,
-            document_indexer=self.document_indexer
-        )
-        
-        # Run product owner agent
-        result = self.product_owner_agent.run(self.vision, self.project_context)
-        
-        # Read generated user stories
+
+        def _run_po() -> str:
+            self.product_owner_agent = ProductOwnerAgent(
+                custom_backstory=backstory,
+                budget_tracker=self.budget_tracker,
+                document_indexer=self.document_indexer,
+            )
+            return self.product_owner_agent.run(self.vision, self.project_context)
+
+        result = _run_po()
+
+        _persist_phase_artifact(self.workspace_path, "user_stories.md", result)
+        _persist_phase_artifact(self.workspace_path, "requirements.md", result)
+
         user_stories_file = self.workspace_path / "user_stories.md"
+
+        # -- Gate 1: real user stories must exist -------------------------
+        has_real_stories = (
+            user_stories_file.exists()
+            and not _is_agent_summary(user_stories_file.read_text(encoding="utf-8", errors="replace"))
+        )
+        if not has_real_stories:
+            logger.warning(
+                "⚠️ user_stories.md missing or contains only a summary — "
+                "re-running PO with explicit tool-use instructions"
+            )
+            if user_stories_file.exists():
+                user_stories_file.unlink()
+            self.product_owner_agent = ProductOwnerAgent(
+                custom_backstory=backstory,
+                budget_tracker=self.budget_tracker,
+                document_indexer=self.document_indexer,
+            )
+            retry_prompt = self._PO_FEATURE_RETRY_PROMPT.format(
+                vision=self.vision,
+                context_digest=self.project_context or "",
+            )
+            result = self.product_owner_agent.agent.chat(retry_prompt)
+            result = str(result)
+            _persist_phase_artifact(self.workspace_path, "user_stories.md", result)
+            _persist_phase_artifact(self.workspace_path, "requirements.md", result)
+
+        # Re-read whatever is on disk now
         if user_stories_file.exists():
-            with open(user_stories_file, 'r', encoding='utf-8') as f:
-                self.user_stories = f.read()
-            
-            # Index user stories for RAG
+            self.user_stories = user_stories_file.read_text(encoding="utf-8", errors="replace")
+        else:
+            self.user_stories = ""
+
+        # Coherence check
+        if self.user_stories and not _check_vision_coherence(
+            self.vision, self.user_stories, "user_stories.md"
+        ):
+            logger.warning("⚠️ User stories failed coherence check — re-running PO")
+            if user_stories_file.exists():
+                user_stories_file.unlink()
+            result = _run_po()
+            _persist_phase_artifact(self.workspace_path, "user_stories.md", result)
+            if user_stories_file.exists():
+                self.user_stories = user_stories_file.read_text(encoding="utf-8", errors="replace")
+
+        # -- Gate 2: .feature files must exist ----------------------------
+        feature_count = _ensure_feature_files(self.workspace_path, self.user_stories)
+        if feature_count == 0:
+            logger.warning(
+                "⚠️ No .feature files found and none could be extracted — "
+                "re-running PO with feature-focused prompt"
+            )
+            self.product_owner_agent = ProductOwnerAgent(
+                custom_backstory=backstory,
+                budget_tracker=self.budget_tracker,
+                document_indexer=self.document_indexer,
+            )
+            feature_prompt = (
+                "You MUST create Gherkin .feature files using the file_writer tool.\n\n"
+                f"Project Vision: {self.vision}\n\n"
+                f"User Stories:\n{self.user_stories or 'Not available — create them too.'}\n\n"
+                "For each feature, call file_writer with path 'features/<name>.feature' "
+                "containing proper Gherkin:\n"
+                "  Feature: <title>\n"
+                "    Scenario: <scenario name>\n"
+                "      Given …\n      When …\n      Then …\n\n"
+                "Create at least one .feature file per major feature. "
+                "Call file_writer for EACH file."
+            )
+            result = str(self.product_owner_agent.agent.chat(feature_prompt))
+            feature_count = _ensure_feature_files(self.workspace_path, result)
+
+        logger.info(
+            "✅ Product Owner phase completed — %d feature file(s) in workspace",
+            feature_count,
+        )
+
+        if self.user_stories:
             self.document_indexer.index_artifacts(["user_stories.md"])
-        
-        logger.info("✅ Product Owner phase completed")
+
         return result
     
     def run_designer_phase(self) -> str:
@@ -253,11 +489,15 @@ class SoftwareDevWorkflow:
             budget_tracker=self.budget_tracker
         )
         
-        # Run designer agent
+        # Run designer agent with vision for grounding
         result = self.designer_agent.run(
             self.user_stories or "",
-            self.project_context
+            self.project_context,
+            vision=self.vision,
         )
+        
+        # Fallback: if agent returned content but didn't call file_writer
+        _persist_phase_artifact(self.workspace_path, "design_spec.md", result)
         
         # Read generated design spec
         design_spec_file = self.workspace_path / "design_spec.md"
@@ -265,6 +505,21 @@ class SoftwareDevWorkflow:
             with open(design_spec_file, 'r', encoding='utf-8') as f:
                 self.design_spec = f.read()
             
+            # Validate design spec coherence with vision
+            if not _check_vision_coherence(self.vision, self.design_spec, "design_spec.md"):
+                logger.warning("⚠️ Design spec failed coherence check — re-running designer with stronger grounding")
+                self.designer_agent = DesignerAgent(
+                    custom_backstory=backstory,
+                    budget_tracker=self.budget_tracker
+                )
+                result = self.designer_agent.run(
+                    self.user_stories or "",
+                    self.project_context,
+                    vision=self.vision,
+                )
+                if design_spec_file.exists():
+                    self.design_spec = design_spec_file.read_text(encoding="utf-8", errors="replace")
+
             # Index design spec for RAG
             self.document_indexer.index_artifacts(["design_spec.md"])
         
@@ -283,11 +538,12 @@ class SoftwareDevWorkflow:
                 TransitionContext(phase="tech_architect", data={})
             )
         
-        # Create tech architect agent with custom backstory
+        # Create tech architect agent with custom backstory and workspace-bound file tools
         backstory = self.agent_backstories.get('tech_architect')
         self.tech_architect_agent = TechArchitectAgent(
             custom_backstory=backstory,
-            budget_tracker=self.budget_tracker
+            budget_tracker=self.budget_tracker,
+            workspace_path=self.workspace_path,
         )
         
         # Run tech architect agent
@@ -297,12 +553,18 @@ class SoftwareDevWorkflow:
             self.project_context
         )
         
+        # Fallback: if agent returned content but didn't call file_writer
+        _persist_phase_artifact(self.workspace_path, "tech_stack.md", result)
+        
         # Read generated tech stack
         tech_stack_file = self.workspace_path / "tech_stack.md"
         if tech_stack_file.exists():
             with open(tech_stack_file, 'r', encoding='utf-8') as f:
                 self.tech_stack = f.read()
             
+            # Validate tech stack coherence with vision
+            _check_vision_coherence(self.vision, self.tech_stack, "tech_stack.md")
+
             # Register granular per-file tasks with domain context from design spec
             self.task_manager.register_granular_tasks(
                 self.design_spec or "",
@@ -328,20 +590,39 @@ class SoftwareDevWorkflow:
                 TransitionContext(phase="development", data={})
             )
         
-        # Register feature tasks if any Gherkin features exist
+        # BDD gate: ensure Gherkin features are available before coding begins
         features = parse_features_from_files(str(self.workspace_path))
+        if not features and self.user_stories:
+            extracted = _ensure_feature_files(self.workspace_path, self.user_stories)
+            if extracted:
+                features = parse_features_from_files(str(self.workspace_path))
+        if not features:
+            logger.warning(
+                "⚠️ BDD gate: no .feature files found — development will proceed "
+                "from design_spec/tech_stack only (feature-driven tasks skipped)"
+            )
         if features:
             self.task_manager.register_tasks_from_features(features)
+            logger.info("📋 Registered %d BDD feature task(s) for development", len(features))
         
-        # Create dev agent
+        # Create dev agent with workspace-bound file tools
         backstory = self.agent_backstories.get('developer')
         self.dev_agent = DevAgent(
             custom_backstory=backstory,
-            budget_tracker=self.budget_tracker
+            budget_tracker=self.budget_tracker,
+            workspace_path=self.workspace_path,
         )
+
+        # Enable file-path allowlist so the dev agent can only write files
+        # that are in the registered task list (prevents hallucinated files).
+        from ..tools.file_tools import set_allowed_file_paths
+        allowed = self.task_manager.get_registered_file_paths()
+        set_allowed_file_paths(allowed)
+        logger.info("🔒 file_writer allowlist enabled: %d paths", len(allowed))
         
         # Per-task iteration: pick one file task at a time
         completed_files: dict = {}
+        export_registry: dict = {}  # file_path -> export summary (interface contract)
         max_tasks = 100
         task_count = 0
         
@@ -352,6 +633,7 @@ class SoftwareDevWorkflow:
             
             task_count += 1
             file_path = (task.metadata or {}).get("file_path", "")
+            auto_content = (task.metadata or {}).get("auto_content")
             logger.info("📝 Task %d: generating %s", task_count, file_path or task.description)
             self._report_progress(
                 'development',
@@ -360,18 +642,33 @@ class SoftwareDevWorkflow:
             )
             
             self.task_manager.mark_task_started(task.task_id)
+
+            # Auto-injected files (like __init__.py) skip the LLM entirely
+            if auto_content is not None and file_path:
+                target = self.workspace_path / file_path
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(auto_content, encoding="utf-8")
+                self.task_manager.update_task_status(
+                    task.task_id, "completed", f"Auto-generated: {file_path}"
+                )
+                logger.info("✅ Auto-generated %s (no LLM call needed)", file_path)
+                continue
             
-            MAX_FILE_RETRIES = 1
+            MAX_FILE_RETRIES = 2
             
             for attempt in range(MAX_FILE_RETRIES + 1):
                 self.dev_agent.agent.reset_chat()
                 
+                pl = getattr(self.config, "prompt_limits", None) if self.config else None
+                max_pvc = getattr(pl, "max_project_vision_chars", None) if pl else None
                 prompt = self.task_manager.build_file_prompt(
                     task,
                     tech_stack=self.tech_stack or "",
                     user_stories=self.user_stories or "",
                     existing_files=completed_files,
                     project_vision=self.vision or "",
+                    max_project_vision_chars=max_pvc,
+                    interface_contract=export_registry if export_registry else None,
                 )
                 
                 if attempt > 0:
@@ -419,6 +716,12 @@ class SoftwareDevWorkflow:
                             completed_files[file_path] = content[:5120] + "\n# ... truncated ..."
                     except Exception:
                         pass
+                    # Build running export registry for the interface contract
+                    try:
+                        summary = CodeCompletenessValidator.extract_export_summary(full_path)
+                        export_registry[file_path] = summary.get("exports", [])
+                    except Exception:
+                        pass
                     if all_issues:
                         logger.warning("⚠️ File %s still has issues after retry: %s", file_path, all_issues)
                     break
@@ -440,8 +743,20 @@ class SoftwareDevWorkflow:
             except Exception as e:
                 logger.error("Feature implementation failed: %s", e)
         
-        # Workspace-wide integration check
+        # ── Post-development validation suite ─────────────────────────────
+        report: Dict[str, Any] = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "workspace": str(self.workspace_path),
+            "tasks_processed": task_count,
+            "checks": {},
+        }
+        
+        # 1. Workspace-wide completeness check
         ws_result = CodeCompletenessValidator.validate_workspace(self.workspace_path)
+        report["checks"]["completeness"] = {
+            "pass": len(ws_result.get("incomplete_files", [])) == 0,
+            "issues": ws_result.get("incomplete_files", []),
+        }
         if ws_result["incomplete_files"]:
             logger.warning(
                 "⚠️ Workspace has %d files with quality issues after development phase",
@@ -450,13 +765,273 @@ class SoftwareDevWorkflow:
             for inc in ws_result["incomplete_files"]:
                 logger.warning("  - %s: %s", inc["file"], inc["issues"])
         
+        # 2. Per-file integration check (syntax + imports)
         _SRC_EXT = {".py", ".java", ".kt", ".js", ".jsx", ".ts", ".tsx", ".go"}
+        file_issues: List[Dict[str, Any]] = []
         for src_file in sorted(self.workspace_path.rglob("*")):
             if src_file.is_file() and src_file.suffix in _SRC_EXT:
+                rel = str(src_file.relative_to(self.workspace_path))
                 integ = CodeCompletenessValidator.validate_file_integration(src_file, self.workspace_path)
+                entry = {"file": rel, "valid": integ["valid"], "issues": integ.get("issues", [])}
+                file_issues.append(entry)
                 if not integ["valid"]:
-                    logger.warning("⚠️ Integration issues in %s: %s", src_file, integ["issues"])
+                    logger.warning("⚠️ Integration issues in %s: %s", rel, integ["issues"])
+        report["checks"]["integration"] = {
+            "pass": all(f["valid"] for f in file_issues),
+            "files": file_issues,
+        }
         
+        # 3. Dependency manifest completeness
+        manifest_result = CodeCompletenessValidator.validate_dependency_manifest(self.workspace_path)
+        report["checks"]["dependency_manifest"] = {
+            "pass": manifest_result.get("valid", True),
+            "missing": manifest_result.get("missing", []),
+        }
+        if not manifest_result["valid"]:
+            logger.warning(
+                "⚠️ Dependency manifest incomplete — %d undeclared packages:",
+                len(manifest_result["missing"]),
+            )
+            for entry in manifest_result["missing"]:
+                logger.warning("  - [%s] %s (used in: %s)", entry["ecosystem"], entry["package"], ", ".join(entry["files"][:3]))
+        
+        # 4. Tech stack conformance
+        if self.tech_stack:
+            stack_result = CodeCompletenessValidator.validate_tech_stack_conformance(
+                self.workspace_path, self.tech_stack
+            )
+            report["checks"]["tech_stack"] = {
+                "pass": stack_result.get("valid", True),
+                "conflicts": stack_result.get("conflicts", []),
+            }
+            if not stack_result["valid"]:
+                logger.warning(
+                    "⚠️ Tech stack conflicts detected (%d):", len(stack_result["conflicts"])
+                )
+                for c in stack_result["conflicts"]:
+                    logger.warning("  - %s: %s — %s", c["file"], c["conflict"], c["detail"])
+        else:
+            report["checks"]["tech_stack"] = {"pass": True, "conflicts": [], "note": "no tech stack defined"}
+        
+        # 5. Package structure (Python __init__.py)
+        pkg_result = CodeCompletenessValidator.validate_package_structure(self.workspace_path)
+        report["checks"]["package_structure"] = {
+            "pass": pkg_result["valid"],
+            "missing_init": pkg_result.get("missing_init", []),
+        }
+        if not pkg_result["valid"]:
+            logger.warning(
+                "⚠️ Missing __init__.py in %d package dir(s):", len(pkg_result["missing_init"])
+            )
+            for d in pkg_result["missing_init"]:
+                logger.warning("  - %s/", d)
+
+        # 6. Duplicate / scattered files
+        dup_result = CodeCompletenessValidator.validate_duplicate_files(self.workspace_path)
+        report["checks"]["duplicate_files"] = {
+            "pass": dup_result["valid"],
+            "duplicates": dup_result.get("duplicates", []),
+        }
+        if not dup_result["valid"]:
+            logger.warning(
+                "⚠️ Duplicate source files detected (%d):", len(dup_result["duplicates"])
+            )
+            for d in dup_result["duplicates"]:
+                logger.warning("  - %s: %s", d["filename"], ", ".join(d["paths"]))
+
+        # 7. Entrypoint wiring
+        entrypoint_result = CodeCompletenessValidator.validate_entrypoint(
+            self.workspace_path, self.tech_stack or ""
+        )
+        report["checks"]["entrypoint"] = {
+            "pass": entrypoint_result["valid"],
+            "framework": entrypoint_result.get("framework", ""),
+            "missing_wiring": entrypoint_result.get("missing_wiring", []),
+        }
+        if not entrypoint_result["valid"]:
+            logger.warning(
+                "⚠️ Entrypoint wiring issues for %s:", entrypoint_result.get("framework", "?")
+            )
+            for m in entrypoint_result["missing_wiring"]:
+                logger.warning("  - %s", m)
+
+        # 8. File manifest conformance — detect files the dev agent created
+        #    outside the tech stack specification.
+        allowed_paths = self.task_manager.get_registered_file_paths()
+        _META_FILES = {
+            "agent_backstories.json", "agent_prompts.json", "crew_errors.log",
+            "validation_report.json", "validation_report.log",
+            "smoke_test_container.log", "unknown",
+        }
+        unauthorized: List[str] = []
+        conflict_pairs: List[Dict[str, str]] = []
+        for src_file in sorted(self.workspace_path.rglob("*")):
+            if not src_file.is_file():
+                continue
+            rel = str(src_file.relative_to(self.workspace_path))
+            if rel.startswith(".") or rel.startswith("state_") or rel.startswith("tasks_"):
+                continue
+            if rel in _META_FILES or rel.startswith("features/"):
+                continue
+            if rel.endswith(".md") or rel.endswith(".log") or rel.endswith(".json"):
+                continue
+            if rel not in allowed_paths:
+                unauthorized.append(rel)
+        for p in sorted(allowed_paths):
+            if p.endswith("/__init__.py"):
+                dir_stem = p.rsplit("/__init__.py", 1)[0]
+                flat_mod = f"{dir_stem}.py"
+                if flat_mod in allowed_paths or (self.workspace_path / flat_mod).exists():
+                    conflict_pairs.append({"package": p, "flat_module": flat_mod})
+        report["checks"]["file_manifest"] = {
+            "pass": len(unauthorized) == 0 and len(conflict_pairs) == 0,
+            "unauthorized_files": unauthorized,
+            "file_package_conflicts": conflict_pairs,
+        }
+        if unauthorized:
+            logger.warning(
+                "⚠️ %d file(s) created outside the tech stack manifest:", len(unauthorized)
+            )
+            for u in unauthorized:
+                logger.warning("  - %s", u)
+        if conflict_pairs:
+            logger.warning(
+                "⚠️ %d file/package conflict(s):", len(conflict_pairs)
+            )
+            for c in conflict_pairs:
+                logger.warning("  - %s vs %s", c["package"], c["flat_module"])
+
+        # 9. Smoke test (best-effort, don't fail the build)
+        smoke_msg = ""
+        smoke_container_log = ""
+        try:
+            from ..tools.test_tools import smoke_test_runner
+            smoke_result = smoke_test_runner("auto")
+            smoke_msg = str(smoke_result)
+            smoke_container_log = getattr(smoke_result, "log", "")
+            if "❌" in smoke_msg:
+                logger.warning("⚠️ Smoke test: %s", smoke_msg)
+            else:
+                logger.info("🧪 %s", smoke_msg)
+        except Exception as e:
+            smoke_msg = f"skipped: {e}"
+            logger.debug("Smoke test skipped: %s", e)
+        report["checks"]["smoke_test"] = {
+            "pass": "✅" in smoke_msg,
+            "result": smoke_msg,
+        }
+
+        # Write container log if the backend produced one
+        if smoke_container_log:
+            try:
+                container_log_path = self.workspace_path / "smoke_test_container.log"
+                container_log_path.write_text(
+                    f"═══ Smoke Test Container Log ═══\n"
+                    f"timestamp: {report['timestamp']}\n"
+                    f"backend:   {os.getenv('SMOKE_TEST_BACKEND', 'syntax_only')}\n\n"
+                    f"{smoke_container_log}\n",
+                    encoding="utf-8",
+                )
+                logger.info("📋 Container log written to %s", container_log_path)
+            except Exception as e:
+                logger.warning("Could not write container log: %s", e)
+
+        # Compute overall pass/fail
+        all_passed = all(c.get("pass", True) for c in report["checks"].values())
+        report["overall"] = "PASS" if all_passed else "ISSUES_FOUND"
+        if smoke_container_log:
+            report["checks"]["smoke_test"]["container_log_file"] = "smoke_test_container.log"
+
+        # Write validation_report.log to the workspace
+        try:
+            report_path = self.workspace_path / "validation_report.log"
+            lines: List[str] = []
+            lines.append("=" * 72)
+            lines.append(f"  VALIDATION REPORT — {report['timestamp']}")
+            lines.append(f"  Overall: {report['overall']}")
+            lines.append("=" * 72)
+            lines.append("")
+
+            n_checks = 8
+
+            # 1. Completeness
+            comp = report["checks"]["completeness"]
+            lines.append(f"[1/{n_checks}] Completeness check: {'PASS' if comp['pass'] else 'FAIL'}")
+            for inc in comp["issues"]:
+                lines.append(f"  ✗ {inc['file']}: {inc['issues']}")
+            lines.append("")
+
+            # 2. Integration (syntax + imports)
+            integ_check = report["checks"]["integration"]
+            fail_count = sum(1 for f in integ_check["files"] if not f["valid"])
+            total = len(integ_check["files"])
+            lines.append(f"[2/{n_checks}] Syntax & import validation: {'PASS' if integ_check['pass'] else 'FAIL'} ({total - fail_count}/{total} files clean)")
+            for f in integ_check["files"]:
+                status = "✓" if f["valid"] else "✗"
+                line = f"  {status} {f['file']}"
+                if f["issues"]:
+                    line += f"  — {'; '.join(str(i) for i in f['issues'])}"
+                lines.append(line)
+            lines.append("")
+
+            # 3. Dependency manifest
+            dep = report["checks"]["dependency_manifest"]
+            lines.append(f"[3/{n_checks}] Dependency manifest: {'PASS' if dep['pass'] else 'FAIL'}")
+            for m in dep["missing"]:
+                lines.append(f"  ✗ [{m['ecosystem']}] {m['package']} (used in: {', '.join(m.get('files', [])[:3])})")
+            lines.append("")
+
+            # 4. Tech stack
+            ts = report["checks"]["tech_stack"]
+            lines.append(f"[4/{n_checks}] Tech stack conformance: {'PASS' if ts['pass'] else 'FAIL'}")
+            for c in ts.get("conflicts", []):
+                lines.append(f"  ✗ {c.get('file', '?')}: {c.get('conflict', '?')} — {c.get('detail', '')}")
+            lines.append("")
+
+            # 5. Package structure
+            pkg = report["checks"].get("package_structure", {})
+            lines.append(f"[5/{n_checks}] Package structure (__init__.py): {'PASS' if pkg.get('pass', True) else 'FAIL'}")
+            for d in pkg.get("missing_init", []):
+                lines.append(f"  ✗ {d}/ missing __init__.py")
+            lines.append("")
+
+            # 6. Duplicate files
+            dup = report["checks"].get("duplicate_files", {})
+            lines.append(f"[6/{n_checks}] Duplicate file detection: {'PASS' if dup.get('pass', True) else 'FAIL'}")
+            for d in dup.get("duplicates", []):
+                lines.append(f"  ✗ {d['filename']}: {', '.join(d['paths'])}")
+            lines.append("")
+
+            # 7. Entrypoint wiring
+            ep = report["checks"].get("entrypoint", {})
+            fw_label = f" ({ep['framework']})" if ep.get("framework") else ""
+            lines.append(f"[7/{n_checks}] Entrypoint wiring{fw_label}: {'PASS' if ep.get('pass', True) else 'FAIL'}")
+            for m in ep.get("missing_wiring", []):
+                lines.append(f"  ✗ {m}")
+            lines.append("")
+
+            # 8. Smoke test
+            st = report["checks"]["smoke_test"]
+            lines.append(f"[8/{n_checks}] Smoke test: {'PASS' if st['pass'] else 'FAIL'}")
+            for result_line in st["result"].splitlines():
+                lines.append(f"  {result_line}")
+            lines.append("")
+
+            lines.append("=" * 72)
+
+            report_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            logger.info("📋 Validation report written to %s", report_path)
+
+            # Also write JSON for programmatic access
+            json_path = self.workspace_path / "validation_report.json"
+            json_path.write_text(_json.dumps(report, indent=2, default=str) + "\n", encoding="utf-8")
+        except Exception as e:
+            logger.warning("Could not write validation report: %s", e)
+        
+        # Disable the file-writer allowlist for subsequent phases
+        from ..tools.file_tools import set_allowed_file_paths
+        set_allowed_file_paths(None)
+
         logger.info("✅ Development phase completed (%d tasks processed)", task_count)
         return f"Development phase completed: {task_count} tasks processed"
     
@@ -474,23 +1049,67 @@ class SoftwareDevWorkflow:
         backstory = self.agent_backstories.get('frontend_developer')
         self.frontend_agent = FrontendAgent(
             custom_backstory=backstory,
-            budget_tracker=self.budget_tracker
+            budget_tracker=self.budget_tracker,
+            workspace_path=self.workspace_path,
         )
         
-        # Check for remaining incomplete file tasks after dev phase
+        # Check for remaining incomplete file tasks after dev phase.
+        # Skip any task whose file already exists on disk (dev agent created it
+        # but the task tracker missed the completion marker).
         remaining = self.task_manager.get_incomplete_tasks()
-        remaining_files = [t for t in remaining if t.task_type == "file_creation"]
+        remaining_files = []
+        for t in remaining:
+            if t.task_type != "file_creation":
+                continue
+            fp = (t.metadata or {}).get("file_path", "")
+            if fp and (self.workspace_path / fp).exists():
+                self.task_manager.update_task_status(
+                    t.task_id, "completed",
+                    f"File already exists on disk: {fp}",
+                )
+                logger.info("Frontend phase: skipping %s — already on disk", fp)
+                continue
+            remaining_files.append(t)
         
         if remaining_files:
             from ..orchestrator.code_validator import CodeCompletenessValidator as _FEValidator
             logger.info("Frontend phase: %d remaining file tasks from dev phase", len(remaining_files))
+
+            # Collect existing file content so the frontend agent sees what
+            # the dev agent already produced (prevents hallucinated duplicates)
+            existing_files: Dict[str, str] = {}
+            for src in sorted(self.workspace_path.rglob("*")):
+                if src.is_file() and src.suffix in {".py", ".js", ".jsx", ".ts", ".tsx", ".java", ".kt"}:
+                    try:
+                        existing_files[str(src.relative_to(self.workspace_path))] = src.read_text(
+                            encoding="utf-8", errors="replace"
+                        )[:3000]
+                    except Exception:
+                        pass
+
             for task in remaining_files:
                 file_path = (task.metadata or {}).get("file_path", "")
+
+                # Auto-injected files (e.g. __init__.py) — write directly
+                auto_content = (task.metadata or {}).get("auto_content")
+                if auto_content is not None and file_path:
+                    target = self.workspace_path / file_path
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_text(auto_content, encoding="utf-8")
+                    self.task_manager.update_task_status(
+                        task.task_id, "completed", f"Auto-generated: {file_path}"
+                    )
+                    continue
+
+                pl = getattr(self.config, "prompt_limits", None) if self.config else None
+                max_pvc = getattr(pl, "max_project_vision_chars", None) if pl else None
                 prompt = self.task_manager.build_file_prompt(
                     task,
                     tech_stack=self.tech_stack or "",
                     user_stories=self.user_stories or "",
+                    existing_files=existing_files,
                     project_vision=self.vision or "",
+                    max_project_vision_chars=max_pvc,
                 )
                 try:
                     self.frontend_agent.agent.reset_chat()
@@ -507,7 +1126,8 @@ class SoftwareDevWorkflow:
             result = self.frontend_agent.run(
                 self.design_spec or "",
                 self.tech_stack or "",
-                self.user_stories
+                self.user_stories,
+                vision=self.vision,
             )
             self.task_manager.update_task_status_by_output(result)
         
@@ -543,6 +1163,15 @@ class SoftwareDevWorkflow:
         When resume=True, loads persisted artifacts and runs only from the
         current state (e.g. if state is FRONTEND, re-runs frontend then completes).
         """
+        # Re-establish workspace for this job so file/git/test tools always write here
+        # (guards against thread-local or env being cleared by other code)
+        try:
+            from ..tools.file_tools import set_thread_workspace
+            set_thread_workspace(str(self.workspace_path))
+            logger.debug("Workflow run: thread workspace set to %s", self.workspace_path)
+        except Exception as e:
+            logger.warning("Could not set thread workspace in workflow: %s", e)
+
         try:
             if resume:
                 self._load_phase_artifacts()

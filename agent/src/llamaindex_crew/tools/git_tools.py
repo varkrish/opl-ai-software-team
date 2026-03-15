@@ -7,6 +7,7 @@ from pathlib import Path
 from llama_index.core.tools import FunctionTool
 import git
 from typing import Optional
+from .file_tools import _resolve_workspace
 
 
 def _is_git_enabled() -> bool:
@@ -24,8 +25,7 @@ def git_init() -> str:
     if not _is_git_enabled():
         return "ℹ️  Git operations are disabled (ENABLE_GIT=false). Skipping git init."
     try:
-        workspace_path = os.getenv("WORKSPACE_PATH", "./workspace")
-        workspace = Path(workspace_path)
+        workspace = _resolve_workspace()
         workspace.mkdir(parents=True, exist_ok=True)
         
         # Check if already a git repo
@@ -59,8 +59,7 @@ def git_commit(message: str, files: Optional[str] = None) -> str:
     if not _is_git_enabled():
         return f"ℹ️  Git operations are disabled (ENABLE_GIT=false). Skipping commit: {message}"
     try:
-        workspace_path = os.getenv("WORKSPACE_PATH", "./workspace")
-        workspace = Path(workspace_path)
+        workspace = _resolve_workspace()
         repo = git.Repo(workspace)
         
         # Stage files
@@ -110,8 +109,7 @@ def git_status() -> str:
     if not _is_git_enabled():
         return "ℹ️  Git operations are disabled (ENABLE_GIT=false). Skipping git status."
     try:
-        workspace_path = os.getenv("WORKSPACE_PATH", "./workspace")
-        workspace = Path(workspace_path)
+        workspace = _resolve_workspace()
         repo = git.Repo(workspace)
         
         # Get status

@@ -3,9 +3,10 @@ Tech Architect Agent - Defines technology stack
 Migrated from TechArchitectCrew to LlamaIndex agent
 """
 import logging
-from typing import Optional
+from pathlib import Path
+from typing import Optional, Union
 from .base_agent import BaseLlamaIndexAgent
-from ..tools import FileWriterTool, FileReaderTool
+from ..tools import FileWriterTool, FileReaderTool, create_workspace_file_tools
 from ..utils.prompt_loader import load_prompt
 
 logger = logging.getLogger(__name__)
@@ -14,13 +15,19 @@ logger = logging.getLogger(__name__)
 class TechArchitectAgent:
     """Tech Architect Agent for defining technology stack"""
     
-    def __init__(self, custom_backstory: Optional[str] = None, budget_tracker=None):
+    def __init__(
+        self,
+        custom_backstory: Optional[str] = None,
+        budget_tracker=None,
+        workspace_path: Optional[Union[str, Path]] = None,
+    ):
         """
         Initialize Tech Architect Agent
-        
+
         Args:
             custom_backstory: Optional custom backstory (from Meta Agent)
             budget_tracker: Optional budget tracker instance
+            workspace_path: When set, file tools write to this path (avoids thread-local/env issues).
         """
         default_backstory = load_prompt(
             'tech_architect/tech_architect_backstory.txt',
@@ -31,12 +38,18 @@ You consider the project vision and constraints when making decisions."""
         )
         
         backstory = custom_backstory or default_backstory
+
+        if workspace_path is not None:
+            ws_tools = create_workspace_file_tools(Path(workspace_path))
+            tools = [ws_tools[0], ws_tools[1]]  # file_writer, file_reader
+        else:
+            tools = [FileWriterTool, FileReaderTool]
         
         self.agent = BaseLlamaIndexAgent(
             role="Technical Architect",
             goal="Select tech stack and define technical standards",
             backstory=backstory,
-            tools=[FileWriterTool, FileReaderTool],
+            tools=tools,
             agent_type="manager",
             budget_tracker=budget_tracker,
             verbose=True

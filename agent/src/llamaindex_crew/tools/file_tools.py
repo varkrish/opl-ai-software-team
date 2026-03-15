@@ -5,6 +5,8 @@ Supports explicit workspace_path for thread-safe use (e.g. refinement runner).
 """
 import os
 import logging
+import re
+import threading
 from pathlib import Path
 from typing import Optional
 from functools import partial
@@ -13,12 +15,74 @@ from ..utils.code_safety import CodeSafetyChecker
 
 logger = logging.getLogger(__name__)
 
+_workspace_local = threading.local()
+
+
+def set_thread_workspace(path: str) -> None:
+    """Set the workspace path for the current thread (thread-safe)."""
+    _workspace_local.workspace_path = path
+
+
+def clear_thread_workspace() -> None:
+    """Clear the thread-local workspace override."""
+    _workspace_local.workspace_path = None
+
 
 def _resolve_workspace(workspace_path: Optional[str] = None) -> Path:
-    """Resolve workspace path: explicit path takes precedence over env (thread-safe)."""
+    """Resolve workspace path: explicit > thread-local > env var."""
     if workspace_path is not None:
         return Path(workspace_path)
+    thread_ws = getattr(_workspace_local, 'workspace_path', None)
+    if thread_ws is not None:
+        return Path(thread_ws)
     return Path(os.getenv("WORKSPACE_PATH", "./workspace"))
+
+
+_SOURCE_EXTENSIONS = frozenset({
+    ".py", ".js", ".jsx", ".ts", ".tsx", ".java", ".kt",
+    ".go", ".c", ".cpp", ".h", ".rs", ".rb", ".sh", ".bash",
+    ".html", ".css", ".json", ".yaml", ".yml", ".xml", ".toml",
+    ".md", ".txt", ".cfg", ".ini", ".sql",
+})
+
+
+def _normalize_content(content: str, file_path: str) -> str:
+    """Fix common LLM serialization issues before writing to disk.
+
+    Detects when the LLM returned literal backslash-n (``\\n``) instead of
+    real newlines.  Heuristic: if the content has fewer than 3 real newlines
+    but more than 5 literal ``\\n`` sequences, it's almost certainly an
+    escaped-newline dump.  Applies to source/text files only.
+    """
+    ext = os.path.splitext(file_path)[1].lower()
+    if ext not in _SOURCE_EXTENSIONS:
+        return content
+
+    real_newlines = content.count("\n")
+    literal_newlines = content.count("\\n")
+
+    if real_newlines < 3 and literal_newlines >= 3:
+        logger.warning(
+            "file_writer: detected literal \\n in %s (%d literal vs %d real) — normalizing",
+            file_path, literal_newlines, real_newlines,
+        )
+        content = content.replace("\\n", "\n")
+        content = content.replace("\\t", "\t")
+
+    return content
+
+
+_allowed_paths: Optional[set] = None
+
+
+def set_allowed_file_paths(paths: Optional[set]) -> None:
+    """Set the allowed file paths for dev-phase writes.
+
+    When set, ``file_writer`` rejects writes to paths not in the set.
+    Pass ``None`` to disable the guard (for non-dev-phase agents).
+    """
+    global _allowed_paths
+    _allowed_paths = paths
 
 
 def file_writer(file_path: str, content: str, workspace_path: Optional[str] = None) -> str:
@@ -35,7 +99,26 @@ def file_writer(file_path: str, content: str, workspace_path: Optional[str] = No
     try:
         workspace = _resolve_workspace(workspace_path)
         workspace.mkdir(parents=True, exist_ok=True)
-        
+
+        # Log resolved workspace at DEBUG to help debug "no files generated"
+        logger.debug(
+            "file_writer workspace=%s file_path=%s",
+            workspace, file_path,
+        )
+
+        if _allowed_paths is not None and file_path not in _allowed_paths:
+            logger.warning(
+                "file_writer REJECTED %s — not in the registered task list (%d allowed paths)",
+                file_path, len(_allowed_paths),
+            )
+            return (
+                f"❌ Rejected: '{file_path}' is not in the project file manifest. "
+                "Only create files that are listed in the tech stack."
+            )
+
+        # Normalize LLM serialization artifacts (literal \n etc.)
+        content = _normalize_content(content, file_path)
+
         # Create full path
         full_path = workspace / file_path
         full_path.parent.mkdir(parents=True, exist_ok=True)

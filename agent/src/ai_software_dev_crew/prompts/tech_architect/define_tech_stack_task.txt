@@ -8,13 +8,16 @@ Project Context: {context_digest}
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 STEP 1: EXTRACT TECHNOLOGY FROM VISION
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-READ the vision and IDENTIFY the technology mentioned:
+READ the vision and IDENTIFY the technology mentioned. Use EXACTLY what the user asked for:
+- "Spring Boot" / "Java" → You MUST use Java with Spring Boot (Maven/Gradle, application.properties, etc.)
+- "PostgreSQL" → You MUST use PostgreSQL (not SQLite, not MySQL unless stated)
+- "OpenAPI" / "Swagger" → You MUST include OpenAPI/Swagger docs (springdoc-openapi or similar)
 - "React Native" → You MUST use React Native
-- "Python" → You MUST use Python
+- "Python" / "FastAPI" / "Flask" → You MUST use Python with that framework
 - "mobile app" → You MUST use a mobile framework (React Native, Flutter, etc.)
 - "web app" → You MUST use HTML/CSS/JS or a web framework
 
-**CRITICAL**: Do NOT substitute a different technology! If vision says React Native, use React Native.
+**CRITICAL**: Do NOT substitute a different technology! If the vision says "Spring Boot with PostgreSQL", you MUST use Spring Boot and PostgreSQL—do NOT use Python, FastAPI, or SQLite.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 STEP 2: DESIGN COMPLETE BUILDABLE FILE STRUCTURE
@@ -28,6 +31,15 @@ You MUST specify a COMPLETE, BUILDABLE file structure that includes:
 - Build files (app.json for Expo, or android/ios folders)
 - Documentation (README.md)
 
+**FOR JAVA / SPRING BOOT APPS:**
+- Build: Maven (pom.xml) or Gradle (build.gradle)
+- Main class: src/main/java/.../Application.java with @SpringBootApplication
+- REST controllers, services, repositories (JPA if PostgreSQL)
+- application.properties or application.yml (e.g. spring.datasource.url for PostgreSQL)
+- OpenAPI: springdoc-openapi or springfox dependency and config if vision asks for OpenAPI docs
+- Tests: JUnit 5, MockMvc or RestAssured
+- Documentation: README.md with mvn spring-boot:run or ./gradlew bootRun
+
 **FOR PYTHON APPS:**
 - Source files (modules, classes, functions)
 - Dependencies (requirements.txt or pyproject.toml)
@@ -36,6 +48,7 @@ You MUST specify a COMPLETE, BUILDABLE file structure that includes:
 - Documentation (README.md)
 
 **CRITICAL**: The file structure must allow someone to clone the repo and run:
+- Spring Boot: `./mvnw spring-boot:run` or `./gradlew bootRun`
 - React Native: `npm install && npx react-native run-android`
 - Python: `pip install -r requirements.txt && python main.py`
 
@@ -122,10 +135,10 @@ This structure allows: `pip install . && calculator-cli`
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 CRITICAL RULES:
-1. You MUST use the technology mentioned in the vision
+1. You MUST use the EXACT technology stated in the vision (e.g. Spring Boot + PostgreSQL + OpenAPI, or Python + FastAPI, or React Native). Never substitute a different stack.
 2. You MUST specify a COMPLETE, BUILDABLE file structure (not just source files)
 3. Include ALL necessary config files, entry points, and build files
-4. The structure must allow `npm install && npx react-native run-android` or equivalent
+4. The structure must be runnable (e.g. ./mvnw spring-boot:run for Spring Boot, or npm install && ..., or pip install ...)
 5. You MUST call file_writer to create tech_stack.md
 
 Your response should be: "✅ Created complete tech_stack.md with buildable [technology] structure"

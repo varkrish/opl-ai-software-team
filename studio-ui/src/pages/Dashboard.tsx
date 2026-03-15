@@ -472,11 +472,11 @@ const Dashboard: React.FC = () => {
               <thead>
                 <tr style={{ borderBottom: '2px solid #E8E8E8', textAlign: 'left' }}>
                   {([
-                    ['Vision', 'vision', '35%'],
+                    ['Vision', 'vision', '28%'],
                     ['Status', 'status', '9%'],
                     ['Phase', 'current_phase', '11%'],
                     ['Progress', 'progress', '14%'],
-                    ['Created', 'created_at', '16%'],
+                    ['Created', 'created_at', '14%'],
                   ] as [string, SortCol, string][]).map(([label, col, width]) => (
                     <th
                       key={col}
@@ -494,6 +494,7 @@ const Dashboard: React.FC = () => {
                       </span>
                     </th>
                   ))}
+                  <th style={{ padding: '0.75rem 1rem', fontWeight: 600, color: '#6A6E73', width: '10%' }}>Source</th>
                   <th style={{ padding: '0.75rem 1rem', fontWeight: 600, color: '#6A6E73', width: '5%' }}></th>
                 </tr>
               </thead>
@@ -559,6 +560,21 @@ const Dashboard: React.FC = () => {
                     </td>
                     <td onClick={() => setSelectedJobId(job.id)} style={{ padding: '0.625rem 1rem', color: '#6A6E73', fontSize: '0.8rem', cursor: 'pointer' }}>
                       {new Date(job.created_at).toLocaleString()}
+                    </td>
+                    <td style={{ padding: '0.625rem 1rem', fontSize: '0.8rem' }}>
+                      {job.metadata?.jira_issue_key ? (
+                        <a
+                          href={job.metadata.jira_issue_url || `${job.metadata.jira_base_url}/browse/${job.metadata.jira_issue_key}`}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          onClick={(e) => e.stopPropagation()}
+                          style={{ display: 'inline-flex', alignItems: 'center', gap: '0.25rem', textDecoration: 'none' }}
+                        >
+                          <Label isCompact color="blue">{job.metadata.jira_issue_key}</Label>
+                        </a>
+                      ) : (
+                        <span style={{ color: '#D2D2D2' }}>—</span>
+                      )}
                     </td>
                     <td style={{ padding: '0.625rem 1rem' }}>
                       <Dropdown

@@ -254,11 +254,12 @@ backend/
         tasks = task_mgr.register_granular_tasks(design_spec, tech_stack)
         assert len(tasks) >= 9  # At least 9 source files (3 models + 3 views + 3 serializers)
 
-        # Each task should have a domain context
+        # Each non-scaffolding task should have a domain context
         for t in tasks:
             assert t.task_type == "file_creation"
             assert t.metadata.get("file_path")
-            assert t.metadata.get("domain_context")
+            if t.source != "auto_injected":
+                assert t.metadata.get("domain_context")
 
     def test_granular_tasks_include_domain_context(self, task_mgr, workspace):
         design_spec = """
@@ -542,6 +543,136 @@ src/
         task_mgr.register_task(t)
         prompt = task_mgr.build_file_prompt(t, tech_stack="FastAPI + SQLAlchemy")
         assert "API routes and endpoints" in prompt
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 4b. Edge cases: numbered lists, nested backticks, invalid file paths
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class TestExtractFilesEdgeCases:
+    """_extract_files_with_descriptions must reject garbage paths and handle nested backticks."""
+
+    def test_rejects_numbered_list_items_as_file_paths(self, task_mgr):
+        """Numbered list items like '1. **Foo**:' must not be extracted as file paths."""
+        content = """
+```
+# Some Tech Stack
+
+## Key Components
+1. **Keycloak SAML Adapter**:
+   - keycloak-saml-adapter-subsystem extension
+   - SAML 2.0 SP configuration
+
+2. **Security Configuration**:
+   - Elytron security domains
+
+3. **Environment Management**:
+   - System properties with placeholders
+```
+"""
+        entries = task_mgr._extract_files_with_descriptions(content)
+        paths = [e["path"] for e in entries]
+        assert "1." not in paths
+        assert "2." not in paths
+        assert "3." not in paths
+        assert len(entries) == 0
+
+    def test_nested_backtick_blocks_extracts_inner_tree(self, task_mgr):
+        """Content wrapped in outer backticks with a nested file-tree block should
+        extract files from the inner tree, not from the outer text."""
+        content = """```
+# Technology Stack
+
+## Key Components
+1. **Component A**:
+   - some detail
+
+## File Structure
+```
+myproject/
+├── config.xml         # Main configuration
+├── settings.yaml      # Settings file
+└── README.md          # Documentation
+```
+
+## Other Details
+Some more text here.
+```"""
+        entries = task_mgr._extract_files_with_descriptions(content)
+        paths = [e["path"] for e in entries]
+        assert "config.xml" in paths
+        assert "settings.yaml" in paths
+        assert "README.md" in paths
+        assert "1." not in paths
+
+    def test_real_keycloak_tech_stack(self, task_mgr):
+        """The exact tech_stack.md that caused job 64d859cb to fail must extract
+        the real file tree, not numbered list items."""
+        content = '''```
+# Technology Stack for Keycloak SAML Integration with WildFly
+
+## Core Technology
+**Application Server**: WildFly 26+ (JBoss EAP 7.4+)
+**Identity Provider**: Keycloak 19.0.2+
+
+## Key Components
+1. **Keycloak SAML Adapter**:
+   - `keycloak-saml-adapter-subsystem` extension
+   - SAML 2.0 SP configuration with IDP metadata
+
+2. **Security Configuration**:
+   - Elytron security domains
+   - KeycloakSecurityRealm integration
+
+3. **Environment Management**:
+   - System properties with ${} placeholders
+
+## File Structure (COMPLETE BUILDABLE CONFIGURATION)
+```
+wildfly-keycloak-saml/
+├── domain.xml                  # WildFly domain configuration with Keycloak properties
+├── keycloak.xml                # Keycloak SAML SP configuration with placeholders
+├── properties/
+│   └── env.properties          # Environment-specific values (not committed to VCS)
+├── README.md                   # Configuration guide and placeholder replacement instructions
+└── certs/                      # Certificate storage (not committed to VCS)
+    ├── idp.crt                 # IDP certificate
+    ├── sp.crt                  # SP certificate
+    └── sp.key                  # SP private key
+```
+
+## Configuration Details
+### 1. domain.xml (WildFly Configuration)
+```xml
+<system-properties>
+  <property name="keycloak.idp.url" value="${KEYCLOAK_IDP_URL}"/>
+</system-properties>
+```
+```'''
+        entries = task_mgr._extract_files_with_descriptions(content)
+        paths = [e["path"] for e in entries]
+        # Must extract the real files from the file tree
+        assert "domain.xml" in paths
+        assert "keycloak.xml" in paths
+        assert "properties/env.properties" in paths
+        assert "README.md" in paths
+        # Must NOT extract numbered list items
+        assert "1." not in paths
+        assert "2." not in paths
+        assert "3." not in paths
+
+    def test_register_granular_tasks_skips_invalid_paths(self, task_mgr):
+        """register_granular_tasks must not register tasks for invalid file paths
+        like '1.', '..', or bare numbers."""
+        content = """
+```
+1. First item
+2. Second item
+3. Third item
+```
+"""
+        tasks = task_mgr.register_granular_tasks("", content)
+        assert len(tasks) == 0
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -862,3 +993,1428 @@ class TestEnrichedPrompt:
         )
         assert "import" in prompt.lower()
         assert "resolve" in prompt.lower() or "exist" in prompt.lower()
+
+    def test_build_file_prompt_includes_interface_contract(self, task_mgr):
+        """Prompt should include the interface contract when provided."""
+        t = TaskDefinition(
+            task_id="file_controller",
+            phase="development",
+            task_type="file_creation",
+            description="Create controller.py",
+            metadata={"file_path": "controller.py"},
+        )
+        task_mgr.register_task(t)
+        contract = {
+            "models.py": ["Task", "User"],
+            "services.py": {"named": ["TaskService", "UserService"], "default": False},
+        }
+        prompt = task_mgr.build_file_prompt(t, interface_contract=contract)
+        assert "INTERFACE CONTRACT" in prompt
+        assert "Task" in prompt
+        assert "TaskService" in prompt
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 8. Export extraction
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class TestExportExtraction:
+    """CodeCompletenessValidator extract_export_summary for JS/TS, Python, Java."""
+
+    def test_extract_js_named_exports(self, workspace):
+        from llamaindex_crew.orchestrator.code_validator import CodeCompletenessValidator
+
+        f = workspace / "utils.ts"
+        f.write_text("""
+export function add(a: number, b: number): number { return a + b; }
+export const PI = 3.14;
+export class Calculator {}
+""")
+        result = CodeCompletenessValidator._extract_js_exports(f)
+        assert "add" in result["named"]
+        assert "PI" in result["named"]
+        assert "Calculator" in result["named"]
+        assert result["default"] is False
+
+    def test_extract_js_default_export(self, workspace):
+        from llamaindex_crew.orchestrator.code_validator import CodeCompletenessValidator
+
+        f = workspace / "App.tsx"
+        f.write_text("""
+import React from 'react';
+const App = () => <div>Hello</div>;
+export default App;
+""")
+        result = CodeCompletenessValidator._extract_js_exports(f)
+        assert result["default"] is True
+
+    def test_extract_js_reexport(self, workspace):
+        from llamaindex_crew.orchestrator.code_validator import CodeCompletenessValidator
+
+        f = workspace / "index.ts"
+        f.write_text("export { Task, User } from './models';")
+        result = CodeCompletenessValidator._extract_js_exports(f)
+        assert "Task" in result["named"]
+        assert "User" in result["named"]
+
+    def test_extract_python_exports_all(self, workspace):
+        from llamaindex_crew.orchestrator.code_validator import CodeCompletenessValidator
+
+        f = workspace / "models.py"
+        f.write_text("""
+__all__ = ['Task', 'User']
+
+class Task:
+    pass
+
+class User:
+    pass
+
+class _Internal:
+    pass
+""")
+        result = CodeCompletenessValidator._extract_python_exports(f)
+        assert result == ["Task", "User"]
+
+    def test_extract_python_exports_fallback(self, workspace):
+        from llamaindex_crew.orchestrator.code_validator import CodeCompletenessValidator
+
+        f = workspace / "services.py"
+        f.write_text("""
+class TaskService:
+    def create(self): ...
+
+def get_all_tasks():
+    return []
+
+def _private_helper():
+    pass
+""")
+        result = CodeCompletenessValidator._extract_python_exports(f)
+        assert "TaskService" in result
+        assert "get_all_tasks" in result
+        assert "_private_helper" not in result
+
+    def test_extract_java_public_types(self, workspace):
+        from llamaindex_crew.orchestrator.code_validator import CodeCompletenessValidator
+
+        f = workspace / "Task.java"
+        f.write_text("""
+package com.example.model;
+
+public class Task {
+    private String title;
+}
+
+public interface TaskRepository {
+    Task findById(Long id);
+}
+
+public enum TaskStatus {
+    OPEN, CLOSED
+}
+""")
+        result = CodeCompletenessValidator._extract_java_public_types(f)
+        assert "Task" in result
+        assert "TaskRepository" in result
+        assert "TaskStatus" in result
+
+    def test_extract_export_summary_dispatches(self, workspace):
+        from llamaindex_crew.orchestrator.code_validator import CodeCompletenessValidator
+
+        py = workspace / "foo.py"
+        py.write_text("class Foo: pass\n")
+        result = CodeCompletenessValidator.extract_export_summary(py)
+        assert result["type"] == "python"
+        assert "Foo" in result["exports"]
+
+        js = workspace / "bar.js"
+        js.write_text("export function bar() {}\n")
+        result = CodeCompletenessValidator.extract_export_summary(js)
+        assert result["type"] == "js"
+        assert "bar" in result["exports"]["named"]
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 9. Dependency manifest validation
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class TestDependencyManifestValidation:
+    """validate_dependency_manifest flags undeclared packages."""
+
+    def test_js_missing_from_package_json(self, workspace):
+        from llamaindex_crew.orchestrator.code_validator import CodeCompletenessValidator
+        import json
+
+        (workspace / "package.json").write_text(json.dumps({"dependencies": {"express": "^4.18"}}))
+        f = workspace / "app.js"
+        f.write_text("const express = require('express');\nconst cors = require('cors');\n")
+        result = CodeCompletenessValidator.validate_dependency_manifest(workspace)
+        assert result["valid"] is False
+        missing_pkgs = [m["package"] for m in result["missing"]]
+        assert "cors" in missing_pkgs
+
+    def test_js_all_declared_passes(self, workspace):
+        from llamaindex_crew.orchestrator.code_validator import CodeCompletenessValidator
+        import json
+
+        (workspace / "package.json").write_text(
+            json.dumps({"dependencies": {"express": "^4.18", "cors": "^2.8"}})
+        )
+        f = workspace / "app.js"
+        f.write_text("const express = require('express');\nconst cors = require('cors');\n")
+        result = CodeCompletenessValidator.validate_dependency_manifest(workspace)
+        js_missing = [m for m in result["missing"] if m["ecosystem"] == "npm"]
+        assert len(js_missing) == 0
+
+    def test_python_missing_from_requirements(self, workspace):
+        from llamaindex_crew.orchestrator.code_validator import CodeCompletenessValidator
+
+        (workspace / "requirements.txt").write_text("flask>=2.0\n")
+        f = workspace / "app.py"
+        f.write_text("from flask import Flask\nimport sqlalchemy\n")
+        result = CodeCompletenessValidator.validate_dependency_manifest(workspace)
+        missing_pkgs = [m["package"] for m in result["missing"]]
+        assert "sqlalchemy" in missing_pkgs
+
+    def test_java_undeclared_dependency(self, workspace):
+        from llamaindex_crew.orchestrator.code_validator import CodeCompletenessValidator
+
+        (workspace / "pom.xml").write_text("""<project>
+  <dependencies>
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-web</artifactId>
+    </dependency>
+  </dependencies>
+</project>""")
+        f = workspace / "App.java"
+        f.write_text("""
+import org.springframework.boot.SpringApplication;
+import org.apache.commons.lang3.StringUtils;
+public class App { }
+""")
+        result = CodeCompletenessValidator.validate_dependency_manifest(workspace)
+        missing_pkgs = [m["package"] for m in result["missing"] if m["ecosystem"] == "maven"]
+        assert any("apache" in p for p in missing_pkgs)
+
+    def test_node_builtins_not_flagged(self, workspace):
+        from llamaindex_crew.orchestrator.code_validator import CodeCompletenessValidator
+        import json
+
+        (workspace / "package.json").write_text(json.dumps({"dependencies": {}}))
+        f = workspace / "server.js"
+        f.write_text("const fs = require('fs');\nconst path = require('path');\n")
+        result = CodeCompletenessValidator.validate_dependency_manifest(workspace)
+        js_missing = [m for m in result["missing"] if m["ecosystem"] == "npm"]
+        assert len(js_missing) == 0
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 10. Tech stack conformance
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class TestTechStackConformance:
+    """validate_tech_stack_conformance detects conflicting tech choices."""
+
+    def test_mongoose_when_sequelize_chosen(self, workspace):
+        from llamaindex_crew.orchestrator.code_validator import CodeCompletenessValidator
+
+        tech_stack = "## Stack\nBackend: Node.js + Express + Sequelize + PostgreSQL"
+        f = workspace / "db.js"
+        f.write_text("const mongoose = require('mongoose');\n")
+        result = CodeCompletenessValidator.validate_tech_stack_conformance(workspace, tech_stack)
+        assert result["valid"] is False
+        assert any("MongoDB" in c["conflict"] for c in result["conflicts"])
+
+    def test_quarkus_when_spring_chosen(self, workspace):
+        from llamaindex_crew.orchestrator.code_validator import CodeCompletenessValidator
+
+        tech_stack = "## Stack\nBackend: Java + Spring Boot + PostgreSQL"
+        f = workspace / "App.java"
+        f.write_text("import io.quarkus.runtime.Quarkus;\npublic class App {}\n")
+        result = CodeCompletenessValidator.validate_tech_stack_conformance(workspace, tech_stack)
+        assert result["valid"] is False
+        assert any("Spring" in c["conflict"] or "Quarkus" in c["conflict"] for c in result["conflicts"])
+
+    def test_no_conflicts_passes(self, workspace):
+        from llamaindex_crew.orchestrator.code_validator import CodeCompletenessValidator
+
+        tech_stack = "## Stack\nBackend: Node.js + Express + Sequelize"
+        f = workspace / "app.js"
+        f.write_text("const express = require('express');\n")
+        result = CodeCompletenessValidator.validate_tech_stack_conformance(workspace, tech_stack)
+        assert result["valid"] is True
+
+    def test_django_vs_flask_conflict(self, workspace):
+        from llamaindex_crew.orchestrator.code_validator import CodeCompletenessValidator
+
+        tech_stack = "## Stack\nBackend: Python + Django + PostgreSQL"
+        f = workspace / "app.py"
+        f.write_text("from flask import Flask\napp = Flask(__name__)\n")
+        result = CodeCompletenessValidator.validate_tech_stack_conformance(workspace, tech_stack)
+        assert result["valid"] is False
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 11. Enhanced dependency ordering (multi-tier)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class TestEnhancedDependencyOrdering:
+    """_classify_file_tier and enhanced _infer_dependencies."""
+
+    def test_classify_file_tier_config(self, task_mgr):
+        assert task_mgr._classify_file_tier("config/database.py") <= 1
+
+    def test_classify_file_tier_model(self, task_mgr):
+        assert task_mgr._classify_file_tier("models/user.py") <= 2
+
+    def test_classify_file_tier_service(self, task_mgr):
+        assert task_mgr._classify_file_tier("services/user_service.py") >= 2
+
+    def test_classify_file_tier_controller(self, task_mgr):
+        assert task_mgr._classify_file_tier("controllers/user_controller.py") >= 3
+
+    def test_classify_file_tier_route(self, task_mgr):
+        assert task_mgr._classify_file_tier("routes/api.py") >= 5
+
+    def test_classify_file_tier_server(self, task_mgr):
+        assert task_mgr._classify_file_tier("server.js") >= 7
+
+    def test_classify_file_tier_java_entity(self, task_mgr):
+        tier = task_mgr._classify_file_tier("src/main/java/com/example/entity/User.java")
+        assert tier <= 2
+
+    def test_classify_file_tier_java_repository(self, task_mgr):
+        tier = task_mgr._classify_file_tier("src/main/java/com/example/repository/UserRepository.java")
+        assert tier >= 2
+
+    def test_classify_file_tier_java_controller(self, task_mgr):
+        tier = task_mgr._classify_file_tier("src/main/java/com/example/controller/UserController.java")
+        assert tier >= 3
+
+    def test_config_before_model_before_controller(self, task_mgr):
+        """Tier ordering: config < model < controller."""
+        config_tier = task_mgr._classify_file_tier("config/db.py")
+        model_tier = task_mgr._classify_file_tier("models/user.py")
+        ctrl_tier = task_mgr._classify_file_tier("controllers/user_controller.py")
+        assert config_tier < model_tier <= ctrl_tier
+
+    def test_multi_tier_dependencies_inferred(self, task_mgr):
+        """Controller should depend on model, not the other way around."""
+        tech_stack = """
+## File Structure
+```
+project/
+├── config/
+│   └── db.py
+├── models/
+│   └── user.py
+├── services/
+│   └── user_service.py
+├── controllers/
+│   └── user_controller.py
+└── server.py
+```
+"""
+        tasks = task_mgr.register_granular_tasks("", tech_stack)
+        ctrl = next(t for t in tasks if "controller" in (t.metadata or {}).get("file_path", ""))
+        model = next(t for t in tasks if "models" in (t.metadata or {}).get("file_path", ""))
+        assert model.task_id in (ctrl.dependencies or [])
+
+    def test_java_spring_ordering(self, task_mgr):
+        """Java Spring: entity -> repository -> service -> controller."""
+        tech_stack = """
+## File Structure
+```
+src/
+├── main/
+│   └── java/
+│       └── com/
+│           └── example/
+│               ├── entity/
+│               │   └── User.java
+│               ├── repository/
+│               │   └── UserRepository.java
+│               ├── service/
+│               │   └── UserService.java
+│               └── controller/
+│                   └── UserController.java
+```
+"""
+        tasks = task_mgr.register_granular_tasks("", tech_stack)
+        paths = [(t.metadata or {}).get("file_path", "") for t in tasks]
+        entity_idx = next(i for i, p in enumerate(paths) if "entity" in p)
+        repo_idx = next(i for i, p in enumerate(paths) if "repository" in p)
+        svc_idx = next(i for i, p in enumerate(paths) if "service" in p)
+        ctrl_idx = next(i for i, p in enumerate(paths) if "controller" in p)
+        assert entity_idx < repo_idx < svc_idx < ctrl_idx
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 12. npm bare specifier fix (regression test)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class TestNpmBareSpecifierValidation:
+    """Bare npm specifiers not in package.json should be flagged."""
+
+    def test_undeclared_npm_package_flagged(self, workspace):
+        from llamaindex_crew.orchestrator.code_validator import CodeCompletenessValidator
+        import json
+
+        (workspace / "package.json").write_text(json.dumps({"dependencies": {"express": "^4.18"}}))
+        f = workspace / "app.js"
+        f.write_text("import cors from 'cors';\nimport express from 'express';\n")
+        result = CodeCompletenessValidator.validate_imports(f, workspace)
+        assert result["valid"] is False
+        assert any("cors" in b["module"] for b in result["broken_imports"])
+
+    def test_node_builtin_not_flagged(self, workspace):
+        from llamaindex_crew.orchestrator.code_validator import CodeCompletenessValidator
+        import json
+
+        (workspace / "package.json").write_text(json.dumps({"dependencies": {}}))
+        f = workspace / "server.js"
+        f.write_text("const fs = require('fs');\nconst path = require('path');\n")
+        result = CodeCompletenessValidator.validate_imports(f, workspace)
+        assert result["valid"] is True
+
+    def test_declared_npm_package_passes(self, workspace):
+        from llamaindex_crew.orchestrator.code_validator import CodeCompletenessValidator
+        import json
+
+        (workspace / "package.json").write_text(
+            json.dumps({"dependencies": {"express": "^4.18", "cors": "^2.8"}})
+        )
+        f = workspace / "app.js"
+        f.write_text("import express from 'express';\nimport cors from 'cors';\n")
+        result = CodeCompletenessValidator.validate_imports(f, workspace)
+        assert result["valid"] is True
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 13. Smoke test runner — strategy pattern
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class TestSmokeTestRunner:
+    """smoke_test_runner detects project type and validates it compiles."""
+
+    def test_detect_node_project(self, workspace):
+        from llamaindex_crew.tools.test_tools import _detect_project_type
+        import json
+
+        (workspace / "package.json").write_text(json.dumps({"name": "test"}))
+        assert _detect_project_type(workspace) == "node"
+
+    def test_detect_python_project(self, workspace):
+        from llamaindex_crew.tools.test_tools import _detect_project_type
+
+        (workspace / "requirements.txt").write_text("flask>=2.0\n")
+        assert _detect_project_type(workspace) == "python"
+
+    def test_detect_maven_project(self, workspace):
+        from llamaindex_crew.tools.test_tools import _detect_project_type
+
+        (workspace / "pom.xml").write_text("<project></project>")
+        assert _detect_project_type(workspace) == "java_maven"
+
+    def test_detect_gradle_project(self, workspace):
+        from llamaindex_crew.tools.test_tools import _detect_project_type
+
+        (workspace / "build.gradle").write_text("plugins { id 'java' }")
+        assert _detect_project_type(workspace) == "java_gradle"
+
+    def test_detect_unknown_project(self, workspace):
+        from llamaindex_crew.tools.test_tools import _detect_project_type
+
+        assert _detect_project_type(workspace) == "unknown"
+
+
+class TestSyntaxOnlyBackend:
+    """SyntaxOnlyBackend runs static analysis without any subprocess."""
+
+    def test_valid_python_project_passes(self, workspace):
+        from llamaindex_crew.tools.test_tools import SyntaxOnlyBackend
+
+        (workspace / "requirements.txt").write_text("flask>=2.0\n")
+        (workspace / "app.py").write_text("from flask import Flask\napp = Flask(__name__)\n")
+        result = SyntaxOnlyBackend().run(workspace, "python")
+        assert str(result).startswith("✅")
+
+    def test_syntax_error_detected(self, workspace):
+        from llamaindex_crew.tools.test_tools import SyntaxOnlyBackend
+
+        (workspace / "requirements.txt").write_text("flask>=2.0\n")
+        (workspace / "app.py").write_text("def broken(\n")
+        result = SyntaxOnlyBackend().run(workspace, "python")
+        assert str(result).startswith("❌")
+        assert "issue" in str(result).lower()
+
+    def test_broken_import_detected(self, workspace):
+        from llamaindex_crew.tools.test_tools import SyntaxOnlyBackend
+        import json
+
+        (workspace / "package.json").write_text(json.dumps({"dependencies": {}}))
+        (workspace / "index.js").write_text("import express from 'express';\n")
+        result = SyntaxOnlyBackend().run(workspace, "node")
+        assert str(result).startswith("❌")
+        assert "express" in str(result)
+
+    def test_valid_js_project_passes(self, workspace):
+        from llamaindex_crew.tools.test_tools import SyntaxOnlyBackend
+        import json
+
+        (workspace / "package.json").write_text(
+            json.dumps({"dependencies": {"express": "^4.18"}})
+        )
+        (workspace / "index.js").write_text(
+            "const express = require('express');\nconst app = express();\n"
+        )
+        result = SyntaxOnlyBackend().run(workspace, "node")
+        assert str(result).startswith("✅")
+
+    def test_java_syntax_error_detected(self, workspace):
+        from llamaindex_crew.tools.test_tools import SyntaxOnlyBackend
+
+        (workspace / "pom.xml").write_text("<project></project>")
+        src = workspace / "src" / "main" / "java"
+        src.mkdir(parents=True)
+        (src / "App.java").write_text("public class App {")  # missing closing brace
+        result = SyntaxOnlyBackend().run(workspace, "java_maven")
+        assert str(result).startswith("❌")
+
+
+class TestBackendSelection:
+    """smoke_test_runner dispatches to the correct backend based on env var."""
+
+    def test_defaults_to_syntax_only(self, workspace, monkeypatch):
+        from llamaindex_crew.tools.test_tools import smoke_test_runner
+
+        monkeypatch.setenv("WORKSPACE_PATH", str(workspace))
+        monkeypatch.delenv("SMOKE_TEST_BACKEND", raising=False)
+        (workspace / "requirements.txt").write_text("flask>=2.0\n")
+        (workspace / "app.py").write_text("print('hello')\n")
+        result = smoke_test_runner("auto")
+        assert "Syntax-only" in str(result)
+
+    def test_invalid_backend_returns_error(self, workspace, monkeypatch):
+        from llamaindex_crew.tools.test_tools import smoke_test_runner
+
+        monkeypatch.setenv("WORKSPACE_PATH", str(workspace))
+        monkeypatch.setenv("SMOKE_TEST_BACKEND", "invalid_backend")
+        (workspace / "requirements.txt").write_text("flask>=2.0\n")
+        result = smoke_test_runner("auto")
+        assert str(result).startswith("❌")
+        assert "invalid_backend" in str(result)
+
+    def test_unknown_project_type_returns_error(self, workspace, monkeypatch):
+        from llamaindex_crew.tools.test_tools import smoke_test_runner
+
+        monkeypatch.setenv("WORKSPACE_PATH", str(workspace))
+        result = smoke_test_runner("auto")
+        assert str(result).startswith("❌")
+        assert "detect" in str(result).lower()
+
+
+class TestKubernetesJobBackend:
+    """KubernetesJobBackend skeleton raises a clear error without the k8s package."""
+
+    def test_missing_kubernetes_package(self, workspace, monkeypatch):
+        import importlib
+        from llamaindex_crew.tools.test_tools import KubernetesJobBackend
+
+        original_import = __builtins__.__import__ if hasattr(__builtins__, '__import__') else __import__
+        def mock_import(name, *args, **kwargs):
+            if name == "kubernetes":
+                raise ImportError("No module named 'kubernetes'")
+            return original_import(name, *args, **kwargs)
+
+        monkeypatch.setattr("builtins.__import__", mock_import)
+        result = KubernetesJobBackend().run(workspace, "python")
+        assert str(result).startswith("❌")
+        assert "kubernetes" in str(result).lower()
+
+
+class TestLocalContainerBackend:
+    """LocalContainerBackend gives a clear message when no runtime is available."""
+
+    def test_no_runtime_available(self, workspace, monkeypatch):
+        from llamaindex_crew.tools.test_tools import LocalContainerBackend
+
+        monkeypatch.setattr(
+            LocalContainerBackend, "_find_runtime", staticmethod(lambda: None)
+        )
+        result = LocalContainerBackend().run(workspace, "node")
+        assert str(result).startswith("❌")
+        assert "No container runtime" in str(result)
+
+    def test_unknown_project_type(self, workspace):
+        from llamaindex_crew.tools.test_tools import LocalContainerBackend
+
+        result = LocalContainerBackend().run(workspace, "unknown")
+        assert str(result).startswith("❌")
+        assert "No container image" in str(result)
+
+
+class TestSmokeTestResult:
+    """SmokeTestResult carries both a message and an optional container log."""
+
+    def test_str_returns_message(self):
+        from llamaindex_crew.tools.test_tools import SmokeTestResult
+
+        r = SmokeTestResult("✅ passed", log="detailed log output")
+        assert str(r) == "✅ passed"
+        assert r.log == "detailed log output"
+
+    def test_empty_log_by_default(self):
+        from llamaindex_crew.tools.test_tools import SmokeTestResult
+
+        r = SmokeTestResult("❌ failed")
+        assert r.log == ""
+
+    def test_container_backend_returns_log(self, workspace, monkeypatch):
+        """LocalContainerBackend must populate .log with full stdout/stderr."""
+        import subprocess
+        from llamaindex_crew.tools.test_tools import LocalContainerBackend
+
+        fake_result = subprocess.CompletedProcess(
+            args=[], returncode=0,
+            stdout="all modules compiled OK\n", stderr="",
+        )
+        monkeypatch.setattr(
+            LocalContainerBackend, "_find_runtime", staticmethod(lambda: "podman")
+        )
+        monkeypatch.setattr(subprocess, "run", lambda *a, **kw: fake_result)
+
+        (workspace / "requirements.txt").write_text("flask\n")
+        result = LocalContainerBackend().run(workspace, "python")
+        assert str(result).startswith("✅")
+        assert "all modules compiled OK" in result.log
+        assert "runtime: podman" in result.log
+        assert "exit_code: 0" in result.log
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 14. Content normalization (literal \n fix)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class TestContentNormalization:
+    """file_writer should convert literal \\n to real newlines when the LLM
+    serialises the whole file as a single escaped string."""
+
+    def test_literal_newlines_normalized(self):
+        from llamaindex_crew.tools.file_tools import _normalize_content
+
+        bad = r"import os\nfrom pathlib import Path\n\ndef main():\n    pass\n"
+        result = _normalize_content(bad, "app.py")
+        assert "\n" in result
+        assert result.count("\n") >= 4
+        assert "\\n" not in result
+
+    def test_real_newlines_untouched(self):
+        from llamaindex_crew.tools.file_tools import _normalize_content
+
+        good = "import os\nfrom pathlib import Path\n\ndef main():\n    pass\n"
+        result = _normalize_content(good, "app.py")
+        assert result == good
+
+    def test_non_source_files_untouched(self):
+        from llamaindex_crew.tools.file_tools import _normalize_content
+
+        binary_like = r"some\nescaped\ncontent\nhere\nfor\nbinary"
+        result = _normalize_content(binary_like, "image.png")
+        assert result == binary_like
+
+    def test_literal_tabs_also_normalized(self):
+        from llamaindex_crew.tools.file_tools import _normalize_content
+
+        bad = r"import os\nfrom sys import argv\n\ndef foo():\n\treturn 1\n\ndef bar():\n\treturn 2\n"
+        result = _normalize_content(bad, "foo.py")
+        assert "\t" in result
+        assert "\n" in result
+        assert "\\t" not in result
+
+    def test_mixed_real_and_literal_not_normalized(self):
+        """Files with adequate real newlines but some literal \\n in strings
+        should NOT be modified — they likely have intentional escape sequences."""
+        from llamaindex_crew.tools.file_tools import _normalize_content
+
+        code = 'line1 = "hello\\nworld"\nline2 = "foo"\nline3 = "bar"\nline4 = "baz"\n'
+        result = _normalize_content(code, "app.py")
+        assert result == code
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 15. Phase artifact fallback persistence
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class TestPhaseArtifactFallback:
+    """When an agent returns content in its response but fails to call
+    file_writer, the workflow must persist the artifact anyway."""
+
+    def test_fallback_writes_file_when_missing(self, workspace):
+        from llamaindex_crew.workflows.software_dev_workflow import _persist_phase_artifact
+
+        agent_response = "# User Stories\n\n## US-1: Create a todo\nAs a user..."
+        path = workspace / "user_stories.md"
+        assert not path.exists()
+
+        result = _persist_phase_artifact(workspace, "user_stories.md", agent_response)
+        assert path.exists()
+        assert "User Stories" in path.read_text()
+        assert result is True
+
+    def test_fallback_skips_when_file_already_exists(self, workspace):
+        from llamaindex_crew.workflows.software_dev_workflow import _persist_phase_artifact
+
+        path = workspace / "design_spec.md"
+        path.write_text("# Existing design spec\n")
+
+        agent_response = "# Different design spec\nSomething else"
+        result = _persist_phase_artifact(workspace, "design_spec.md", agent_response)
+        assert path.read_text() == "# Existing design spec\n"
+        assert result is False
+
+    def test_fallback_skips_empty_response(self, workspace):
+        from llamaindex_crew.workflows.software_dev_workflow import _persist_phase_artifact
+
+        result = _persist_phase_artifact(workspace, "user_stories.md", "")
+        assert not (workspace / "user_stories.md").exists()
+        assert result is False
+
+    def test_fallback_skips_generic_response(self, workspace):
+        """Agent responses like 'I have completed the task' without real
+        content should NOT be written to files."""
+        from llamaindex_crew.workflows.software_dev_workflow import _persist_phase_artifact
+
+        result = _persist_phase_artifact(
+            workspace, "user_stories.md",
+            "I have completed the user stories task successfully."
+        )
+        assert not (workspace / "user_stories.md").exists()
+        assert result is False
+
+    def test_fallback_writes_multiline_content(self, workspace):
+        from llamaindex_crew.workflows.software_dev_workflow import _persist_phase_artifact
+
+        content = (
+            "# Tech Stack\n\n"
+            "## Backend\n- Python 3.11\n- Flask\n\n"
+            "## Frontend\n- React 18\n- TypeScript\n\n"
+            "## Database\n- PostgreSQL 15\n"
+        )
+        result = _persist_phase_artifact(workspace, "tech_stack.md", content)
+        assert (workspace / "tech_stack.md").exists()
+        saved = (workspace / "tech_stack.md").read_text()
+        assert "Python 3.11" in saved
+        assert "React 18" in saved
+        assert result is True
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 16. Package structure validation (__init__.py)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class TestPackageStructure:
+    """Directories used as Python import paths must have __init__.py."""
+
+    def test_missing_init_detected(self, workspace):
+        from llamaindex_crew.orchestrator.code_validator import CodeCompletenessValidator
+
+        src = workspace / "src"
+        src.mkdir()
+        (src / "models.py").write_text("class Task: pass\n")
+        (workspace / "app.py").write_text("from src.models import Task\n")
+        result = CodeCompletenessValidator.validate_package_structure(workspace)
+        assert not result["valid"]
+        assert "src" in result["missing_init"]
+
+    def test_init_present_passes(self, workspace):
+        from llamaindex_crew.orchestrator.code_validator import CodeCompletenessValidator
+
+        src = workspace / "src"
+        src.mkdir()
+        (src / "__init__.py").write_text("")
+        (src / "models.py").write_text("class Task: pass\n")
+        (workspace / "app.py").write_text("from src.models import Task\n")
+        result = CodeCompletenessValidator.validate_package_structure(workspace)
+        assert result["valid"]
+        assert result["missing_init"] == []
+
+    def test_nested_packages_all_need_init(self, workspace):
+        from llamaindex_crew.orchestrator.code_validator import CodeCompletenessValidator
+
+        src = workspace / "src"
+        tests = src / "tests"
+        tests.mkdir(parents=True)
+        (src / "__init__.py").write_text("")
+        # src/tests/ is missing __init__.py
+        (tests / "test_app.py").write_text("import unittest\n")
+        (workspace / "run_tests.py").write_text("from src.tests.test_app import *\n")
+        result = CodeCompletenessValidator.validate_package_structure(workspace)
+        assert not result["valid"]
+        assert "src/tests" in result["missing_init"]
+
+    def test_no_python_imports_passes(self, workspace):
+        from llamaindex_crew.orchestrator.code_validator import CodeCompletenessValidator
+
+        (workspace / "index.js").write_text("const x = require('./utils');\n")
+        result = CodeCompletenessValidator.validate_package_structure(workspace)
+        assert result["valid"]
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 17. Duplicate / scattered file detection
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class TestDuplicateFiles:
+    """Detect hallucinated duplicate source files under different directories."""
+
+    def test_duplicate_app_py_detected(self, workspace):
+        from llamaindex_crew.orchestrator.code_validator import CodeCompletenessValidator
+
+        (workspace / "src").mkdir()
+        (workspace / "src" / "app.py").write_text("from flask import Flask\napp = Flask(__name__)\n")
+        todo = workspace / "todo-api" / "src"
+        todo.mkdir(parents=True)
+        (todo / "app.py").write_text("from flask import Flask\ntest_app = Flask(__name__)\n")
+
+        result = CodeCompletenessValidator.validate_duplicate_files(workspace)
+        assert not result["valid"]
+        filenames = [d["filename"] for d in result["duplicates"]]
+        assert "app.py" in filenames
+
+    def test_no_duplicates_passes(self, workspace):
+        from llamaindex_crew.orchestrator.code_validator import CodeCompletenessValidator
+
+        (workspace / "src").mkdir()
+        (workspace / "src" / "app.py").write_text("from flask import Flask\n")
+        (workspace / "src" / "models.py").write_text("class Task: pass\n")
+
+        result = CodeCompletenessValidator.validate_duplicate_files(workspace)
+        assert result["valid"]
+        assert result["duplicates"] == []
+
+    def test_same_name_different_extension_not_flagged(self, workspace):
+        from llamaindex_crew.orchestrator.code_validator import CodeCompletenessValidator
+
+        (workspace / "src").mkdir()
+        (workspace / "src" / "app.py").write_text("print('hello')\n")
+        (workspace / "src" / "app.js").write_text("console.log('hello');\n")
+
+        result = CodeCompletenessValidator.validate_duplicate_files(workspace)
+        assert result["valid"]
+
+    def test_test_files_with_same_name_flagged(self, workspace):
+        """test_models.py under src/tests/ AND todo-api/tests/ should be flagged."""
+        from llamaindex_crew.orchestrator.code_validator import CodeCompletenessValidator
+
+        t1 = workspace / "src" / "tests"
+        t1.mkdir(parents=True)
+        (t1 / "test_models.py").write_text("def test_one(): pass\n")
+        t2 = workspace / "todo-api" / "tests"
+        t2.mkdir(parents=True)
+        (t2 / "test_models.py").write_text("def test_two(): pass\n")
+
+        result = CodeCompletenessValidator.validate_duplicate_files(workspace)
+        assert not result["valid"]
+        assert any(d["filename"] == "test_models.py" for d in result["duplicates"])
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 18. Entrypoint wiring validation
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class TestEntrypointWiring:
+    """Verify that the generated entrypoint actually wires up the framework."""
+
+    def test_flask_incomplete_wiring_detected(self, workspace):
+        from llamaindex_crew.orchestrator.code_validator import CodeCompletenessValidator
+
+        (workspace / "app.py").write_text(
+            "from flask import Flask\napp = Flask(__name__)\n"
+            "@app.route('/')\ndef home():\n    return 'hello'\n"
+        )
+        tech_stack = "Framework: Flask\nDatabase: SQLAlchemy"
+        result = CodeCompletenessValidator.validate_entrypoint(workspace, tech_stack)
+        assert not result["valid"]
+        assert result["framework"] == "flask"
+        assert any("db.init_app" in m for m in result["missing_wiring"])
+
+    def test_flask_complete_wiring_passes(self, workspace):
+        from llamaindex_crew.orchestrator.code_validator import CodeCompletenessValidator
+
+        (workspace / "app.py").write_text(
+            "from flask import Flask\n"
+            "from flask_sqlalchemy import SQLAlchemy\n"
+            "app = Flask(__name__)\n"
+            "db = SQLAlchemy(app)\n"
+            "from routes import *\n"
+        )
+        tech_stack = "Framework: Flask"
+        result = CodeCompletenessValidator.validate_entrypoint(workspace, tech_stack)
+        assert result["valid"]
+        assert result["framework"] == "flask"
+
+    def test_express_missing_listen_detected(self, workspace):
+        from llamaindex_crew.orchestrator.code_validator import CodeCompletenessValidator
+
+        (workspace / "app.js").write_text(
+            "const express = require('express');\n"
+            "const app = express();\n"
+            "app.get('/', (req, res) => res.send('hi'));\n"
+        )
+        tech_stack = "Framework: Express.js"
+        result = CodeCompletenessValidator.validate_entrypoint(workspace, tech_stack)
+        assert not result["valid"]
+        assert any("listen" in m for m in result["missing_wiring"])
+
+    def test_express_complete_wiring_passes(self, workspace):
+        from llamaindex_crew.orchestrator.code_validator import CodeCompletenessValidator
+
+        (workspace / "server.js").write_text(
+            "const express = require('express');\n"
+            "const app = express();\n"
+            "app.get('/', (req, res) => res.send('hi'));\n"
+            "app.listen(3000);\n"
+        )
+        tech_stack = "Framework: Express"
+        result = CodeCompletenessValidator.validate_entrypoint(workspace, tech_stack)
+        assert result["valid"]
+
+    def test_spring_boot_wiring(self, workspace):
+        from llamaindex_crew.orchestrator.code_validator import CodeCompletenessValidator
+
+        src = workspace / "src" / "main" / "java"
+        src.mkdir(parents=True)
+        (src / "Application.java").write_text(
+            "@SpringBootApplication\n"
+            "public class Application {\n"
+            "    public static void main(String[] args) {\n"
+            "        SpringApplication.run(Application.class, args);\n"
+            "    }\n"
+            "}\n"
+        )
+        tech_stack = "Framework: Spring Boot"
+        result = CodeCompletenessValidator.validate_entrypoint(workspace, tech_stack)
+        assert result["valid"]
+        assert result["framework"] == "spring"
+
+    def test_unknown_framework_skipped(self, workspace):
+        from llamaindex_crew.orchestrator.code_validator import CodeCompletenessValidator
+
+        result = CodeCompletenessValidator.validate_entrypoint(workspace, "Language: Rust, Framework: Actix")
+        assert result["valid"]
+        assert result["framework"] == ""
+
+    def test_no_tech_stack_skipped(self, workspace):
+        from llamaindex_crew.orchestrator.code_validator import CodeCompletenessValidator
+
+        result = CodeCompletenessValidator.validate_entrypoint(workspace, "")
+        assert result["valid"]
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 19. Upstream prevention: auto-inject __init__.py and entrypoint hints
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class TestAutoInjectInitPy:
+    """Task manager must auto-inject __init__.py tasks for Python package dirs."""
+
+    def test_init_py_injected_for_python_subdirs(self, workspace):
+        from llamaindex_crew.orchestrator.task_manager import TaskManager
+
+        db_path = workspace / "tasks.db"
+        tm = TaskManager(db_path, "test-project")
+
+        tech_stack = (
+            "## File Structure\n"
+            "```\n"
+            "myapp/\n"
+            "├── src/\n"
+            "│   ├── models.py\n"
+            "│   ├── routes.py\n"
+            "│   └── tests/\n"
+            "│       └── test_models.py\n"
+            "├── requirements.txt\n"
+            "└── README.md\n"
+            "```\n"
+        )
+        tasks = tm.register_granular_tasks("", tech_stack)
+        file_paths = [(t.metadata or {}).get("file_path", "") for t in tasks]
+
+        assert "src/__init__.py" in file_paths
+        assert "src/tests/__init__.py" in file_paths
+
+    def test_no_init_py_for_non_python_project(self, workspace):
+        from llamaindex_crew.orchestrator.task_manager import TaskManager
+
+        db_path = workspace / "tasks.db"
+        tm = TaskManager(db_path, "test-project")
+
+        tech_stack = (
+            "## File Structure\n"
+            "```\n"
+            "webapp/\n"
+            "├── src/\n"
+            "│   ├── index.js\n"
+            "│   └── utils.js\n"
+            "├── package.json\n"
+            "└── README.md\n"
+            "```\n"
+        )
+        tasks = tm.register_granular_tasks("", tech_stack)
+        file_paths = [(t.metadata or {}).get("file_path", "") for t in tasks]
+
+        assert not any("__init__.py" in fp for fp in file_paths)
+
+    def test_init_py_has_auto_content_metadata(self, workspace):
+        from llamaindex_crew.orchestrator.task_manager import TaskManager
+
+        db_path = workspace / "tasks.db"
+        tm = TaskManager(db_path, "test-project")
+
+        tech_stack = (
+            "## File Structure\n"
+            "```\n"
+            "api/\n"
+            "├── src/\n"
+            "│   └── app.py\n"
+            "└── requirements.txt\n"
+            "```\n"
+        )
+        tasks = tm.register_granular_tasks("", tech_stack)
+        init_tasks = [t for t in tasks if "__init__.py" in (t.metadata or {}).get("file_path", "")]
+        assert len(init_tasks) > 0
+        for t in init_tasks:
+            assert "auto_content" in t.metadata
+
+
+class TestInitPyConflictDetection:
+    """_inject_init_py_tasks must NOT create dir/__init__.py when dir.py exists."""
+
+    def test_skips_init_when_flat_module_exists(self, workspace):
+        from llamaindex_crew.orchestrator.task_manager import TaskManager
+
+        db_path = workspace / "tasks.db"
+        tm = TaskManager(db_path, "test-project")
+
+        tech_stack = (
+            "## File Structure\n"
+            "```\n"
+            "todo-api/\n"
+            "├── app/\n"
+            "│   ├── __init__.py\n"
+            "│   ├── models.py\n"
+            "│   ├── routes.py\n"
+            "│   └── config.py\n"
+            "├── tests/\n"
+            "│   └── test_routes.py\n"
+            "└── requirements.txt\n"
+            "```\n"
+        )
+        tasks = tm.register_granular_tasks("", tech_stack)
+        file_paths = [(t.metadata or {}).get("file_path", "") for t in tasks]
+
+        assert "app/__init__.py" in file_paths
+        # Flat modules app/models.py and app/routes.py must NOT trigger package dirs
+        assert "app/models/__init__.py" not in file_paths
+        assert "app/routes/__init__.py" not in file_paths
+        # tests/ is a real sub-directory → gets __init__.py
+        assert "tests/__init__.py" in file_paths
+
+    def test_creates_init_only_for_real_subdirs(self, workspace):
+        from llamaindex_crew.orchestrator.task_manager import TaskManager
+
+        db_path = workspace / "tasks.db"
+        tm = TaskManager(db_path, "test-project")
+
+        tech_stack = (
+            "## File Structure\n"
+            "```\n"
+            "todo-api/\n"
+            "├── app/\n"
+            "│   ├── __init__.py\n"
+            "│   ├── models.py\n"
+            "│   ├── routes.py\n"
+            "│   └── tests/\n"
+            "│       └── test_routes.py\n"
+            "├── requirements.txt\n"
+            "└── README.md\n"
+            "```\n"
+        )
+        tasks = tm.register_granular_tasks("", tech_stack)
+        file_paths = [(t.metadata or {}).get("file_path", "") for t in tasks]
+
+        assert "app/__init__.py" in file_paths
+        assert "app/tests/__init__.py" in file_paths
+        assert "app/models/__init__.py" not in file_paths
+        assert "app/routes/__init__.py" not in file_paths
+
+
+class TestGetRegisteredFilePaths:
+    """get_registered_file_paths returns all file_creation task paths."""
+
+    def test_returns_file_paths(self, workspace):
+        from llamaindex_crew.orchestrator.task_manager import TaskManager
+
+        db_path = workspace / "tasks.db"
+        tm = TaskManager(db_path, "test-project")
+
+        tech_stack = (
+            "## File Structure\n"
+            "```\n"
+            "todo-api/\n"
+            "├── app/\n"
+            "│   ├── __init__.py\n"
+            "│   ├── models.py\n"
+            "│   └── routes.py\n"
+            "├── requirements.txt\n"
+            "└── README.md\n"
+            "```\n"
+        )
+        tm.register_granular_tasks("", tech_stack)
+        paths = tm.get_registered_file_paths()
+
+        assert "app/__init__.py" in paths
+        assert "app/models.py" in paths
+        assert "app/routes.py" in paths
+        assert "requirements.txt" in paths
+        assert "README.md" in paths
+
+    def test_empty_when_no_tasks(self, workspace):
+        from llamaindex_crew.orchestrator.task_manager import TaskManager
+
+        db_path = workspace / "tasks.db"
+        tm = TaskManager(db_path, "test-project")
+        paths = tm.get_registered_file_paths()
+        assert paths == set()
+
+
+class TestFileWriterAllowlist:
+    """file_writer must reject paths not in the allowlist when enabled."""
+
+    def test_rejects_unauthorized_path(self, workspace):
+        from llamaindex_crew.tools.file_tools import (
+            file_writer, set_allowed_file_paths,
+        )
+        set_allowed_file_paths({"app/models.py", "app/routes.py"})
+        try:
+            result = file_writer("app/utils.py", "# utils", workspace_path=str(workspace))
+            assert "Rejected" in result
+            assert not (workspace / "app/utils.py").exists()
+        finally:
+            set_allowed_file_paths(None)
+
+    def test_allows_registered_path(self, workspace):
+        from llamaindex_crew.tools.file_tools import (
+            file_writer, set_allowed_file_paths,
+        )
+        set_allowed_file_paths({"app/models.py", "app/routes.py"})
+        try:
+            result = file_writer("app/models.py", "# models", workspace_path=str(workspace))
+            assert "Successfully" in result
+            assert (workspace / "app/models.py").exists()
+        finally:
+            set_allowed_file_paths(None)
+
+    def test_no_guard_when_disabled(self, workspace):
+        from llamaindex_crew.tools.file_tools import (
+            file_writer, set_allowed_file_paths,
+        )
+        set_allowed_file_paths(None)
+        result = file_writer("anything.py", "# ok", workspace_path=str(workspace))
+        assert "Successfully" in result
+        assert (workspace / "anything.py").exists()
+
+
+class TestEntrypointHints:
+    """build_file_prompt must include framework wiring hints for entrypoint files."""
+
+    def test_flask_app_gets_wiring_hints(self, workspace):
+        from llamaindex_crew.orchestrator.task_manager import TaskManager, TaskDefinition
+
+        db_path = workspace / "tasks.db"
+        tm = TaskManager(db_path, "test-project")
+
+        task = TaskDefinition(
+            task_id="file_src_app_py",
+            phase="development",
+            task_type="file_creation",
+            description="Create file: src/app.py",
+            metadata={"file_path": "src/app.py"},
+        )
+        prompt = tm.build_file_prompt(task, tech_stack="Framework: Flask\nORM: SQLAlchemy")
+        assert "ENTRYPOINT WIRING" in prompt
+        assert "db.init_app" in prompt or "SQLAlchemy(app)" in prompt
+        assert "route" in prompt.lower()
+
+    def test_non_entrypoint_file_has_no_wiring_hints(self, workspace):
+        from llamaindex_crew.orchestrator.task_manager import TaskManager, TaskDefinition
+
+        db_path = workspace / "tasks.db"
+        tm = TaskManager(db_path, "test-project")
+
+        task = TaskDefinition(
+            task_id="file_src_models_py",
+            phase="development",
+            task_type="file_creation",
+            description="Create file: src/models.py",
+            metadata={"file_path": "src/models.py"},
+        )
+        prompt = tm.build_file_prompt(task, tech_stack="Framework: Flask")
+        assert "ENTRYPOINT WIRING" not in prompt
+
+    def test_express_server_gets_wiring_hints(self, workspace):
+        from llamaindex_crew.orchestrator.task_manager import TaskManager, TaskDefinition
+
+        db_path = workspace / "tasks.db"
+        tm = TaskManager(db_path, "test-project")
+
+        task = TaskDefinition(
+            task_id="file_server_js",
+            phase="development",
+            task_type="file_creation",
+            description="Create file: server.js",
+            metadata={"file_path": "server.js"},
+        )
+        prompt = tm.build_file_prompt(task, tech_stack="Framework: Express")
+        assert "ENTRYPOINT WIRING" in prompt
+        assert "app.listen" in prompt
+
+    def test_spring_application_gets_wiring_hints(self, workspace):
+        from llamaindex_crew.orchestrator.task_manager import TaskManager, TaskDefinition
+
+        db_path = workspace / "tasks.db"
+        tm = TaskManager(db_path, "test-project")
+
+        task = TaskDefinition(
+            task_id="file_Application_java",
+            phase="development",
+            task_type="file_creation",
+            description="Create file: src/main/java/Application.java",
+            metadata={"file_path": "src/main/java/Application.java"},
+        )
+        prompt = tm.build_file_prompt(task, tech_stack="Framework: Spring Boot")
+        assert "ENTRYPOINT WIRING" in prompt
+        assert "@SpringBootApplication" in prompt
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 11. Agent Summary Detection
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class TestAgentSummaryDetection:
+
+    def test_detects_ive_created_summary(self):
+        from llamaindex_crew.workflows.software_dev_workflow import _is_agent_summary
+        text = (
+            "I've created the following files in your workspace:\n"
+            "1. `requirements.md` - Requirements\n"
+            "2. `user_stories.md` - User stories\n"
+        )
+        assert _is_agent_summary(text) is True
+
+    def test_detects_i_have_created_summary(self):
+        from llamaindex_crew.workflows.software_dev_workflow import _is_agent_summary
+        text = "I have created the user stories and feature files as requested."
+        assert _is_agent_summary(text) is True
+
+    def test_detects_here_are_the_summary(self):
+        from llamaindex_crew.workflows.software_dev_workflow import _is_agent_summary
+        text = "Here are the files I generated for the project:\n- requirements.md\n"
+        assert _is_agent_summary(text) is True
+
+    def test_detects_let_me_know(self):
+        from llamaindex_crew.workflows.software_dev_workflow import _is_agent_summary
+        text = "Let me know if you need to modify any requirements or add additional scenarios!"
+        assert _is_agent_summary(text) is True
+
+    def test_detects_files_have_been_created(self):
+        from llamaindex_crew.workflows.software_dev_workflow import _is_agent_summary
+        text = (
+            "The files have been successfully created in the workspace:\n"
+            "1. `requirements.md` - Contains high-level requirements\n"
+        )
+        assert _is_agent_summary(text) is True
+
+    def test_detects_all_content_aligns(self):
+        from llamaindex_crew.workflows.software_dev_workflow import _is_agent_summary
+        text = "All content aligns with the project vision, constraints, and value proposition."
+        assert _is_agent_summary(text) is True
+
+    def test_real_user_stories_not_flagged(self):
+        from llamaindex_crew.workflows.software_dev_workflow import _is_agent_summary
+        text = (
+            "# User Stories\n\n"
+            "## US-1: Create a task\n"
+            "As a user I want to create a task so that I can track my work.\n\n"
+            "### Acceptance Criteria\n"
+            "Given I am on the task page\n"
+            "When I click 'New Task'\n"
+            "Then a new task is created\n"
+        )
+        assert _is_agent_summary(text) is False
+
+    def test_real_gherkin_not_flagged(self):
+        from llamaindex_crew.workflows.software_dev_workflow import _is_agent_summary
+        text = (
+            "Feature: Create a task\n"
+            "  Scenario: Successfully create a task\n"
+            "    Given I have a valid task payload\n"
+            "    When I POST to /tasks\n"
+            "    Then I receive a 201 status code\n"
+        )
+        assert _is_agent_summary(text) is False
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 12. Persist Phase Artifact — rejects summaries
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class TestPersistPhaseArtifactSummaryRejection:
+
+    def test_rejects_summary_response(self, workspace):
+        from llamaindex_crew.workflows.software_dev_workflow import _persist_phase_artifact
+        summary = (
+            "I've created the following files in your workspace:\n"
+            "1. `requirements.md` - High-level requirements\n"
+            "2. `user_stories.md` - Detailed user stories\n"
+            "3. `features/` - Gherkin feature files\n"
+        )
+        written = _persist_phase_artifact(workspace, "user_stories.md", summary)
+        assert written is False
+        assert not (workspace / "user_stories.md").exists()
+
+    def test_accepts_real_content(self, workspace):
+        from llamaindex_crew.workflows.software_dev_workflow import _persist_phase_artifact
+        real_content = (
+            "# User Stories\n\n"
+            "## US-1: Create a task\n"
+            "As a user I want to create a task\n"
+            "so that I can track my work.\n"
+        )
+        written = _persist_phase_artifact(workspace, "user_stories.md", real_content)
+        assert written is True
+        assert (workspace / "user_stories.md").exists()
+
+    def test_skips_if_file_already_exists(self, workspace):
+        from llamaindex_crew.workflows.software_dev_workflow import _persist_phase_artifact
+        (workspace / "user_stories.md").write_text("existing content", encoding="utf-8")
+        written = _persist_phase_artifact(workspace, "user_stories.md", "any content\n\n\n\n")
+        assert written is False
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 13. Gherkin Feature Extraction
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class TestGherkinFeatureExtraction:
+
+    def test_extracts_single_feature(self):
+        from llamaindex_crew.workflows.software_dev_workflow import _extract_gherkin_features
+        text = (
+            "Feature: Create Task\n"
+            "  Scenario: Successfully create a task\n"
+            "    Given I have a valid payload\n"
+            "    When I POST to /tasks\n"
+            "    Then I receive a 201\n"
+        )
+        result = _extract_gherkin_features(text)
+        assert len(result) == 1
+        assert "create_task" in result
+        assert "Scenario:" in result["create_task"]
+
+    def test_extracts_multiple_features(self):
+        from llamaindex_crew.workflows.software_dev_workflow import _extract_gherkin_features
+        text = (
+            "Feature: Create Task\n"
+            "  Scenario: Create\n"
+            "    Given something\n"
+            "    When I do something\n"
+            "    Then it works\n\n"
+            "Feature: Delete Task\n"
+            "  Scenario: Delete\n"
+            "    Given a task exists\n"
+            "    When I DELETE /tasks/1\n"
+            "    Then it is removed\n"
+        )
+        result = _extract_gherkin_features(text)
+        assert len(result) == 2
+        assert "create_task" in result
+        assert "delete_task" in result
+
+    def test_returns_empty_for_no_features(self):
+        from llamaindex_crew.workflows.software_dev_workflow import _extract_gherkin_features
+        result = _extract_gherkin_features("Just some random text with no Gherkin.")
+        assert result == {}
+
+    def test_extracts_from_markdown_with_gherkin_blocks(self):
+        from llamaindex_crew.workflows.software_dev_workflow import _extract_gherkin_features
+        text = (
+            "# User Stories\n\n"
+            "## US-1: Task Management\n\n"
+            "Feature: Task CRUD Operations\n"
+            "  Scenario: Get all tasks\n"
+            "    Given the API is running\n"
+            "    When I GET /tasks\n"
+            "    Then I receive a list of tasks\n\n"
+            "Some other text here.\n"
+        )
+        result = _extract_gherkin_features(text)
+        assert len(result) == 1
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 14. Ensure Feature Files
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class TestEnsureFeatureFiles:
+
+    def test_skips_if_features_already_exist(self, workspace):
+        from llamaindex_crew.workflows.software_dev_workflow import _ensure_feature_files
+        features_dir = workspace / "features"
+        features_dir.mkdir()
+        (features_dir / "existing.feature").write_text("Feature: Existing\n")
+        count = _ensure_feature_files(workspace, "any text")
+        assert count == 1
+
+    def test_extracts_from_user_stories(self, workspace):
+        from llamaindex_crew.workflows.software_dev_workflow import _ensure_feature_files
+        stories = (
+            "Feature: Create Task\n"
+            "  Scenario: Create\n"
+            "    Given valid data\n"
+            "    When I POST /tasks\n"
+            "    Then created\n\n"
+            "Feature: Get Tasks\n"
+            "  Scenario: List\n"
+            "    Given tasks exist\n"
+            "    When I GET /tasks\n"
+            "    Then I see them\n"
+        )
+        count = _ensure_feature_files(workspace, stories)
+        assert count == 2
+        assert (workspace / "features" / "create_task.feature").exists()
+        assert (workspace / "features" / "get_tasks.feature").exists()
+
+    def test_returns_zero_when_no_gherkin(self, workspace):
+        from llamaindex_crew.workflows.software_dev_workflow import _ensure_feature_files
+        count = _ensure_feature_files(workspace, "No Gherkin content here.")
+        assert count == 0
+        assert not (workspace / "features").exists()
+
+    def test_feature_file_content_is_valid_gherkin(self, workspace):
+        from llamaindex_crew.workflows.software_dev_workflow import _ensure_feature_files
+        stories = (
+            "Feature: Update Task\n"
+            "  Scenario: Update title\n"
+            "    Given a task exists with id 1\n"
+            "    When I PUT /tasks/1 with new title\n"
+            "    Then the task title is updated\n"
+        )
+        _ensure_feature_files(workspace, stories)
+        content = (workspace / "features" / "update_task.feature").read_text()
+        assert content.startswith("Feature: Update Task")
+        assert "Scenario:" in content
+        assert "Given" in content

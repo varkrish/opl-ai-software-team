@@ -3,12 +3,14 @@ Development Agent - Implements features using TDD
 Migrated from DevCrew to LlamaIndex agent
 """
 import logging
+from pathlib import Path
 from typing import Optional, List
 from .base_agent import BaseLlamaIndexAgent
 from ..tools import (
     FileWriterTool, FileReaderTool, FileListTool,
     GitInitTool, GitCommitTool, GitStatusTool,
-    PytestRunnerTool, CodeCoverageTool
+    PytestRunnerTool, CodeCoverageTool,
+    create_workspace_file_tools,
 )
 from ..utils.prompt_loader import load_prompt
 
@@ -18,13 +20,19 @@ logger = logging.getLogger(__name__)
 class DevAgent:
     """Development Agent for implementing features using TDD"""
     
-    def __init__(self, custom_backstory: Optional[str] = None, budget_tracker=None):
+    def __init__(
+        self,
+        custom_backstory: Optional[str] = None,
+        budget_tracker=None,
+        workspace_path: Optional[Path] = None,
+    ):
         """
         Initialize Development Agent
-        
+
         Args:
             custom_backstory: Optional custom backstory (from Meta Agent)
             budget_tracker: Optional budget tracker instance
+            workspace_path: When set, file tools write to this path (avoids thread-local/env issues).
         """
         default_backstory = load_prompt(
             'dev_crew/developer_backstory.txt',
@@ -35,18 +43,25 @@ You verify and use the technology stack defined by the Technical Architect."""
         )
         
         backstory = custom_backstory or default_backstory
-        
-        # All development tools
-        tools = [
-            FileWriterTool,
-            FileReaderTool,
-            FileListTool,
-            GitInitTool,
-            GitCommitTool,
-            GitStatusTool,
-            PytestRunnerTool,
-            CodeCoverageTool
-        ]
+
+        if workspace_path is not None:
+            ws_tools = create_workspace_file_tools(Path(workspace_path))
+            # file_writer, file_reader, file_lister, file_deleter, file_line_replacer + git + test
+            tools = list(ws_tools) + [
+                GitInitTool, GitCommitTool, GitStatusTool,
+                PytestRunnerTool, CodeCoverageTool,
+            ]
+        else:
+            tools = [
+                FileWriterTool,
+                FileReaderTool,
+                FileListTool,
+                GitInitTool,
+                GitCommitTool,
+                GitStatusTool,
+                PytestRunnerTool,
+                CodeCoverageTool,
+            ]
         
         self.agent = BaseLlamaIndexAgent(
             role="Developer",

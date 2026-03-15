@@ -234,6 +234,11 @@ def run_job_async(job_id: str, vision: str, job_config: SecretConfig = None, res
         job_workspace = Path(job['workspace_path'])
 
         # Build enriched vision with uploaded reference docs & GitHub repos
+        pl = getattr(job_config, 'prompt_limits', None) if job_config else None
+        max_ref_doc = getattr(pl, 'max_reference_doc_chars', 12_000) if pl else 12_000
+        max_ref_repomix = getattr(pl, 'max_reference_doc_chars_repomix', 200_000) if pl else 200_000
+        max_enriched = getattr(pl, 'max_enriched_vision_chars', 24_000) if pl else 24_000
+
         enriched_vision = vision
         uploaded_docs = job_db.get_job_documents(job_id)
         if uploaded_docs:
@@ -250,8 +255,7 @@ def run_job_async(job_id: str, vision: str, job_config: SecretConfig = None, res
                     continue
                 try:
                     is_repomix = doc['original_name'].startswith('github:')
-                    # Repomix outputs can be large – allow up to 200KB
-                    max_chars = 200_000 if is_repomix else 50_000
+                    max_chars = max_ref_repomix if is_repomix else max_ref_doc
                     content = doc_path.read_text(errors='replace')[:max_chars]
                     if is_repomix:
                         repo_name = doc['original_name'].replace('github:', '')
@@ -279,6 +283,13 @@ def run_job_async(job_id: str, vision: str, job_config: SecretConfig = None, res
                 )
             if all_parts:
                 enriched_vision = f"{vision}\n\n" + "\n\n".join(all_parts)
+                if len(enriched_vision) > max_enriched:
+                    before = len(enriched_vision)
+                    enriched_vision = enriched_vision[:max_enriched] + "\n\n[... reference truncated to fit API limit ...]"
+                    logger.warning(
+                        "Enriched vision truncated from %d to %d chars (max_enriched_vision_chars=%d)",
+                        before, len(enriched_vision), max_enriched,
+                    )
                 logger.info(
                     f"Enriched vision with {len(doc_context_parts)} docs, "
                     f"{len(repo_context_parts)} repos"
@@ -317,11 +328,13 @@ def run_job_async(job_id: str, vision: str, job_config: SecretConfig = None, res
         error_message = str(e)
         error_trace = traceback.format_exc()
         
-        # Log to error file
+        # Log to error file (workspace may be missing; ensure dir exists and swallow log errors)
         try:
             job = job_db.get_job(job_id)
             if job:
-                error_log_path = Path(job['workspace_path']) / "crew_errors.log"
+                ws = Path(job['workspace_path'])
+                ws.mkdir(parents=True, exist_ok=True)
+                error_log_path = ws / "crew_errors.log"
                 with open(error_log_path, 'a') as f:
                     f.write(f"\n{'='*80}\n")
                     f.write(f"JOB FAILED - {datetime.now().isoformat()}\n")
@@ -331,7 +344,7 @@ def run_job_async(job_id: str, vision: str, job_config: SecretConfig = None, res
                     f.write(f"Traceback:\n{error_trace}\n")
                     f.write(f"{'='*80}\n\n")
         except Exception as log_error:
-            logger.error(f"Could not write to error log: {log_error}")
+            logger.error("Could not write to error log: %s", log_error)
         
         # Check if it's quota exhaustion
         is_quota_exhausted = (
@@ -354,7 +367,7 @@ def run_job_async(job_id: str, vision: str, job_config: SecretConfig = None, res
                 'current_phase': 'error'
             })
         else:
-            job_db.mark_failed(job_id, f"{error_message}\n\nFull traceback available in crew_errors.log")
+            job_db.mark_failed(job_id, error_message)
 
 
 @app.route('/')
@@ -924,18 +937,25 @@ def create_job():
     backend_name = 'opl-ai-team'  # default
     mode = 'build'
     
+    metadata = {}
     if request.content_type and 'multipart/form-data' in request.content_type:
         vision = request.form.get('vision', '')
         backend_name = request.form.get('backend', 'opl-ai-team')
         # GitHub URLs can come as repeated form fields
         github_urls = request.form.getlist('github_urls')
         mode = request.form.get('mode', 'build')
+        raw_meta = request.form.get('metadata', '{}')
+        try:
+            metadata = json.loads(raw_meta) if raw_meta else {}
+        except (json.JSONDecodeError, TypeError):
+            metadata = {}
     else:
         data = request.json or {}
         vision = data.get('vision', '')
         backend_name = data.get('backend', 'opl-ai-team')
         github_urls = data.get('github_urls', [])
         mode = data.get('mode', 'build')
+        metadata = data.get('metadata', {})
     
     # Validate backend
     try:
@@ -962,7 +982,7 @@ def create_job():
     job_workspace.mkdir(parents=True, exist_ok=True)
     
     # Create job record in database
-    job_db.create_job(job_id, vision, str(job_workspace))
+    job_db.create_job(job_id, vision, str(job_workspace), metadata=metadata)
     
     # Save any uploaded documents (MTA reports end up here)
     uploaded_docs = []
@@ -1160,7 +1180,7 @@ def list_jobs():
         vision = job['vision']
         if len(vision) > 100:
             vision = vision[:100] + '...'
-        return {
+        summary = {
             'id': job['id'],
             'vision': vision,
             'status': job['status'],
@@ -1169,6 +1189,9 @@ def list_jobs():
             'created_at': job['created_at'],
             'completed_at': job.get('completed_at'),
         }
+        if job.get('metadata'):
+            summary['metadata'] = job['metadata']
+        return summary
 
     return jsonify({
         'jobs': [_summary(j) for j in jobs],

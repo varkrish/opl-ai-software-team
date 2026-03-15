@@ -14,6 +14,42 @@ import re
 
 logger = logging.getLogger(__name__)
 
+VALID_FILE_EXTENSIONS = frozenset({
+    'js', 'jsx', 'ts', 'tsx', 'mjs', 'cjs',
+    'py', 'pyw', 'pyi',
+    'java', 'kt', 'scala', 'groovy', 'gradle',
+    'go', 'rs', 'rb', 'php', 'swift', 'dart',
+    'cpp', 'c', 'h', 'hpp', 'cc', 'cxx',
+    'cs', 'vb', 'fs',
+    'json', 'yaml', 'yml', 'toml', 'ini', 'cfg',
+    'xml', 'xsd', 'xsl', 'wsdl', 'html', 'htm', 'css', 'scss', 'less', 'sass',
+    'md', 'txt', 'rst', 'adoc',
+    'sql', 'graphql', 'gql', 'proto',
+    'sh', 'bash', 'zsh', 'bat', 'ps1', 'cmd',
+    'config', 'conf', 'env', 'properties', 'lock',
+    'gitignore', 'dockerignore', 'editorconfig',
+    'dockerfile', 'containerfile',
+    'podfile', 'xcworkspace',
+    'vue', 'svelte', 'astro',
+    'tf', 'hcl',
+    'crt', 'pem', 'key', 'cer',
+})
+
+
+def _is_valid_file_path(name: str) -> bool:
+    """Return True if *name* looks like a real file path, not a numbered list item or garbage."""
+    if not name or len(name) < 2:
+        return False
+    # Reject purely numeric prefixes like "1.", "2.", "23."
+    stem = name.rsplit('.', 1)[0] if '.' in name else name
+    if stem.isdigit():
+        return False
+    # Must have a recognised extension (the part after the last dot)
+    if '.' not in name:
+        return False
+    ext = name.rsplit('.', 1)[1].lower()
+    return ext in VALID_FILE_EXTENSIONS
+
 
 class TaskStatus(Enum):
     """Task execution status"""
@@ -405,6 +441,27 @@ class TaskManager:
         """Get list of tasks that haven't been created yet"""
         return self._get_tasks_by_status(TaskStatus.REGISTERED)
     
+    def get_registered_file_paths(self) -> set:
+        """Return the set of file_path values from all file_creation tasks."""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT metadata FROM tasks WHERE project_id = ? AND task_type = 'file_creation'",
+            (self.project_id,),
+        )
+        paths: set = set()
+        for (raw,) in cursor.fetchall():
+            if raw:
+                try:
+                    meta = json.loads(raw)
+                    fp = meta.get("file_path", "")
+                    if fp:
+                        paths.add(fp)
+                except Exception:
+                    pass
+        conn.close()
+        return paths
+
     def get_incomplete_tasks(self) -> List[TaskDefinition]:
         """Get list of tasks that were created but not completed"""
         conn = sqlite3.connect(self.db_path)
@@ -617,15 +674,17 @@ class TaskManager:
         file_entries = self._extract_files_with_descriptions(tech_stack_content)
         contexts = self._extract_bounded_contexts(design_spec)
 
-        model_tasks: List[TaskDefinition] = []
-        other_tasks: List[TaskDefinition] = []
+        raw_tasks: List[TaskDefinition] = []
 
         for entry in file_entries:
             fp = entry["path"]
+            basename = Path(fp).name if fp else ""
+            if not _is_valid_file_path(basename):
+                logger.warning("Skipping invalid file path from tech stack: %r", fp)
+                continue
             file_desc = entry.get("description", "")
             task_id = f"file_{self.normalize_file_path_for_task_id(fp)}"
             domain = self._match_domain_context(fp, contexts)
-            is_model = any(kw in fp.lower() for kw in ("model", "schema", "entity"))
 
             task = TaskDefinition(
                 task_id=task_id,
@@ -639,26 +698,87 @@ class TaskManager:
                     "file_description": file_desc,
                 },
             )
+            raw_tasks.append(task)
 
-            if is_model:
-                model_tasks.append(task)
-            else:
-                other_tasks.append(task)
+        # Auto-inject __init__.py for Python projects
+        raw_tasks = self._inject_init_py_tasks(raw_tasks)
 
-        # Register model tasks first
-        for t in model_tasks:
-            self.register_task(t)
+        # Sort tasks by tier so lower-tier files are registered first
+        raw_tasks.sort(key=lambda t: self._classify_file_tier(
+            (t.metadata or {}).get("file_path", "")
+        ))
 
-        # Other tasks depend on their domain's model task
-        for t in other_tasks:
-            deps = self._infer_dependencies(t, model_tasks)
+        registered: List[TaskDefinition] = []
+        for t in raw_tasks:
+            deps = self._infer_dependencies(t, registered)
             t.dependencies = deps
             self.register_task(t)
+            registered.append(t)
 
-        all_tasks = model_tasks + other_tasks
-        logger.info("Registered %d granular tasks (%d models, %d others)",
-                     len(all_tasks), len(model_tasks), len(other_tasks))
+        all_tasks = registered
+        logger.info("Registered %d granular tasks (sorted by %d tiers)",
+                     len(all_tasks), len(set(
+                         self._classify_file_tier((t.metadata or {}).get("file_path", ""))
+                         for t in all_tasks
+                     )))
         return all_tasks
+
+    def _inject_init_py_tasks(self, tasks: List[TaskDefinition]) -> List[TaskDefinition]:
+        """Auto-inject ``__init__.py`` creation tasks for Python package directories.
+
+        Scans registered file paths for ``.py`` files inside sub-directories and
+        ensures every intermediate directory gets an ``__init__.py`` task.
+
+        Skips a directory if a same-named flat module file already exists
+        (e.g. won't create ``app/models/__init__.py`` when ``app/models.py``
+        is already in the task list — that would be a file/package conflict).
+        """
+        py_files = [
+            (t.metadata or {}).get("file_path", "")
+            for t in tasks
+            if (t.metadata or {}).get("file_path", "").endswith(".py")
+        ]
+        if not py_files:
+            return tasks
+
+        existing_paths = {(t.metadata or {}).get("file_path", "") for t in tasks}
+        needed_inits: set = set()
+
+        for fp in py_files:
+            parts = Path(fp).parts
+            for depth in range(1, len(parts)):
+                dir_path = "/".join(parts[:depth])
+                init_path = f"{dir_path}/__init__.py"
+                if init_path in existing_paths:
+                    continue
+                flat_module = f"{dir_path}.py"
+                if flat_module in existing_paths:
+                    logger.info(
+                        "Skipping %s — flat module %s already exists (file/package conflict)",
+                        init_path, flat_module,
+                    )
+                    continue
+                needed_inits.add(init_path)
+
+        for init_path in sorted(needed_inits):
+            task = TaskDefinition(
+                task_id=f"file_{self.normalize_file_path_for_task_id(init_path)}",
+                phase="development",
+                task_type="file_creation",
+                description=f"Create file: {init_path}",
+                source="auto_injected",
+                metadata={
+                    "file_path": init_path,
+                    "domain_context": "",
+                    "file_description": "Python package init (auto-generated)",
+                    "auto_content": "",
+                },
+            )
+            tasks.append(task)
+            existing_paths.add(init_path)
+            logger.info("Auto-injected __init__.py task: %s", init_path)
+
+        return tasks
 
     def _extract_files_from_content(self, content: str) -> List[str]:
         """Extract file paths from a tech_stack markdown string, preserving directory hierarchy."""
@@ -674,52 +794,69 @@ class TaskManager:
 
         The root project directory (first entry ending with ``/``) is stripped
         from paths so files are relative to the project root.
+
+        Uses a two-pass approach: first identifies all code blocks, then only
+        parses those that contain tree characters (├, └, │, ─).  This avoids
+        toggling issues with nested backtick blocks.
         """
-        entries: List[Dict[str, str]] = []
-        in_tree = False
-        dir_stack: List[tuple] = []  # (indent_level, dir_name)
-        root_dir: Optional[str] = None  # first directory in the tree
+        # ── Pass 1: split into regions (code blocks and gaps between them) ─
+        regions: List[str] = []
+        current_lines: List[str] = []
+        in_block = False
 
         for line in content.splitlines():
             stripped = line.strip()
             if stripped.startswith("```"):
-                in_tree = not in_tree
-                dir_stack = []
-                root_dir = None
+                # Save accumulated lines as a region before toggling
+                if current_lines:
+                    regions.append("\n".join(current_lines))
+                    current_lines = []
+                in_block = not in_block
                 continue
-            if not in_tree:
+            current_lines.append(line)
+        if current_lines:
+            regions.append("\n".join(current_lines))
+
+        # ── Pass 2: parse regions that contain tree characters ───────────
+        TREE_CHARS_RE = re.compile(r'[├└│─]')
+        entries: List[Dict[str, str]] = []
+
+        for block in regions:
+            if not TREE_CHARS_RE.search(block):
                 continue
 
-            tree_chars = re.match(r'^([\s│]*[├└─\s]*)', line)
-            indent = len(tree_chars.group(1).replace('│', ' ').replace('├', ' ')
-                         .replace('└', ' ').replace('─', ' ')) if tree_chars else 0
+            dir_stack: List[tuple] = []
+            root_dir: Optional[str] = None
 
-            entry_match = re.search(
-                r'[├└│─\s]*([a-zA-Z0-9_.\-][a-zA-Z0-9_/.\-]*/?)(?:\s+#\s*(.*))?',
-                line,
-            )
-            if not entry_match:
-                continue
+            for line in block.splitlines():
+                tree_chars = re.match(r'^([\s│]*[├└─\s]*)', line)
+                indent = len(tree_chars.group(1).replace('│', ' ').replace('├', ' ')
+                             .replace('└', ' ').replace('─', ' ')) if tree_chars else 0
 
-            name = entry_match.group(1).strip()
-            description = (entry_match.group(2) or "").strip()
+                entry_match = re.search(
+                    r'[├└│─\s]*([a-zA-Z0-9_.\-][a-zA-Z0-9_/.\-]*/?)(?:\s+#\s*(.*))?',
+                    line,
+                )
+                if not entry_match:
+                    continue
 
-            # Pop directories from stack that are at the same or deeper indent level
-            while dir_stack and dir_stack[-1][0] >= indent:
-                dir_stack.pop()
+                name = entry_match.group(1).strip()
+                description = (entry_match.group(2) or "").strip()
 
-            if name.endswith('/'):
-                dir_name = name.rstrip('/')
-                if root_dir is None and not dir_stack:
-                    root_dir = dir_name
-                dir_stack.append((indent, dir_name))
-            elif '.' in name:
-                prefix = "/".join(d[1] for d in dir_stack)
-                full_path = f"{prefix}/{name}" if prefix else name
-                # Strip the root project directory prefix
-                if root_dir and full_path.startswith(root_dir + "/"):
-                    full_path = full_path[len(root_dir) + 1:]
-                entries.append({"path": full_path, "description": description})
+                while dir_stack and dir_stack[-1][0] >= indent:
+                    dir_stack.pop()
+
+                if name.endswith('/'):
+                    dir_name = name.rstrip('/')
+                    if root_dir is None and not dir_stack:
+                        root_dir = dir_name
+                    dir_stack.append((indent, dir_name))
+                elif _is_valid_file_path(name):
+                    prefix = "/".join(d[1] for d in dir_stack)
+                    full_path = f"{prefix}/{name}" if prefix else name
+                    if root_dir and full_path.startswith(root_dir + "/"):
+                        full_path = full_path[len(root_dir) + 1:]
+                    entries.append({"path": full_path, "description": description})
 
         seen: set = set()
         deduped: List[Dict[str, str]] = []
@@ -769,17 +906,109 @@ class TaskManager:
                 best = desc
         return best
 
+    _ENTRYPOINT_NAMES = frozenset({
+        "app", "main", "server", "index", "wsgi", "asgi", "application", "bootstrap",
+    })
+
+    _FRAMEWORK_HINTS: Dict[str, List[str]] = {
+        "flask": [
+            "Create the Flask app instance with Flask(__name__)",
+            "Configure SQLAlchemy: set SQLALCHEMY_DATABASE_URI and call db.init_app(app) or pass app to SQLAlchemy(app)",
+            "Import and register your route module(s) so all @app.route endpoints are loaded",
+            "Add an if __name__ == '__main__' block that calls app.run()",
+        ],
+        "fastapi": [
+            "Create the FastAPI instance with FastAPI()",
+            "Import and include routers via app.include_router()",
+            "Add startup event for database connection if needed",
+        ],
+        "express": [
+            "Create the Express app with express()",
+            "Register middleware (body parser, cors, etc.)",
+            "Import and mount route modules with app.use()",
+            "Call app.listen(port) to start the server",
+        ],
+        "django": [
+            "Ensure INSTALLED_APPS includes all project apps",
+            "Configure DATABASES with the correct engine",
+            "Set ROOT_URLCONF to point to the URL configuration module",
+        ],
+        "spring": [
+            "Annotate the class with @SpringBootApplication",
+            "Include SpringApplication.run(Application.class, args) in main()",
+            "Ensure @ComponentScan picks up all controller/service packages",
+        ],
+    }
+
+    def _get_entrypoint_hints(self, file_path: str, tech_stack: str) -> List[str]:
+        """Return framework-specific wiring hints if the file is an entrypoint."""
+        stem = Path(file_path).stem.lower()
+        if stem not in self._ENTRYPOINT_NAMES:
+            return []
+
+        lower_stack = tech_stack.lower()
+        for fw, hints in self._FRAMEWORK_HINTS.items():
+            if fw in lower_stack:
+                return hints
+        return []
+
+    # Multi-tier file classification for dependency ordering.
+    # Lower tier number = generated earlier.  Files in tier N depend on
+    # all same-domain files in tiers < N.
+    _FILE_TIERS: Dict[int, List[str]] = {
+        0: ["config", "settings", "env", "properties", "application", "db", "database"],
+        1: ["model", "models", "entity", "entities", "schema", "schemas", "migration"],
+        2: ["repository", "repositories", "dao", "store", "manager"],
+        3: ["service", "services", "usecase", "use_case", "business", "logic"],
+        4: ["serializer", "serializers", "dto", "mapper", "converter"],
+        5: ["controller", "controllers", "handler", "handlers", "view", "views",
+            "resource", "resources", "endpoint", "api"],
+        6: ["middleware", "middlewares", "interceptor", "filter", "guard", "auth"],
+        7: ["route", "routes", "router", "urls", "urlconf"],
+        8: ["server", "app", "main", "index", "application", "wsgi", "asgi",
+            "startup", "bootstrap"],
+    }
+
+    @staticmethod
+    def _classify_file_tier(file_path: str) -> int:
+        """Assign a generation-order tier to a file based on its path components."""
+        fp_lower = file_path.lower()
+        stem = Path(file_path).stem.lower()
+        parent = Path(file_path).parent.name.lower() if "/" in file_path else ""
+
+        for tier, keywords in TaskManager._FILE_TIERS.items():
+            for kw in keywords:
+                if kw == stem or kw == parent or kw in fp_lower.split("/"):
+                    return tier
+        # Tests and static assets go last
+        if "test" in fp_lower or "spec" in fp_lower or "mock" in fp_lower:
+            return 9
+        return 5  # default: controller-level
+
     def _infer_dependencies(
-        self, task: TaskDefinition, model_tasks: List[TaskDefinition]
+        self, task: TaskDefinition, earlier_tasks: List[TaskDefinition]
     ) -> List[str]:
-        """Infer which model tasks a view/serializer task depends on."""
+        """Infer which earlier-tier tasks this task depends on.
+
+        Uses multi-tier classification so that, e.g., controllers depend on
+        services which depend on models which depend on config.  Within the
+        same domain, a higher-tier file depends on all lower-tier files whose
+        name stem appears in the file path.
+        """
         fp = (task.metadata or {}).get("file_path", "").lower()
-        deps = []
-        for mt in model_tasks:
-            mt_fp = (mt.metadata or {}).get("file_path", "").lower()
-            mt_stem = Path(mt_fp).stem
-            if mt_stem in fp or mt_stem.replace("_", "") in fp.replace("_", ""):
-                deps.append(mt.task_id)
+        task_tier = self._classify_file_tier(fp)
+        deps: List[str] = []
+
+        for et in earlier_tasks:
+            et_fp = (et.metadata or {}).get("file_path", "").lower()
+            et_tier = self._classify_file_tier(et_fp)
+            if et_tier >= task_tier:
+                continue
+            et_stem = Path(et_fp).stem.replace("_", "")
+            fp_flat = fp.replace("_", "")
+            if et_stem in fp_flat or et_stem.rstrip("s") in fp_flat:
+                deps.append(et.task_id)
+
         return deps
 
     # ── Per-task execution helpers ───────────────────────────────────────────
@@ -841,14 +1070,25 @@ class TaskManager:
         user_stories: str = "",
         existing_files: Optional[Dict[str, str]] = None,
         project_vision: str = "",
+        max_project_vision_chars: Optional[int] = None,
+        interface_contract: Optional[Dict[str, Any]] = None,
     ) -> str:
         """Build a focused prompt for generating a single file.
 
         The prompt includes project vision, domain context, file description,
-        full content of related existing files, cross-file consistency rules,
-        and the tech stack so the LLM produces a complete, contextual
-        implementation.
+        full content of related existing files, an interface contract of
+        module exports, cross-file consistency rules, and the tech stack
+        so the LLM produces a complete, contextual implementation.
         """
+        cap = max_project_vision_chars if max_project_vision_chars is not None else 14_000
+        if project_vision and len(project_vision) > cap:
+            before = len(project_vision)
+            project_vision = project_vision[:cap] + "\n\n[... project vision truncated to fit API limit ...]"
+            logger.warning(
+                "Project vision truncated from %d to %d chars (max_project_vision_chars=%d)",
+                before, len(project_vision), cap,
+            )
+
         meta = task.metadata or {}
         file_path = meta.get("file_path", "unknown")
         domain_ctx = meta.get("domain_context", "")
@@ -881,6 +1121,22 @@ class TaskManager:
             parts.append(f"User stories:\n{user_stories}")
             parts.append("")
 
+        if interface_contract:
+            parts.append("INTERFACE CONTRACT (agreed exports for each module):")
+            for mod_path, exports in interface_contract.items():
+                if isinstance(exports, dict):
+                    named = exports.get("named", exports.get("exports", []))
+                    has_default = exports.get("default", False)
+                    export_str = ", ".join(named) if isinstance(named, list) else str(named)
+                    if has_default:
+                        export_str = f"default export + {export_str}" if export_str else "default export"
+                elif isinstance(exports, list):
+                    export_str = ", ".join(exports)
+                else:
+                    export_str = str(exports)
+                parts.append(f"  {mod_path}: exports [{export_str}]")
+            parts.append("")
+
         if existing_files:
             parts.append("Related files already created (use for imports/references):")
             for fp, content in existing_files.items():
@@ -889,11 +1145,20 @@ class TaskManager:
             parts.append("")
             parts.extend([
                 "CROSS-FILE CONSISTENCY:",
-                "- Only import modules/symbols that exist in the files listed above or in the project file structure.",
+                "- Only import modules/symbols that exist in the interface contract or the files listed above.",
                 "- If you reference a class from another file, match its exact name and attributes.",
                 "- Every local import must resolve to a real file in the project structure.",
+                "- Every imported symbol must actually be exported by the target module.",
                 "",
             ])
+
+        # Framework-specific wiring hints for entrypoint files
+        wiring_hints = self._get_entrypoint_hints(file_path, tech_stack)
+        if wiring_hints:
+            parts.append("ENTRYPOINT WIRING (this file is the application entry point):")
+            for hint in wiring_hints:
+                parts.append(f"- {hint}")
+            parts.append("")
 
         parts.extend([
             "REQUIREMENTS:",

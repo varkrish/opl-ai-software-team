@@ -45,7 +45,8 @@ You create C4 Model diagrams and define component capabilities."""
     def create_design_spec(
         self,
         user_stories: str,
-        context_digest: Optional[str] = None
+        context_digest: Optional[str] = None,
+        vision: Optional[str] = None,
     ) -> str:
         """
         Create design specification based on user stories
@@ -53,6 +54,7 @@ You create C4 Model diagrams and define component capabilities."""
         Args:
             user_stories: User stories content
             context_digest: Optional Project Context Digest
+            vision: Original project vision (anchors design to user intent)
         
         Returns:
             Result message
@@ -70,25 +72,33 @@ Save to design_spec.md"""
         )
         
         # Format prompt
-        if context_digest:
-            prompt = task_prompt.format(user_stories=user_stories, context_digest=context_digest)
-        else:
-            prompt = task_prompt.format(user_stories=user_stories, context_digest="")
+        prompt = task_prompt.format(
+            user_stories=user_stories,
+            context_digest=context_digest or "",
+        )
+
+        if vision:
+            prompt = (
+                f"ORIGINAL PROJECT VISION (this is the ground truth — your design MUST implement this):\n"
+                f"{vision}\n\n{prompt}"
+            )
         
         # Execute agent
         response = self.agent.chat(prompt)
         
         return str(response)
     
-    def run(self, user_stories: str, context_digest: Optional[str] = None) -> str:
+    def run(self, user_stories: str, context_digest: Optional[str] = None,
+            vision: Optional[str] = None) -> str:
         """
         Run the Designer agent workflow
         
         Args:
             user_stories: User stories content
             context_digest: Optional Project Context Digest
+            vision: Original project vision
         
         Returns:
             Result message
         """
-        return self.create_design_spec(user_stories, context_digest)
+        return self.create_design_spec(user_stories, context_digest, vision=vision)

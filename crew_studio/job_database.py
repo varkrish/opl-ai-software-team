@@ -49,9 +49,15 @@ class JobDatabase:
                     workspace_path TEXT NOT NULL,
                     results TEXT,
                     error TEXT,
-                    last_message TEXT DEFAULT '[]'
+                    last_message TEXT DEFAULT '[]',
+                    metadata TEXT DEFAULT '{}'
                 )
             """)
+            # Add metadata column to existing databases
+            try:
+                conn.execute("ALTER TABLE jobs ADD COLUMN metadata TEXT DEFAULT '{}'")
+            except sqlite3.OperationalError:
+                pass  # column already exists
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS documents (
                     id TEXT PRIMARY KEY,
@@ -123,9 +129,11 @@ class JobDatabase:
             conn.execute("CREATE INDEX IF NOT EXISTS idx_refactor_tasks_job ON refactor_tasks(job_id)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_refactor_tasks_status ON refactor_tasks(status)")
     
-    def create_job(self, job_id: str, vision: str, workspace_path: str) -> Dict[str, Any]:
+    def create_job(self, job_id: str, vision: str, workspace_path: str,
+                   metadata: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """Create a new job record."""
         now = datetime.now().isoformat()
+        meta_json = json.dumps(metadata) if metadata else '{}'
         job = {
             'id': job_id,
             'vision': vision,
@@ -138,18 +146,19 @@ class JobDatabase:
             'workspace_path': workspace_path,
             'results': None,
             'error': None,
-            'last_message': '[]'
+            'last_message': '[]',
+            'metadata': metadata or {},
         }
         
         with self._get_conn() as conn:
             conn.execute("""
                 INSERT INTO jobs (id, vision, status, progress, current_phase, 
-                                created_at, workspace_path, last_message)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                                created_at, workspace_path, last_message, metadata)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 job['id'], job['vision'], job['status'], job['progress'],
                 job['current_phase'], job['created_at'], job['workspace_path'],
-                job['last_message']
+                job['last_message'], meta_json
             ))
         
         return job
@@ -719,5 +728,13 @@ class JobDatabase:
                 job['last_message'] = []
         else:
             job['last_message'] = []
+        
+        if job.get('metadata'):
+            try:
+                job['metadata'] = json.loads(job['metadata'])
+            except (json.JSONDecodeError, TypeError):
+                job['metadata'] = {}
+        else:
+            job['metadata'] = {}
         
         return job

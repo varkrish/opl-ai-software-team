@@ -27,6 +27,14 @@ export interface ProgressMessage {
   message: string;
 }
 
+/** External metadata attached to a job (e.g. Jira origin) */
+export interface JobMetadata {
+  jira_issue_key?: string;
+  jira_base_url?: string;
+  jira_issue_url?: string;
+  [key: string]: unknown;
+}
+
 /** Full job record from GET /api/jobs/<id> */
 export interface Job {
   id: string;
@@ -41,6 +49,7 @@ export interface Job {
   results: Record<string, unknown> | null;
   error: string | null;
   last_message: ProgressMessage[];
+  metadata?: JobMetadata;
 }
 
 /** Summary job record from GET /api/jobs list */
@@ -52,6 +61,7 @@ export interface JobSummary {
   current_phase: string;
   created_at: string;
   completed_at: string | null;
+  metadata?: JobMetadata;
 }
 
 /** Paginated jobs list response from GET /api/jobs?page=&page_size= */

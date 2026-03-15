@@ -167,8 +167,9 @@ Structure:
             # Parse JSON
             backstories = json.loads(json_str)
             
-            # Save to file
-            workspace_path = Path(os.getenv("WORKSPACE_PATH", "./workspace"))
+            # Save to file (use thread-local workspace if available)
+            from ..tools.file_tools import _resolve_workspace
+            workspace_path = _resolve_workspace()
             output_file = workspace_path / "agent_prompts.json"
             with open(output_file, 'w', encoding='utf-8') as f:
                 json.dump(backstories, f, indent=2)

@@ -1,6 +1,8 @@
-.PHONY: setup agent-test studio-run studio-dev studio-build studio-test-component studio-test-e2e studio-test-open backend-test-api backend-test-e2e backend-test-e2e-quick backend-test-all refine-test refine-test-e2e reset-db compose-up compose-down compose-logs compose-clean container-build container-build-backend container-build-frontend container-run container-stop help ci-install test-quick test-coverage ci-test-e2e install-docs docs docs-deploy
+.PHONY: setup agent-test studio-run studio-dev studio-build studio-test-component studio-test-e2e studio-test-open backend-test-api backend-test-e2e backend-test-e2e-quick backend-test-all refine-test refine-test-e2e connector-test test-all reset-db compose-up compose-down compose-logs compose-clean container-build container-build-backend container-build-frontend container-run container-stop help ci-install test-quick test-coverage ci-test-e2e install-docs docs docs-deploy
 
 ROOT_DIR := $(shell pwd)
+# Jira connector repo (sibling dir or set CONNECTOR_DIR)
+CONNECTOR_DIR ?= $(shell dirname $(ROOT_DIR))/crew_jira_connector
 
 help:
 	@echo "AI Software Development Crew Monorepo"
@@ -20,6 +22,8 @@ help:
 	@echo "  backend-test-all       - Run all backend tests"
 	@echo "  refine-test            - Run refinement unit + API tests"
 	@echo "  refine-test-e2e        - Run refinement E2E test (slow)"
+	@echo "  connector-test         - Run Jira connector tests (CONNECTOR_DIR)"
+	@echo "  test-all               - Run agent + connector tests"
 	@echo "  reset-db               - Clear job DB and workspace"
 	@echo ""
 	@echo "Container Operations (Podman / Docker):"
@@ -81,6 +85,15 @@ docs-deploy:
 agent-test:
 	@echo "🧪 Running Agent Tests..."
 	cd agent && pytest
+
+# Jira connector tests (run from crew_jira_connector; requires CONNECTOR_DIR with dev deps)
+connector-test:
+	@echo "🧪 Running Jira Connector Tests..."
+	@test -d "$(CONNECTOR_DIR)" || (echo "CONNECTOR_DIR=$(CONNECTOR_DIR) not found. Set CONNECTOR_DIR or clone crew_jira_connector as sibling."; exit 1)
+	cd "$(CONNECTOR_DIR)" && pip install -q -e ".[dev]" && pytest -v --tb=short
+
+# Run agent and connector test suites (use for full suite)
+test-all: agent-test connector-test
 
 studio-run:
 	@echo "🚀 Starting Crew Studio backend (port 8081 to avoid conflict with JBoss on 8080)..."

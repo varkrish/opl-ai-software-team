@@ -10,6 +10,14 @@ data:
   FLASK_ENV: {{ .Values.config.flaskEnv | quote }}
   PYTHONUNBUFFERED: "1"
   CONFIG_FILE_PATH: "/app/config/config.yaml"
+  {{- if .Values.smokeTest.enabled }}
+  SMOKE_TEST_BACKEND: {{ .Values.smokeTest.backend | quote }}
+  {{- if eq .Values.smokeTest.backend "k8s_job" }}
+  SMOKE_TEST_K8S_NAMESPACE: {{ .Values.smokeTest.k8sJob.namespace | default "" | quote }}
+  SMOKE_TEST_K8S_PVC: {{ .Values.smokeTest.k8sJob.pvcName | default "" | quote }}
+  SMOKE_TEST_K8S_TIMEOUT: {{ .Values.smokeTest.k8sJob.timeoutSeconds | default 180 | quote }}
+  {{- end }}
+  {{- end }}
   {{- range $key, $val := .Values.config.extra }}
   {{ $key }}: {{ $val | quote }}
   {{- end }}

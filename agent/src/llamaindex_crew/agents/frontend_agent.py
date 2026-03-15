@@ -3,9 +3,10 @@ Frontend Agent - Implements UI components
 Migrated from FrontendCrew to LlamaIndex agent
 """
 import logging
+from pathlib import Path
 from typing import Optional
 from .base_agent import BaseLlamaIndexAgent
-from ..tools import FileWriterTool, FileReaderTool, FileListTool
+from ..tools import FileWriterTool, FileReaderTool, FileListTool, create_workspace_file_tools
 from ..utils.prompt_loader import load_prompt
 
 logger = logging.getLogger(__name__)
@@ -14,13 +15,19 @@ logger = logging.getLogger(__name__)
 class FrontendAgent:
     """Frontend Agent for implementing UI components"""
     
-    def __init__(self, custom_backstory: Optional[str] = None, budget_tracker=None):
+    def __init__(
+        self,
+        custom_backstory: Optional[str] = None,
+        budget_tracker=None,
+        workspace_path: Optional[Path] = None,
+    ):
         """
         Initialize Frontend Agent
-        
+
         Args:
             custom_backstory: Optional custom backstory (from Meta Agent)
             budget_tracker: Optional budget tracker instance
+            workspace_path: When set, file tools write to this path (avoids thread-local/env issues).
         """
         default_backstory = load_prompt(
             'frontend_crew/frontend_developer_backstory.txt',
@@ -30,12 +37,12 @@ You create reusable components and ensure responsive design."""
         )
         
         backstory = custom_backstory or default_backstory
-        
-        tools = [
-            FileWriterTool,
-            FileReaderTool,
-            FileListTool
-        ]
+
+        if workspace_path is not None:
+            ws_tools = create_workspace_file_tools(Path(workspace_path))
+            tools = [ws_tools[0], ws_tools[1], ws_tools[2]]  # file_writer, file_reader, file_lister
+        else:
+            tools = [FileWriterTool, FileReaderTool, FileListTool]
         
         self.agent = BaseLlamaIndexAgent(
             role="Frontend Developer",
@@ -51,7 +58,8 @@ You create reusable components and ensure responsive design."""
         self,
         design_spec: str,
         tech_stack: str,
-        user_stories: Optional[str] = None
+        user_stories: Optional[str] = None,
+        vision: Optional[str] = None,
     ) -> str:
         """
         Implement UI components based on design specification
@@ -60,6 +68,7 @@ You create reusable components and ensure responsive design."""
             design_spec: Design specification content
             tech_stack: Tech stack content
             user_stories: Optional user stories content
+            vision: Original project vision (anchors implementation to user intent)
         
         Returns:
             Result message
@@ -78,7 +87,6 @@ Save files to src/ directory."""
         )
         
         # Format prompt
-        # The prompt file expects 'requirements' and 'design_specs'
         prompt = task_prompt.format(
             design_spec=design_spec,
             design_specs=design_spec,
@@ -86,13 +94,20 @@ Save files to src/ directory."""
             user_stories=user_stories or "",
             requirements=user_stories or ""
         )
+
+        if vision:
+            prompt = (
+                f"ORIGINAL PROJECT VISION (this is the ground truth — your code MUST implement this):\n"
+                f"{vision}\n\n{prompt}"
+            )
         
         # Execute agent
         response = self.agent.chat(prompt)
         
         return str(response)
     
-    def run(self, design_spec: str, tech_stack: str, user_stories: Optional[str] = None) -> str:
+    def run(self, design_spec: str, tech_stack: str, user_stories: Optional[str] = None,
+            vision: Optional[str] = None) -> str:
         """
         Run the Frontend agent workflow
         
@@ -100,8 +115,9 @@ Save files to src/ directory."""
             design_spec: Design specification content
             tech_stack: Tech stack content
             user_stories: Optional user stories content
+            vision: Original project vision
         
         Returns:
             Result message
         """
-        return self.implement_ui(design_spec, tech_stack, user_stories)
+        return self.implement_ui(design_spec, tech_stack, user_stories, vision=vision)
