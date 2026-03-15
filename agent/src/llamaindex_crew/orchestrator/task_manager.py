@@ -952,6 +952,71 @@ class TaskManager:
                 return hints
         return []
 
+    _ROUTE_FILE_KEYWORDS = {"route", "routes", "router", "controller", "controllers",
+                            "handler", "handlers", "endpoint", "api", "resource", "view", "views"}
+    _CLIENT_FILE_KEYWORDS = {"api", "client", "service", "services", "fetch", "http", "axios"}
+    _FRONTEND_EXTENSIONS = {".js", ".jsx", ".ts", ".tsx"}
+
+    def _format_api_contract_for_file(
+        self, file_path: str, contract: Dict[str, Any],
+    ) -> str:
+        """Format relevant API contract endpoints for inclusion in a file prompt.
+
+        For backend route files: shows which endpoints this file must implement.
+        For frontend client/service files: shows which endpoints are available to call.
+        For other files: returns empty string (contract not relevant).
+        """
+        if not contract or not isinstance(contract, dict):
+            return ""
+
+        paths = contract.get("paths", {})
+        if not paths:
+            return ""
+
+        fp_lower = file_path.lower()
+        stem = Path(file_path).stem.lower()
+        parent = Path(file_path).parent.name.lower() if "/" in file_path else ""
+        ext = Path(file_path).suffix.lower()
+
+        is_route_file = stem in self._ROUTE_FILE_KEYWORDS or parent in self._ROUTE_FILE_KEYWORDS
+        is_frontend_client = ext in self._FRONTEND_EXTENSIONS and (
+            stem in self._CLIENT_FILE_KEYWORDS or parent in self._CLIENT_FILE_KEYWORDS
+        )
+
+        if not is_route_file and not is_frontend_client:
+            return ""
+
+        lines = []
+        if is_route_file:
+            lines.append("API CONTRACT — This file must IMPLEMENT these endpoints:")
+        else:
+            lines.append("API CONTRACT — These backend endpoints are available to call:")
+
+        for path_str, methods in paths.items():
+            if not isinstance(methods, dict):
+                continue
+            for method, details in methods.items():
+                if method.lower() not in {"get", "post", "put", "patch", "delete", "head", "options"}:
+                    continue
+                summary = ""
+                if isinstance(details, dict):
+                    summary = details.get("summary", details.get("description", ""))
+                    op_id = details.get("operationId", "")
+                    if op_id:
+                        summary = f"{op_id}: {summary}" if summary else op_id
+                lines.append(f"  {method.upper()} {path_str}" + (f" — {summary}" if summary else ""))
+
+        schemas = contract.get("components", {}).get("schemas", {})
+        if schemas:
+            lines.append("")
+            lines.append("Schemas (request/response shapes):")
+            for schema_name, schema_def in schemas.items():
+                props = schema_def.get("properties", {}) if isinstance(schema_def, dict) else {}
+                prop_names = ", ".join(props.keys()) if props else "(see contract)"
+                lines.append(f"  {schema_name}: {{{prop_names}}}")
+
+        return "\n".join(lines)
+
     # Multi-tier file classification for dependency ordering.
     # Lower tier number = generated earlier.  Files in tier N depend on
     # all same-domain files in tiers < N.
@@ -1072,13 +1137,15 @@ class TaskManager:
         project_vision: str = "",
         max_project_vision_chars: Optional[int] = None,
         interface_contract: Optional[Dict[str, Any]] = None,
+        api_contract: Optional[Dict[str, Any]] = None,
     ) -> str:
         """Build a focused prompt for generating a single file.
 
         The prompt includes project vision, domain context, file description,
         full content of related existing files, an interface contract of
-        module exports, cross-file consistency rules, and the tech stack
-        so the LLM produces a complete, contextual implementation.
+        module exports, an OpenAPI contract for route/client files,
+        cross-file consistency rules, and the tech stack so the LLM produces
+        a complete, contextual implementation.
         """
         cap = max_project_vision_chars if max_project_vision_chars is not None else 14_000
         if project_vision and len(project_vision) > cap:
@@ -1137,6 +1204,12 @@ class TaskManager:
                 parts.append(f"  {mod_path}: exports [{export_str}]")
             parts.append("")
 
+        if api_contract and isinstance(api_contract, dict):
+            contract_section = self._format_api_contract_for_file(file_path, api_contract)
+            if contract_section:
+                parts.append(contract_section)
+                parts.append("")
+
         if existing_files:
             parts.append("Related files already created (use for imports/references):")
             for fp, content in existing_files.items():
@@ -1152,7 +1225,6 @@ class TaskManager:
                 "",
             ])
 
-        # Framework-specific wiring hints for entrypoint files
         wiring_hints = self._get_entrypoint_hints(file_path, tech_stack)
         if wiring_hints:
             parts.append("ENTRYPOINT WIRING (this file is the application entry point):")

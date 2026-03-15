@@ -265,6 +265,7 @@ class SoftwareDevWorkflow:
         self.user_stories = None
         self.design_spec = None
         self.tech_stack = None
+        self.api_contract = None  # OpenAPI 3.0 dict (populated for fullstack projects)
     
     def _report_progress(self, phase: str, progress: int, message: str = None):
         """Report progress via callback if available"""
@@ -288,6 +289,17 @@ class SoftwareDevWorkflow:
                     logger.info("Resume: loaded %s", path)
                 except Exception as e:
                     logger.warning("Resume: could not load %s: %s", path, e)
+
+        contract_file = self.workspace_path / "api_contract.yaml"
+        if contract_file.exists():
+            try:
+                import yaml
+                self.api_contract = yaml.safe_load(
+                    contract_file.read_text(encoding="utf-8", errors="replace")
+                )
+                logger.info("Resume: loaded api_contract.yaml")
+            except Exception as e:
+                logger.warning("Resume: could not load api_contract.yaml: %s", e)
         backstories_file = self.workspace_path / "agent_backstories.json"
         if backstories_file.exists():
             try:
@@ -573,9 +585,57 @@ class SoftwareDevWorkflow:
             
             # Index tech stack for RAG
             self.document_indexer.index_artifacts(["tech_stack.md"])
+
+            # Second pass: generate API contract for fullstack projects
+            self._generate_api_contract_if_fullstack()
         
         logger.info("✅ Tech Architect phase completed")
         return result
+
+    def _generate_api_contract_if_fullstack(self) -> None:
+        """If the project has both backend and frontend, generate api_contract.yaml."""
+        from ..orchestrator.language_strategies import StrategyRegistry
+
+        if not self.tech_stack:
+            return
+
+        registry = StrategyRegistry()
+        if not registry.is_fullstack(self.tech_stack):
+            logger.info("Not a fullstack project — skipping API contract generation")
+            return
+
+        logger.info("🔗 Fullstack project detected — generating API contract...")
+        self._report_progress('tech_architect', 62, "Generating API contract for frontend-backend integration...")
+
+        if self.tech_architect_agent is None:
+            backstory = self.agent_backstories.get('tech_architect')
+            self.tech_architect_agent = TechArchitectAgent(
+                custom_backstory=backstory,
+                budget_tracker=self.budget_tracker,
+                workspace_path=self.workspace_path,
+            )
+
+        contract_result = self.tech_architect_agent.generate_api_contract(
+            tech_stack=self.tech_stack,
+            design_spec=self.design_spec or "",
+            user_stories=self.user_stories or "",
+        )
+
+        _persist_phase_artifact(self.workspace_path, "api_contract.yaml", contract_result)
+
+        contract_file = self.workspace_path / "api_contract.yaml"
+        if contract_file.exists():
+            try:
+                import yaml
+                self.api_contract = yaml.safe_load(
+                    contract_file.read_text(encoding="utf-8", errors="replace")
+                )
+                self.document_indexer.index_artifacts(["api_contract.yaml"])
+                logger.info("✅ API contract generated with %d paths",
+                            len((self.api_contract or {}).get("paths", {})))
+            except Exception as e:
+                logger.warning("Could not parse api_contract.yaml: %s", e)
+                self.api_contract = None
     
     def run_development_phase(self) -> str:
         """Run Development phase: iterate per-task, generating one file at a time."""
@@ -669,6 +729,7 @@ class SoftwareDevWorkflow:
                     project_vision=self.vision or "",
                     max_project_vision_chars=max_pvc,
                     interface_contract=export_registry if export_registry else None,
+                    api_contract=self.api_contract,
                 )
                 
                 if attempt > 0:
@@ -901,7 +962,26 @@ class SoftwareDevWorkflow:
             for c in conflict_pairs:
                 logger.warning("  - %s vs %s", c["package"], c["flat_module"])
 
-        # 9. Smoke test (best-effort, don't fail the build)
+        # 9. API contract conformance (if contract exists)
+        if self.api_contract and isinstance(self.api_contract, dict):
+            try:
+                contract_result = CodeCompletenessValidator.validate_contract_conformance(
+                    self.workspace_path, self.api_contract, self.tech_stack or ""
+                )
+                report["checks"]["contract_conformance"] = {
+                    "pass": contract_result.get("valid", True),
+                    "missing_endpoints": contract_result.get("missing_endpoints", []),
+                    "extra_endpoints": contract_result.get("extra_endpoints", []),
+                }
+                if not contract_result.get("valid", True):
+                    logger.warning(
+                        "⚠️ API contract conformance: %d missing endpoint(s)",
+                        len(contract_result.get("missing_endpoints", [])),
+                    )
+            except Exception as e:
+                logger.debug("Contract conformance check skipped: %s", e)
+
+        # 10. Smoke test (best-effort, don't fail the build)
         smoke_msg = ""
         smoke_container_log = ""
         try:
@@ -1110,6 +1190,7 @@ class SoftwareDevWorkflow:
                     existing_files=existing_files,
                     project_vision=self.vision or "",
                     max_project_vision_chars=max_pvc,
+                    api_contract=self.api_contract,
                 )
                 try:
                     self.frontend_agent.agent.reset_chat()

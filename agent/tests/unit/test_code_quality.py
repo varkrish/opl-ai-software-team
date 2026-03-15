@@ -1019,47 +1019,51 @@ class TestEnrichedPrompt:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 class TestExportExtraction:
-    """CodeCompletenessValidator extract_export_summary for JS/TS, Python, Java."""
+    """Export extraction tests using language strategies and the delegation API."""
 
     def test_extract_js_named_exports(self, workspace):
-        from llamaindex_crew.orchestrator.code_validator import CodeCompletenessValidator
+        from llamaindex_crew.orchestrator.language_strategies import JavaScriptStrategy
 
+        s = JavaScriptStrategy()
         f = workspace / "utils.ts"
         f.write_text("""
 export function add(a: number, b: number): number { return a + b; }
 export const PI = 3.14;
 export class Calculator {}
 """)
-        result = CodeCompletenessValidator._extract_js_exports(f)
-        assert "add" in result["named"]
-        assert "PI" in result["named"]
-        assert "Calculator" in result["named"]
-        assert result["default"] is False
+        result = s.extract_exports(f)
+        assert "add" in result["exports"]["named"]
+        assert "PI" in result["exports"]["named"]
+        assert "Calculator" in result["exports"]["named"]
+        assert result["exports"]["default"] is False
 
     def test_extract_js_default_export(self, workspace):
-        from llamaindex_crew.orchestrator.code_validator import CodeCompletenessValidator
+        from llamaindex_crew.orchestrator.language_strategies import JavaScriptStrategy
 
+        s = JavaScriptStrategy()
         f = workspace / "App.tsx"
         f.write_text("""
 import React from 'react';
 const App = () => <div>Hello</div>;
 export default App;
 """)
-        result = CodeCompletenessValidator._extract_js_exports(f)
-        assert result["default"] is True
+        result = s.extract_exports(f)
+        assert result["exports"]["default"] is True
 
     def test_extract_js_reexport(self, workspace):
-        from llamaindex_crew.orchestrator.code_validator import CodeCompletenessValidator
+        from llamaindex_crew.orchestrator.language_strategies import JavaScriptStrategy
 
+        s = JavaScriptStrategy()
         f = workspace / "index.ts"
         f.write_text("export { Task, User } from './models';")
-        result = CodeCompletenessValidator._extract_js_exports(f)
-        assert "Task" in result["named"]
-        assert "User" in result["named"]
+        result = s.extract_exports(f)
+        assert "Task" in result["exports"]["named"]
+        assert "User" in result["exports"]["named"]
 
     def test_extract_python_exports_all(self, workspace):
-        from llamaindex_crew.orchestrator.code_validator import CodeCompletenessValidator
+        from llamaindex_crew.orchestrator.language_strategies import PythonStrategy
 
+        s = PythonStrategy()
         f = workspace / "models.py"
         f.write_text("""
 __all__ = ['Task', 'User']
@@ -1073,12 +1077,13 @@ class User:
 class _Internal:
     pass
 """)
-        result = CodeCompletenessValidator._extract_python_exports(f)
-        assert result == ["Task", "User"]
+        result = s.extract_exports(f)
+        assert result["exports"] == ["Task", "User"]
 
     def test_extract_python_exports_fallback(self, workspace):
-        from llamaindex_crew.orchestrator.code_validator import CodeCompletenessValidator
+        from llamaindex_crew.orchestrator.language_strategies import PythonStrategy
 
+        s = PythonStrategy()
         f = workspace / "services.py"
         f.write_text("""
 class TaskService:
@@ -1090,14 +1095,15 @@ def get_all_tasks():
 def _private_helper():
     pass
 """)
-        result = CodeCompletenessValidator._extract_python_exports(f)
-        assert "TaskService" in result
-        assert "get_all_tasks" in result
-        assert "_private_helper" not in result
+        result = s.extract_exports(f)
+        assert "TaskService" in result["exports"]
+        assert "get_all_tasks" in result["exports"]
+        assert "_private_helper" not in result["exports"]
 
     def test_extract_java_public_types(self, workspace):
-        from llamaindex_crew.orchestrator.code_validator import CodeCompletenessValidator
+        from llamaindex_crew.orchestrator.language_strategies import JavaStrategy
 
+        s = JavaStrategy()
         f = workspace / "Task.java"
         f.write_text("""
 package com.example.model;
@@ -1114,10 +1120,10 @@ public enum TaskStatus {
     OPEN, CLOSED
 }
 """)
-        result = CodeCompletenessValidator._extract_java_public_types(f)
-        assert "Task" in result
-        assert "TaskRepository" in result
-        assert "TaskStatus" in result
+        result = s.extract_exports(f)
+        assert "Task" in result["exports"]
+        assert "TaskRepository" in result["exports"]
+        assert "TaskStatus" in result["exports"]
 
     def test_extract_export_summary_dispatches(self, workspace):
         from llamaindex_crew.orchestrator.code_validator import CodeCompletenessValidator
@@ -1195,7 +1201,7 @@ import org.apache.commons.lang3.StringUtils;
 public class App { }
 """)
         result = CodeCompletenessValidator.validate_dependency_manifest(workspace)
-        missing_pkgs = [m["package"] for m in result["missing"] if m["ecosystem"] == "maven"]
+        missing_pkgs = [m["package"] for m in result["missing"] if m["ecosystem"] in ("maven", "java")]
         assert any("apache" in p for p in missing_pkgs)
 
     def test_node_builtins_not_flagged(self, workspace):
@@ -2418,3 +2424,382 @@ class TestEnsureFeatureFiles:
         assert content.startswith("Feature: Update Task")
         assert "Scenario:" in content
         assert "Given" in content
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Language Strategy & Registry Tests
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class TestLanguageStrategyABC:
+    """Verify the abstract interface can be subclassed."""
+
+    def test_python_strategy_has_correct_name_and_extensions(self):
+        from llamaindex_crew.orchestrator.language_strategies import PythonStrategy
+        s = PythonStrategy()
+        assert s.name == "python"
+        assert ".py" in s.extensions
+
+    def test_java_strategy_has_correct_name_and_extensions(self):
+        from llamaindex_crew.orchestrator.language_strategies import JavaStrategy
+        s = JavaStrategy()
+        assert s.name == "java"
+        assert ".java" in s.extensions
+        assert ".kt" in s.extensions
+
+    def test_javascript_strategy_has_correct_name_and_extensions(self):
+        from llamaindex_crew.orchestrator.language_strategies import JavaScriptStrategy
+        s = JavaScriptStrategy()
+        assert s.name == "javascript"
+        assert ".js" in s.extensions
+        assert ".tsx" in s.extensions
+
+
+class TestStrategyRegistry:
+    """Test the registry: built-in strategies, detection, and YAML config."""
+
+    def test_builtin_strategies_registered(self):
+        from llamaindex_crew.orchestrator.language_strategies import StrategyRegistry
+        r = StrategyRegistry()
+        assert r.get_by_name("python") is not None
+        assert r.get_by_name("java") is not None
+        assert r.get_by_name("javascript") is not None
+
+    def test_get_by_extension(self):
+        from llamaindex_crew.orchestrator.language_strategies import StrategyRegistry
+        r = StrategyRegistry()
+        assert r.get_by_extension(".py").name == "python"
+        assert r.get_by_extension(".java").name == "java"
+        assert r.get_by_extension(".ts").name == "javascript"
+
+    def test_get_for_file(self):
+        from llamaindex_crew.orchestrator.language_strategies import StrategyRegistry
+        r = StrategyRegistry()
+        assert r.get_for_file(Path("src/app.py")).name == "python"
+        assert r.get_for_file(Path("src/App.java")).name == "java"
+        assert r.get_for_file(Path("src/index.tsx")).name == "javascript"
+        assert r.get_for_file(Path("README.md")) is None
+
+    def test_detect_from_tech_stack_python(self):
+        from llamaindex_crew.orchestrator.language_strategies import StrategyRegistry
+        r = StrategyRegistry()
+        strategies = r.detect_from_tech_stack("Flask with SQLAlchemy and Python 3.11")
+        names = [s.name for s in strategies]
+        assert "python" in names
+
+    def test_detect_from_tech_stack_java(self):
+        from llamaindex_crew.orchestrator.language_strategies import StrategyRegistry
+        r = StrategyRegistry()
+        strategies = r.detect_from_tech_stack("Spring Boot with Maven and Java 21")
+        names = [s.name for s in strategies]
+        assert "java" in names
+
+    def test_detect_from_tech_stack_fullstack(self):
+        from llamaindex_crew.orchestrator.language_strategies import StrategyRegistry
+        r = StrategyRegistry()
+        strategies = r.detect_from_tech_stack("Flask backend + React frontend")
+        names = [s.name for s in strategies]
+        assert "python" in names
+        assert "javascript" in names
+
+    def test_is_fullstack(self):
+        from llamaindex_crew.orchestrator.language_strategies import StrategyRegistry
+        r = StrategyRegistry()
+        assert r.is_fullstack("Flask backend with React frontend") is True
+        assert r.is_fullstack("Spring Boot with Vue.js") is True
+        assert r.is_fullstack("Flask with SQLAlchemy") is False
+        assert r.is_fullstack("React Native mobile app") is False
+
+    def test_yaml_config_loads(self, workspace):
+        from llamaindex_crew.orchestrator.language_strategies import StrategyRegistry
+        import yaml
+        cfg_dir = workspace / "strategies"
+        cfg_dir.mkdir()
+        config = {
+            "language": "python",
+            "checks": {
+                "entrypoint": {
+                    "frameworks": {
+                        "custom_fw": {
+                            "patterns": [{"regex": r"CustomApp\(\)", "label": "custom init"}],
+                            "files": ["custom_main.py"],
+                        }
+                    }
+                }
+            }
+        }
+        (cfg_dir / "python.yaml").write_text(yaml.dump(config))
+        r = StrategyRegistry(config_dir=cfg_dir)
+        py = r.get_by_name("python")
+        assert "custom_fw" in py._FRAMEWORK_WIRING
+        assert "custom_main.py" in py._ENTRYPOINT_FILENAMES["custom_fw"]
+
+
+class TestPythonStrategySyntax:
+    def test_valid_python(self, workspace):
+        from llamaindex_crew.orchestrator.language_strategies import PythonStrategy
+        s = PythonStrategy()
+        f = workspace / "valid.py"
+        f.write_text("x = 1\nprint(x)\n")
+        r = s.validate_syntax(f)
+        assert r["valid"] is True
+
+    def test_invalid_python(self, workspace):
+        from llamaindex_crew.orchestrator.language_strategies import PythonStrategy
+        s = PythonStrategy()
+        f = workspace / "bad.py"
+        f.write_text("def foo(\n")
+        r = s.validate_syntax(f)
+        assert r["valid"] is False
+        assert "SyntaxError" in r["error"]
+
+
+class TestJavaStrategySyntax:
+    def test_valid_java(self, workspace):
+        from llamaindex_crew.orchestrator.language_strategies import JavaStrategy
+        s = JavaStrategy()
+        f = workspace / "App.java"
+        f.write_text("public class App { public static void main(String[] args) {} }")
+        r = s.validate_syntax(f)
+        assert r["valid"] is True
+
+    def test_unbalanced_braces(self, workspace):
+        from llamaindex_crew.orchestrator.language_strategies import JavaStrategy
+        s = JavaStrategy()
+        f = workspace / "Bad.java"
+        f.write_text("public class Bad { public void foo() { }")
+        r = s.validate_syntax(f)
+        assert r["valid"] is False
+
+
+class TestJavaScriptStrategySyntax:
+    def test_valid_js(self, workspace):
+        from llamaindex_crew.orchestrator.language_strategies import JavaScriptStrategy
+        s = JavaScriptStrategy()
+        f = workspace / "app.js"
+        f.write_text("const x = 1;\nconsole.log(x);\n")
+        r = s.validate_syntax(f)
+        assert r["valid"] is True
+
+
+class TestPythonStrategyContractConformance:
+    def _make_contract(self, paths):
+        return {"paths": paths}
+
+    def test_flask_routes_match_contract(self, workspace):
+        from llamaindex_crew.orchestrator.language_strategies import PythonStrategy
+        s = PythonStrategy()
+        routes = workspace / "routes.py"
+        routes.write_text(
+            "from flask import Flask\n"
+            "app = Flask(__name__)\n"
+            "@app.route('/todos')\ndef list_todos(): pass\n"
+            "@app.route('/todos/<int:id>')\ndef get_todo(id): pass\n"
+        )
+        contract = self._make_contract({
+            "/todos": {"get": {"summary": "List"}},
+            "/todos/{id}": {"get": {"summary": "Get one"}},
+        })
+        result = s.validate_contract_conformance(workspace, contract)
+        assert result["valid"] is True
+        assert result["missing_endpoints"] == []
+
+    def test_missing_endpoint_detected(self, workspace):
+        from llamaindex_crew.orchestrator.language_strategies import PythonStrategy
+        s = PythonStrategy()
+        routes = workspace / "routes.py"
+        routes.write_text(
+            "from flask import Flask\n"
+            "app = Flask(__name__)\n"
+            "@app.route('/todos')\ndef list_todos(): pass\n"
+        )
+        contract = self._make_contract({
+            "/todos": {"get": {"summary": "List"}},
+            "/todos/{id}": {"delete": {"summary": "Delete"}},
+        })
+        result = s.validate_contract_conformance(workspace, contract)
+        assert result["valid"] is False
+        assert len(result["missing_endpoints"]) > 0
+
+
+class TestJavaStrategyContractConformance:
+    def test_spring_controller_matches(self, workspace):
+        from llamaindex_crew.orchestrator.language_strategies import JavaStrategy
+        s = JavaStrategy()
+        ctrl = workspace / "TodoController.java"
+        ctrl.write_text(
+            '@RestController\n'
+            '@RequestMapping("/api/todos")\n'
+            'public class TodoController {\n'
+            '  @GetMapping("/")\n'
+            '  public List<Todo> list() { return null; }\n'
+            '  @PostMapping("/")\n'
+            '  public Todo create() { return null; }\n'
+            '}\n'
+        )
+        contract = {"paths": {
+            "/api/todos/": {"get": {"summary": "List"}, "post": {"summary": "Create"}},
+        }}
+        result = s.validate_contract_conformance(workspace, contract)
+        assert result["valid"] is True
+
+
+class TestJavaStrategyPackageStructure:
+    def test_correct_package_passes(self, workspace):
+        from llamaindex_crew.orchestrator.language_strategies import JavaStrategy
+        s = JavaStrategy()
+        pkg_dir = workspace / "com" / "example"
+        pkg_dir.mkdir(parents=True)
+        f = pkg_dir / "App.java"
+        f.write_text("package com.example;\npublic class App {}\n")
+        result = s.validate_package_structure(workspace)
+        assert result["valid"] is True
+
+    def test_wrong_package_fails(self, workspace):
+        from llamaindex_crew.orchestrator.language_strategies import JavaStrategy
+        s = JavaStrategy()
+        f = workspace / "App.java"
+        f.write_text("package com.example.wrong;\npublic class App {}\n")
+        result = s.validate_package_structure(workspace)
+        assert result["valid"] is False
+
+
+class TestBuildFilePromptWithApiContract:
+    """Test that build_file_prompt injects API contract for route/client files."""
+
+    @pytest.fixture
+    def tm(self, workspace):
+        return TaskManager(workspace / "tasks.db", "test-contract")
+
+    def test_route_file_gets_contract(self, tm):
+        task = TaskDefinition(
+            task_id="t1", phase="development", task_type="file_creation",
+            description="routes", required=True, source="test",
+            metadata={"file_path": "app/routes.py"},
+        )
+        contract = {"paths": {"/todos": {"get": {"summary": "List todos"}}},
+                     "components": {"schemas": {"Todo": {"properties": {"id": {}, "title": {}}}}}}
+        prompt = tm.build_file_prompt(task, api_contract=contract)
+        assert "API CONTRACT" in prompt
+        assert "GET /todos" in prompt
+        assert "Todo" in prompt
+
+    def test_frontend_client_gets_contract(self, tm):
+        task = TaskDefinition(
+            task_id="t2", phase="development", task_type="file_creation",
+            description="api client", required=True, source="test",
+            metadata={"file_path": "src/api/client.ts"},
+        )
+        contract = {"paths": {"/users": {"post": {"summary": "Create user"}}}}
+        prompt = tm.build_file_prompt(task, api_contract=contract)
+        assert "API CONTRACT" in prompt
+        assert "POST /users" in prompt
+
+    def test_model_file_does_not_get_contract(self, tm):
+        task = TaskDefinition(
+            task_id="t3", phase="development", task_type="file_creation",
+            description="model", required=True, source="test",
+            metadata={"file_path": "app/models.py"},
+        )
+        contract = {"paths": {"/todos": {"get": {}}}}
+        prompt = tm.build_file_prompt(task, api_contract=contract)
+        assert "API CONTRACT" not in prompt
+
+    def test_no_contract_passed(self, tm):
+        task = TaskDefinition(
+            task_id="t4", phase="development", task_type="file_creation",
+            description="routes", required=True, source="test",
+            metadata={"file_path": "app/routes.py"},
+        )
+        prompt = tm.build_file_prompt(task, api_contract=None)
+        assert "API CONTRACT" not in prompt
+
+
+class TestCodeValidatorDelegatesToStrategies:
+    """Verify CodeCompletenessValidator backward-compatible methods delegate properly."""
+
+    def test_validate_syntax_python(self, workspace):
+        from llamaindex_crew.orchestrator.code_validator import CodeCompletenessValidator
+        f = workspace / "ok.py"
+        f.write_text("x = 1\n")
+        assert CodeCompletenessValidator.validate_syntax(f)["valid"] is True
+
+    def test_validate_syntax_java(self, workspace):
+        from llamaindex_crew.orchestrator.code_validator import CodeCompletenessValidator
+        f = workspace / "Ok.java"
+        f.write_text("public class Ok {}\n")
+        assert CodeCompletenessValidator.validate_syntax(f)["valid"] is True
+
+    def test_validate_imports_delegates(self, workspace):
+        from llamaindex_crew.orchestrator.code_validator import CodeCompletenessValidator
+        f = workspace / "app.py"
+        f.write_text("import os\nx = 1\n")
+        result = CodeCompletenessValidator.validate_imports(f, workspace)
+        assert result["valid"] is True
+
+    def test_extract_export_summary_delegates(self, workspace):
+        from llamaindex_crew.orchestrator.code_validator import CodeCompletenessValidator
+        f = workspace / "mod.py"
+        f.write_text("def hello(): pass\nclass World: pass\n")
+        result = CodeCompletenessValidator.extract_export_summary(f)
+        assert result["type"] == "python"
+        assert "hello" in result["exports"]
+        assert "World" in result["exports"]
+
+    def test_validate_entrypoint_delegates(self, workspace):
+        from llamaindex_crew.orchestrator.code_validator import CodeCompletenessValidator
+        f = workspace / "app.py"
+        f.write_text(
+            "from flask import Flask\n"
+            "app = Flask(__name__)\n"
+            "from routes import bp\n"
+            "@app.route('/')\ndef index(): pass\n"
+        )
+        result = CodeCompletenessValidator.validate_entrypoint(workspace, "Flask web app")
+        assert result["framework"] == "flask"
+
+    def test_validate_contract_conformance_via_validator(self, workspace):
+        from llamaindex_crew.orchestrator.code_validator import CodeCompletenessValidator
+        f = workspace / "routes.py"
+        f.write_text(
+            "from flask import Flask\napp = Flask(__name__)\n"
+            "@app.route('/items')\ndef items(): pass\n"
+        )
+        contract = {"paths": {"/items": {"get": {}}}}
+        result = CodeCompletenessValidator.validate_contract_conformance(
+            workspace, contract, "Flask"
+        )
+        assert result["valid"] is True
+
+
+class TestStrategyRegistryDetectPrimary:
+    def test_primary_is_first(self):
+        from llamaindex_crew.orchestrator.language_strategies import StrategyRegistry
+        r = StrategyRegistry()
+        primary = r.detect_primary_from_tech_stack("Python Flask API")
+        assert primary is not None
+        assert primary.name == "python"
+
+    def test_none_for_unknown(self):
+        from llamaindex_crew.orchestrator.language_strategies import StrategyRegistry
+        r = StrategyRegistry()
+        assert r.detect_primary_from_tech_stack("COBOL mainframe app") is None
+
+
+class TestOpenAPIPathExtraction:
+    def test_extracts_paths(self):
+        from llamaindex_crew.orchestrator.language_strategies import _extract_openapi_paths
+        contract = {
+            "paths": {
+                "/todos": {"get": {}, "post": {}},
+                "/todos/{id}": {"get": {}, "put": {}, "delete": {}},
+            }
+        }
+        result = _extract_openapi_paths(contract)
+        assert "/todos" in result
+        assert result["/todos"] == {"GET", "POST"}
+        assert result["/todos/{id}"] == {"GET", "PUT", "DELETE"}
+
+    def test_empty_contract(self):
+        from llamaindex_crew.orchestrator.language_strategies import _extract_openapi_paths
+        assert _extract_openapi_paths({}) == {}
+        assert _extract_openapi_paths({"paths": {}}) == {}

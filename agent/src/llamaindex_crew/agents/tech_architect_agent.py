@@ -104,6 +104,39 @@ Save to tech_stack.md"""
         
         return str(response)
     
+    def generate_api_contract(
+        self,
+        tech_stack: str,
+        design_spec: str,
+        user_stories: str = "",
+    ) -> str:
+        """Generate an OpenAPI 3.0 contract for fullstack projects.
+
+        This is a **second pass** after the tech stack is defined.  It reads
+        the design spec, user stories, and tech stack to produce a
+        language-agnostic ``api_contract.yaml`` that both the backend and
+        frontend agents code against.
+
+        Args:
+            tech_stack: Contents of tech_stack.md
+            design_spec: Contents of design_spec.md
+            user_stories: Contents of user_stories.md (optional)
+
+        Returns:
+            Agent response text
+        """
+        prompt = load_prompt(
+            'tech_architect/generate_api_contract_task.txt',
+            fallback=_DEFAULT_CONTRACT_PROMPT,
+        ).format(
+            tech_stack=tech_stack,
+            design_spec=design_spec,
+            user_stories=user_stories or "(none provided)",
+        )
+
+        response = self.agent.chat(prompt)
+        return str(response)
+
     def run(self, design_spec: str, vision: str, context_digest: Optional[str] = None) -> str:
         """
         Run the Tech Architect agent workflow
@@ -117,3 +150,53 @@ Save to tech_stack.md"""
             Result message
         """
         return self.define_tech_stack(design_spec, vision, context_digest)
+
+
+_DEFAULT_CONTRACT_PROMPT = """\
+You are the Technical Architect.  The technology stack and file structure have
+already been decided.  Now you must define the **API contract** between the
+backend and frontend.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+INPUTS (read carefully)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Technology Stack:
+{tech_stack}
+
+Design Specification:
+{design_spec}
+
+User Stories:
+{user_stories}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+TASK — Generate api_contract.yaml
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Write a COMPLETE OpenAPI 3.0 specification that defines every REST endpoint the
+frontend needs to call.  The contract must be **language-agnostic** — it
+describes HTTP paths, methods, request bodies, response schemas, and status
+codes without referencing any framework.
+
+RULES:
+1. Use OpenAPI 3.0.3 format (YAML).
+2. Every entity in the design spec MUST have CRUD endpoints unless the design
+   explicitly says otherwise.
+3. Define ``components/schemas`` for every request and response object.
+4. Include ``operationId`` for each operation (camelCase, e.g. ``listTodos``).
+5. Use path parameters for resource identifiers, e.g. ``/todos/{{id}}``.
+6. Include appropriate HTTP status codes (200, 201, 204, 400, 404, 500).
+7. Add a brief ``description`` to each endpoint.
+8. Do NOT include authentication/authorization details unless the design spec
+   explicitly requires them.
+9. Do NOT reference any framework (Flask, Spring, Express, etc.) — the
+   contract is neutral.
+
+ACTION REQUIRED:
+Call file_writer(file_path='api_contract.yaml', content='<your OpenAPI spec>')
+WAIT FOR: "✅ Successfully wrote to api_contract.yaml"
+
+Your response should be:
+"✅ Created api_contract.yaml with [N] endpoints covering [entities]"
+"""
