@@ -2,7 +2,13 @@
 LlamaIndex-based AI Software Development Crew
 Migration from CrewAI to LlamaIndex framework
 """
+import os
 import logging as _logging
+
+# Disable HuggingFace tokenizers internal parallelism to avoid deadlocks when the
+# process is forked (e.g. Flask reloader, job threads). Must be set before any
+# tokenizer/embedding code runs.
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
 __version__ = "0.1.0"
 

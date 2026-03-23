@@ -509,15 +509,22 @@ class JavaStrategy(LanguageStrategy):
             {"pattern": re.compile(r"@SpringBootApplication"), "label": "@SpringBootApplication"},
             {"pattern": re.compile(r"SpringApplication\.run\s*\("), "label": "SpringApplication.run()"},
         ],
+        "quarkus": [
+            {"pattern": re.compile(r"@(?:ApplicationScoped|Singleton|RequestScoped|QuarkusMain|jakarta\.ws\.rs)"), "label": "Quarkus CDI/JAX-RS annotation"},
+        ],
     }
 
     _ENTRYPOINT_FILENAMES: Dict[str, Set[str]] = {
         "spring": {"Application.java", "App.java"},
+        "quarkus": {"Application.java", "App.java", "TaskApplication.java", "Main.java"},
     }
 
     _ROUTE_PATTERNS: Dict[str, re.Pattern] = {
         "spring": re.compile(
             r"""@(?:Get|Post|Put|Patch|Delete|Request)Mapping\s*\(\s*(?:value\s*=\s*)?['"]([^'"]+)['"]"""
+        ),
+        "quarkus": re.compile(
+            r"""@(?:GET|POST|PUT|PATCH|DELETE)\b|@Path\s*\(\s*['"]([^'"]+)['"]"""
         ),
     }
 
@@ -581,7 +588,7 @@ class JavaStrategy(LanguageStrategy):
     def validate_entrypoint(self, workspace: Path, tech_stack: str) -> Dict[str, Any]:
         lower = tech_stack.lower()
         framework = ""
-        for fw in ("spring",):
+        for fw in ("quarkus", "spring"):
             if fw in lower:
                 framework = fw
                 break
@@ -599,6 +606,16 @@ class JavaStrategy(LanguageStrategy):
                     combined += src.read_text(encoding="utf-8", errors="replace") + "\n"
                 except Exception:
                     pass
+
+        # For Quarkus, also scan all Java files for JAX-RS annotations if no
+        # explicit entrypoint file was found (Quarkus apps often don't need one).
+        if not combined and framework == "quarkus":
+            for src in workspace.rglob("*.java"):
+                if src.is_file():
+                    try:
+                        combined += src.read_text(encoding="utf-8", errors="replace") + "\n"
+                    except Exception:
+                        pass
 
         if not combined:
             return {
@@ -634,11 +651,14 @@ class JavaStrategy(LanguageStrategy):
             return {"valid": True, "missing_endpoints": [], "extra_endpoints": []}
 
         route_pattern = self._ROUTE_PATTERNS.get("spring")
-        if not route_pattern:
+        quarkus_route_pattern = self._ROUTE_PATTERNS.get("quarkus")
+        if not route_pattern and not quarkus_route_pattern:
             return {"valid": True, "missing_endpoints": [], "extra_endpoints": [],
                     "note": "no Java route patterns configured"}
 
-        class_mapping_re = re.compile(r"""@RequestMapping\s*\(\s*(?:value\s*=\s*)?['"]([^'"]+)['"]""")
+        class_mapping_re = re.compile(
+            r"""@(?:RequestMapping|Path)\s*\(\s*(?:value\s*=\s*)?['"]([^'"]+)['"]"""
+        )
 
         found_routes: Set[str] = set()
         for src in workspace.rglob("*"):
@@ -918,30 +938,55 @@ class JavaScriptStrategy(LanguageStrategy):
 
     @staticmethod
     def _load_npm_packages(workspace: Path) -> set:
+        """Load npm package names from all package.json files in the workspace.
+
+        Scans the root and one level of subdirectories (e.g. frontend/,
+        backend/) so that monorepo / multi-project layouts are covered.
+        """
         names: set = set()
-        pkg_file = workspace / "package.json"
-        if pkg_file.exists():
-            try:
-                data = _json.loads(pkg_file.read_text(encoding="utf-8", errors="replace"))
-                for key in ("dependencies", "devDependencies", "peerDependencies"):
-                    if key in data:
-                        names.update(data[key].keys())
-            except Exception:
-                pass
+        candidates = [workspace / "package.json"]
+        for child in workspace.iterdir():
+            if child.is_dir() and not child.name.startswith("."):
+                candidates.append(child / "package.json")
+        for pkg_file in candidates:
+            if pkg_file.exists():
+                try:
+                    data = _json.loads(pkg_file.read_text(encoding="utf-8", errors="replace"))
+                    for key in ("dependencies", "devDependencies", "peerDependencies"):
+                        if key in data:
+                            names.update(data[key].keys())
+                except Exception:
+                    pass
         return names
 
     @staticmethod
     def _js_relative_import_exists(module: str, source_file: Path, workspace: Path) -> bool:
         base_dir = source_file.parent
-        rel_path = module.lstrip("./")
-        candidate_base = base_dir / rel_path
+        candidate_base = (base_dir / module).resolve()
 
-        extensions = ["", ".js", ".jsx", ".ts", ".tsx", "/index.js", "/index.ts", "/index.tsx"]
+        ws_resolved = workspace.resolve()
+        try:
+            candidate_base.relative_to(ws_resolved)
+        except ValueError:
+            return False
+
+        extensions = ["", ".js", ".jsx", ".ts", ".tsx"]
         for ext in extensions:
-            if (candidate_base.parent / (candidate_base.name + ext)).exists():
+            check = candidate_base.parent / (candidate_base.name + ext)
+            if check.exists():
                 return True
-            if ext.startswith("/") and (candidate_base / ext.lstrip("/")).exists():
-                return True
+            # Case-insensitive fallback: scan the directory for a match
+            if check.parent.is_dir():
+                target_name = (candidate_base.name + ext).lower()
+                for sibling in check.parent.iterdir():
+                    if sibling.name.lower() == target_name and sibling.is_file():
+                        return True
+
+        if candidate_base.is_dir():
+            for idx in ("index.js", "index.ts", "index.tsx"):
+                if (candidate_base / idx).exists():
+                    return True
+
         return False
 
 
@@ -1002,7 +1047,7 @@ class StrategyRegistry:
         result: List[LanguageStrategy] = []
 
         py_keywords = {"python", "flask", "fastapi", "django", "sqlalchemy", "pip", "requirements.txt", "pyproject.toml"}
-        java_keywords = {"java", "kotlin", "spring boot", "spring", "maven", "gradle", "pom.xml", "build.gradle"}
+        java_keywords = {"java", "kotlin", "spring boot", "spring", "quarkus", "maven", "gradle", "pom.xml", "build.gradle"}
         js_keywords = {"javascript", "typescript", "node", "express", "react", "vue", "angular", "npm", "package.json", "vite"}
 
         if any(kw in lower for kw in py_keywords):
@@ -1028,7 +1073,7 @@ class StrategyRegistry:
     def is_fullstack(self, tech_stack: str) -> bool:
         """Return True if the tech stack includes both a backend and frontend framework."""
         lower = tech_stack.lower()
-        backend_keywords = {"flask", "fastapi", "django", "express", "spring boot", "spring"}
+        backend_keywords = {"flask", "fastapi", "django", "express", "spring boot", "spring", "quarkus"}
         frontend_keywords = {"react", "vue", "angular", "svelte", "next.js", "nuxt"}
         has_backend = any(kw in lower for kw in backend_keywords)
         has_frontend = any(kw in lower for kw in frontend_keywords)

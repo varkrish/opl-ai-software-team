@@ -2104,34 +2104,54 @@ class TestFileWriterAllowlist:
         from llamaindex_crew.tools.file_tools import (
             file_writer, set_allowed_file_paths,
         )
-        set_allowed_file_paths({"app/models.py", "app/routes.py"})
+        ws = str(workspace)
+        set_allowed_file_paths({"app/models.py", "app/routes.py"}, workspace=ws)
         try:
-            result = file_writer("app/utils.py", "# utils", workspace_path=str(workspace))
+            result = file_writer("app/utils.py", "# utils", workspace_path=ws)
             assert "Rejected" in result
             assert not (workspace / "app/utils.py").exists()
         finally:
-            set_allowed_file_paths(None)
+            set_allowed_file_paths(None, workspace=ws)
 
     def test_allows_registered_path(self, workspace):
         from llamaindex_crew.tools.file_tools import (
             file_writer, set_allowed_file_paths,
         )
-        set_allowed_file_paths({"app/models.py", "app/routes.py"})
+        ws = str(workspace)
+        set_allowed_file_paths({"app/models.py", "app/routes.py"}, workspace=ws)
         try:
-            result = file_writer("app/models.py", "# models", workspace_path=str(workspace))
+            result = file_writer("app/models.py", "# models", workspace_path=ws)
             assert "Successfully" in result
             assert (workspace / "app/models.py").exists()
         finally:
-            set_allowed_file_paths(None)
+            set_allowed_file_paths(None, workspace=ws)
 
     def test_no_guard_when_disabled(self, workspace):
         from llamaindex_crew.tools.file_tools import (
             file_writer, set_allowed_file_paths,
         )
-        set_allowed_file_paths(None)
-        result = file_writer("anything.py", "# ok", workspace_path=str(workspace))
+        ws = str(workspace)
+        set_allowed_file_paths(None, workspace=ws)
+        result = file_writer("anything.py", "# ok", workspace_path=ws)
         assert "Successfully" in result
         assert (workspace / "anything.py").exists()
+
+    def test_different_workspace_not_affected(self, workspace, tmp_path):
+        """Allowlist on workspace A must not block writes to workspace B."""
+        from llamaindex_crew.tools.file_tools import (
+            file_writer, set_allowed_file_paths,
+        )
+        ws_a = str(workspace)
+        ws_b = str(tmp_path / "other_workspace")
+        (tmp_path / "other_workspace").mkdir()
+        set_allowed_file_paths({"allowed.py"}, workspace=ws_a)
+        try:
+            result_blocked = file_writer("secret.py", "# no", workspace_path=ws_a)
+            assert "Rejected" in result_blocked
+            result_ok = file_writer("secret.py", "# yes", workspace_path=ws_b)
+            assert "Successfully" in result_ok
+        finally:
+            set_allowed_file_paths(None, workspace=ws_a)
 
 
 class TestEntrypointHints:
@@ -2309,6 +2329,145 @@ class TestPersistPhaseArtifactSummaryRejection:
         (workspace / "user_stories.md").write_text("existing content", encoding="utf-8")
         written = _persist_phase_artifact(workspace, "user_stories.md", "any content\n\n\n\n")
         assert written is False
+
+    def test_rejects_unable_to_generate_response(self, workspace):
+        from llamaindex_crew.workflows.software_dev_workflow import _persist_phase_artifact
+        error_msg = (
+            "I'm unable to generate the requested files (`user_stories.md`, "
+            "`features/*.feature`) as the system is blocking their creation. "
+            "However, here's the content that would have been written:\n\n"
+            "---\n**requirements.md**\n[Content]\n"
+        )
+        written = _persist_phase_artifact(workspace, "user_stories.md", error_msg)
+        assert written is False
+        assert not (workspace / "user_stories.md").exists()
+
+    def test_rejects_manifest_error_response(self, workspace):
+        from llamaindex_crew.workflows.software_dev_workflow import _persist_phase_artifact
+        error_msg = (
+            "The file 'design_spec.md' cannot be created because it's not "
+            "included in the project file manifest. To resolve this, you "
+            "would need to:\n1. Check the project manifest\n2. Add it\n"
+        )
+        written = _persist_phase_artifact(workspace, "design_spec.md", error_msg)
+        assert written is False
+        assert not (workspace / "design_spec.md").exists()
+
+    def test_rejects_rejected_emoji_response(self, workspace):
+        from llamaindex_crew.workflows.software_dev_workflow import _persist_phase_artifact
+        error_msg = (
+            "❌ Rejected: 'tech_stack.md' is not in the project file manifest. "
+            "Only create files that are listed in the tech stack.\n\n\n\n"
+        )
+        written = _persist_phase_artifact(workspace, "tech_stack.md", error_msg)
+        assert written is False
+
+    def test_rejects_successfully_created_summary(self, workspace):
+        from llamaindex_crew.workflows.software_dev_workflow import _persist_phase_artifact
+        summary = (
+            "The project documentation has been created successfully! "
+            "Here's what was generated:\n"
+            "1. **requirements.md**: High-level requirements\n"
+            "2. **user_stories.md**: User stories with acceptance criteria\n"
+        )
+        written = _persist_phase_artifact(workspace, "requirements.md", summary)
+        assert written is False
+
+    def test_rejects_spec_created_as_summary(self, workspace):
+        from llamaindex_crew.workflows.software_dev_workflow import _persist_phase_artifact
+        summary = (
+            "The design specification has been successfully created as "
+            "`design_spec.md` in your workspace. It includes:\n\n"
+            "- Complexity assessment\n- Bounded contexts\n- Data flow\n"
+        )
+        written = _persist_phase_artifact(workspace, "design_spec.md", summary)
+        assert written is False
+
+    def test_accepts_long_response_with_summary_preamble(self, workspace):
+        """A long response that starts with a summary but contains real content should be saved."""
+        from llamaindex_crew.workflows.software_dev_workflow import _persist_phase_artifact
+        long_response = (
+            "I've created the user stories document. Here are the details:\n\n"
+            "# User Stories for Calculator App\n\n"
+            "## Feature: Addition\n"
+            "### As a user, I want to add two numbers\n"
+            "**Acceptance Criteria:**\n"
+            "- Given I enter 2 and 3\n- When I click add\n- Then I see 5\n\n"
+            "## Feature: Subtraction\n"
+            "### As a user, I want to subtract numbers\n"
+            "**Acceptance Criteria:**\n"
+            "- Given I enter 5 and 3\n- When I click subtract\n- Then I see 2\n\n"
+            "## Feature: Multiplication\n"
+            "### As a user, I want to multiply numbers\n"
+            "**Acceptance Criteria:**\n"
+            "- Given I enter 4 and 3\n- When I click multiply\n- Then I see 12\n\n"
+            "## Feature: Division\n"
+            "### As a user, I want to divide numbers\n"
+            "**Acceptance Criteria:**\n"
+            "- Given I enter 10 and 2\n- When I click divide\n- Then I see 5\n"
+        )
+        written = _persist_phase_artifact(workspace, "user_stories.md", long_response)
+        assert written is True
+        content = (workspace / "user_stories.md").read_text()
+        assert content.startswith("# User Stories")
+
+    def test_rejects_short_all_files_created_summary(self, workspace):
+        """A short 'All files created' summary with just a file list should be rejected."""
+        from llamaindex_crew.workflows.software_dev_workflow import _persist_phase_artifact
+        summary = (
+            "All required files have been successfully created:\n"
+            "1. requirements.md (high-level requirements)\n"
+            "2. user_stories.md (detailed user stories)\n"
+            "3. features/addition.feature\n"
+            "4. features/subtraction.feature\n\n"
+            "The files contain proper Gherkin syntax.\n"
+        )
+        written = _persist_phase_artifact(workspace, "user_stories.md", summary)
+        assert written is False
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 12b. YAML Block Extraction from Agent Responses
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class TestExtractYamlBlock:
+
+    def test_extracts_yaml_from_fenced_block(self):
+        from llamaindex_crew.workflows.software_dev_workflow import _extract_yaml_block
+        text = (
+            "Here is the API contract:\n\n"
+            "```yaml\n"
+            "openapi: '3.0.3'\n"
+            "info:\n"
+            "  title: Test API\n"
+            "  version: '1.0'\n"
+            "paths:\n"
+            "  /todos:\n"
+            "    get:\n"
+            "      operationId: listTodos\n"
+            "```\n\n"
+            "I've created the contract above."
+        )
+        result = _extract_yaml_block(text)
+        assert result is not None
+        assert "openapi:" in result
+        assert "paths:" in result
+        assert "```" not in result
+
+    def test_extracts_yml_variant(self):
+        from llamaindex_crew.workflows.software_dev_workflow import _extract_yaml_block
+        text = "```yml\nopenapi: '3.0.3'\ninfo:\n  title: X\n  version: '1'\npaths: {}\n```"
+        result = _extract_yaml_block(text)
+        assert result is not None
+        assert "openapi:" in result
+
+    def test_returns_none_for_no_yaml(self):
+        from llamaindex_crew.workflows.software_dev_workflow import _extract_yaml_block
+        assert _extract_yaml_block("No YAML here, just text.") is None
+
+    def test_returns_none_for_too_short_yaml(self):
+        from llamaindex_crew.workflows.software_dev_workflow import _extract_yaml_block
+        assert _extract_yaml_block("```yaml\nfoo: bar\n```") is None
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -2803,3 +2962,336 @@ class TestOpenAPIPathExtraction:
         from llamaindex_crew.orchestrator.language_strategies import _extract_openapi_paths
         assert _extract_openapi_paths({}) == {}
         assert _extract_openapi_paths({"paths": {}}) == {}
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Module system detection and per-file prompt enrichment
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class TestDetectModuleSystem:
+    """_detect_module_system must extract the declared module system from tech_stack text."""
+
+    def test_detects_es_modules(self):
+        from llamaindex_crew.orchestrator.task_manager import TaskManager
+        ts = "## Core Technology\n**Module System**: ES modules\n**Framework**: Vanilla JS"
+        assert TaskManager._detect_module_system(ts) == "esm"
+
+    def test_detects_commonjs(self):
+        from llamaindex_crew.orchestrator.task_manager import TaskManager
+        ts = "## Core\n**Module System**: CommonJS\n**Runtime**: Node.js"
+        assert TaskManager._detect_module_system(ts) == "commonjs"
+
+    def test_detects_script_tags(self):
+        from llamaindex_crew.orchestrator.task_manager import TaskManager
+        ts = "## Core\n**Module System**: Script tags\nNo modules."
+        assert TaskManager._detect_module_system(ts) == "script-tags"
+
+    def test_returns_none_for_python(self):
+        from llamaindex_crew.orchestrator.task_manager import TaskManager
+        ts = "## Core\n**Language**: Python 3.10+\n**Framework**: Flask"
+        assert TaskManager._detect_module_system(ts) is None
+
+    def test_returns_none_for_empty(self):
+        from llamaindex_crew.orchestrator.task_manager import TaskManager
+        assert TaskManager._detect_module_system("") is None
+        assert TaskManager._detect_module_system(None) is None
+
+    def test_case_insensitive(self):
+        from llamaindex_crew.orchestrator.task_manager import TaskManager
+        ts = "Module system: es modules"
+        assert TaskManager._detect_module_system(ts) == "esm"
+
+
+class TestBuildFilePromptModuleSystem:
+    """build_file_prompt must include a MODULE SYSTEM section for JS/TS files."""
+
+    def test_includes_module_system_for_js_file(self, task_mgr):
+        t = TaskDefinition(
+            task_id="app_js",
+            phase="development",
+            task_type="file_creation",
+            description="Create app.js",
+            metadata={"file_path": "src/app.js"},
+        )
+        task_mgr.register_task(t)
+        prompt = task_mgr.build_file_prompt(
+            t, tech_stack="**Module System**: ES modules\n**Framework**: Vanilla JS"
+        )
+        assert "MODULE SYSTEM" in prompt
+        assert "import" in prompt.lower() and "export" in prompt.lower()
+
+    def test_includes_commonjs_for_js_file(self, task_mgr):
+        t = TaskDefinition(
+            task_id="server_js",
+            phase="development",
+            task_type="file_creation",
+            description="Create server.js",
+            metadata={"file_path": "server.js"},
+        )
+        task_mgr.register_task(t)
+        prompt = task_mgr.build_file_prompt(
+            t, tech_stack="**Module System**: CommonJS\n**Runtime**: Node.js"
+        )
+        assert "MODULE SYSTEM" in prompt
+        assert "require" in prompt.lower()
+
+    def test_no_module_system_for_python_file(self, task_mgr):
+        t = TaskDefinition(
+            task_id="app_py",
+            phase="development",
+            task_type="file_creation",
+            description="Create app.py",
+            metadata={"file_path": "src/app.py"},
+        )
+        task_mgr.register_task(t)
+        prompt = task_mgr.build_file_prompt(
+            t, tech_stack="**Language**: Python 3.10+\n**Framework**: Flask"
+        )
+        assert "MODULE SYSTEM" not in prompt
+
+    def test_no_module_system_when_not_declared(self, task_mgr):
+        t = TaskDefinition(
+            task_id="index_js",
+            phase="development",
+            task_type="file_creation",
+            description="Create index.js",
+            metadata={"file_path": "src/index.js"},
+        )
+        task_mgr.register_task(t)
+        prompt = task_mgr.build_file_prompt(
+            t, tech_stack="Vanilla HTML + CSS + JS"
+        )
+        assert "MODULE SYSTEM" not in prompt
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Module system consistency validation
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class TestModuleConsistencyValidator:
+    """validate_module_consistency must detect mixed module systems in JS/TS projects."""
+
+    def test_all_esm_passes(self, workspace):
+        from llamaindex_crew.orchestrator.code_validator import CodeCompletenessValidator
+        (workspace / "app.js").write_text("import { x } from './utils.js';\nexport default x;\n")
+        (workspace / "utils.js").write_text("export const x = 1;\n")
+        result = CodeCompletenessValidator.validate_module_consistency(workspace)
+        assert result["valid"] is True
+
+    def test_all_cjs_passes(self, workspace):
+        from llamaindex_crew.orchestrator.code_validator import CodeCompletenessValidator
+        (workspace / "app.js").write_text("const x = require('./utils');\nmodule.exports = x;\n")
+        (workspace / "utils.js").write_text("module.exports = { x: 1 };\n")
+        result = CodeCompletenessValidator.validate_module_consistency(workspace)
+        assert result["valid"] is True
+
+    def test_mixed_esm_cjs_fails(self, workspace):
+        from llamaindex_crew.orchestrator.code_validator import CodeCompletenessValidator
+        (workspace / "app.js").write_text("import { x } from './utils.js';\nexport default x;\n")
+        (workspace / "server.js").write_text("const express = require('express');\nmodule.exports = express();\n")
+        result = CodeCompletenessValidator.validate_module_consistency(workspace)
+        assert result["valid"] is False
+        assert len(result.get("conflicts", [])) >= 1
+
+    def test_single_file_mixed_detected(self, workspace):
+        from llamaindex_crew.orchestrator.code_validator import CodeCompletenessValidator
+        (workspace / "app.js").write_text(
+            "import { x } from './utils.js';\n"
+            "const y = require('./other');\n"
+            "module.exports = { x, y };\n"
+        )
+        result = CodeCompletenessValidator.validate_module_consistency(workspace)
+        assert result["valid"] is False
+
+    def test_no_js_files_passes(self, workspace):
+        from llamaindex_crew.orchestrator.code_validator import CodeCompletenessValidator
+        (workspace / "app.py").write_text("import os\nprint(os.getcwd())\n")
+        result = CodeCompletenessValidator.validate_module_consistency(workspace)
+        assert result["valid"] is True
+
+    def test_test_files_excluded(self, workspace):
+        """Test files may legitimately use different module system (Jest transforms)."""
+        from llamaindex_crew.orchestrator.code_validator import CodeCompletenessValidator
+        (workspace / "app.js").write_text("import { x } from './utils.js';\nexport default x;\n")
+        (workspace / "utils.js").write_text("export const x = 1;\n")
+        tests_dir = workspace / "tests"
+        tests_dir.mkdir()
+        (tests_dir / "app.test.js").write_text("const { x } = require('../app');\ntest('x', () => {});\n")
+        result = CodeCompletenessValidator.validate_module_consistency(workspace)
+        assert result["valid"] is True
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Fix 1: JS relative import resolution handles ../ paths correctly
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class TestJsRelativeImportResolution:
+    """_js_relative_import_exists must properly resolve ../ parent-dir traversals."""
+
+    def test_dot_dot_slash_resolves_correctly(self, workspace):
+        """../utils/foo.js from components/bar.js should find utils/foo.js."""
+        from llamaindex_crew.orchestrator.language_strategies import JavaScriptStrategy
+        (workspace / "src" / "utils").mkdir(parents=True)
+        (workspace / "src" / "components").mkdir(parents=True)
+        (workspace / "src" / "utils" / "data.js").write_text("export const x = 1;\n")
+        source_file = workspace / "src" / "components" / "card.js"
+        source_file.write_text("import { x } from '../utils/data.js';\n")
+        assert JavaScriptStrategy._js_relative_import_exists(
+            "../utils/data.js", source_file, workspace
+        ) is True
+
+    def test_dot_dot_slash_invalid_path_detected(self, workspace):
+        """../../utils/foo.js from components/bar.js should NOT resolve (too many ..)."""
+        from llamaindex_crew.orchestrator.language_strategies import JavaScriptStrategy
+        (workspace / "src" / "utils").mkdir(parents=True)
+        (workspace / "src" / "components").mkdir(parents=True)
+        (workspace / "src" / "utils" / "data.js").write_text("export const x = 1;\n")
+        source_file = workspace / "src" / "components" / "card.js"
+        source_file.write_text("")
+        assert JavaScriptStrategy._js_relative_import_exists(
+            "../../utils/data.js", source_file, workspace
+        ) is False
+
+    def test_dot_slash_still_works(self, workspace):
+        """./utils/data.js from src/app.js should work."""
+        from llamaindex_crew.orchestrator.language_strategies import JavaScriptStrategy
+        (workspace / "src" / "utils").mkdir(parents=True)
+        (workspace / "src" / "utils" / "data.js").write_text("export const x = 1;\n")
+        source_file = workspace / "src" / "app.js"
+        source_file.write_text("")
+        assert JavaScriptStrategy._js_relative_import_exists(
+            "./utils/data.js", source_file, workspace
+        ) is True
+
+    def test_dot_dot_without_extension_tries_js(self, workspace):
+        """../utils/data (no .js) should find ../utils/data.js."""
+        from llamaindex_crew.orchestrator.language_strategies import JavaScriptStrategy
+        (workspace / "src" / "utils").mkdir(parents=True)
+        (workspace / "src" / "components").mkdir(parents=True)
+        (workspace / "src" / "utils" / "data.js").write_text("export const x = 1;\n")
+        source_file = workspace / "src" / "components" / "card.js"
+        source_file.write_text("")
+        assert JavaScriptStrategy._js_relative_import_exists(
+            "../utils/data", source_file, workspace
+        ) is True
+
+    def test_validate_imports_dot_dot_not_broken(self, workspace):
+        """Full validate_imports must NOT flag valid ../ imports as broken."""
+        from llamaindex_crew.orchestrator.language_strategies import JavaScriptStrategy
+        (workspace / "src" / "utils").mkdir(parents=True)
+        (workspace / "src" / "components").mkdir(parents=True)
+        (workspace / "src" / "utils" / "data.js").write_text("export const x = 1;\n")
+        comp = workspace / "src" / "components" / "card.js"
+        comp.write_text("import { x } from '../utils/data.js';\nexport default x;\n")
+        result = JavaScriptStrategy().validate_imports(comp, workspace)
+        assert result["valid"] is True, f"valid ../utils/data.js flagged as broken: {result}"
+
+    def test_case_insensitive_fallback(self, workspace):
+        """Import 'Loader.js' should match file 'loader.js' (case-insensitive)."""
+        from llamaindex_crew.orchestrator.language_strategies import JavaScriptStrategy
+        (workspace / "src" / "components").mkdir(parents=True)
+        (workspace / "src" / "components" / "loader.js").write_text("export default class Loader {}\n")
+        source_file = workspace / "src" / "app.js"
+        source_file.write_text("")
+        assert JavaScriptStrategy._js_relative_import_exists(
+            "./components/Loader.js", source_file, workspace
+        ) is True
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Fix 3: Test-specific guidance in build_file_prompt
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class TestBuildFilePromptTestGuidance:
+    """build_file_prompt must include test framework rules when creating test files."""
+
+    def test_test_file_includes_framework_guidance(self, task_mgr):
+        t = TaskDefinition(
+            task_id="test_app",
+            phase="development",
+            task_type="file_creation",
+            description="Create test file for app",
+            metadata={"file_path": "tests/app.test.js"},
+        )
+        task_mgr.register_task(t)
+        prompt = task_mgr.build_file_prompt(
+            t, tech_stack="**Framework**: Vanilla HTML5 + CSS3 + JavaScript\n**Testing**: Jest with jsdom\n**Module System**: ES modules"
+        )
+        assert "jest" in prompt.lower() or "Jest" in prompt
+        assert "@testing-library/react" in prompt or "testing-library" in prompt.lower()
+
+    def test_react_test_file_allows_testing_library(self, task_mgr):
+        t = TaskDefinition(
+            task_id="test_comp",
+            phase="development",
+            task_type="file_creation",
+            description="Create test file for component",
+            metadata={"file_path": "src/__tests__/App.test.tsx"},
+        )
+        task_mgr.register_task(t)
+        prompt = task_mgr.build_file_prompt(
+            t, tech_stack="**Framework**: React\n**Testing**: Jest + @testing-library/react"
+        )
+        assert "@testing-library/react" in prompt
+
+    def test_non_test_file_no_test_guidance(self, task_mgr):
+        t = TaskDefinition(
+            task_id="app_js",
+            phase="development",
+            task_type="file_creation",
+            description="Create app.js",
+            metadata={"file_path": "src/app.js"},
+        )
+        task_mgr.register_task(t)
+        prompt = task_mgr.build_file_prompt(
+            t, tech_stack="**Framework**: Vanilla HTML5 + CSS3 + JavaScript\n**Testing**: Jest with jsdom"
+        )
+        assert "TEST IMPORTS" not in prompt
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Fix 4: Project file tree in build_file_prompt
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class TestBuildFilePromptFileTree:
+    """build_file_prompt must include a project file tree from registered tasks."""
+
+    def test_prompt_includes_file_tree(self, task_mgr):
+        files = [
+            ("t1", "public/index.html"),
+            ("t2", "public/js/app.js"),
+            ("t3", "public/js/utils/data.js"),
+            ("t4", "tests/app.test.js"),
+        ]
+        for tid, fp in files:
+            t = TaskDefinition(
+                task_id=tid, phase="development", task_type="file_creation",
+                description=f"Create {fp}", metadata={"file_path": fp},
+            )
+            task_mgr.register_task(t)
+        target = TaskDefinition(
+            task_id="t4", phase="development", task_type="file_creation",
+            description="Create tests/app.test.js",
+            metadata={"file_path": "tests/app.test.js"},
+        )
+        prompt = task_mgr.build_file_prompt(target, tech_stack="Vanilla JS")
+        assert "PROJECT FILE TREE" in prompt or "FILE TREE" in prompt
+        assert "public/js/app.js" in prompt
+        assert "public/js/utils/data.js" in prompt
+
+    def test_file_tree_includes_all_registered_paths(self, task_mgr):
+        files = ["src/main.py", "src/models.py", "src/routes.py", "tests/test_main.py"]
+        for i, fp in enumerate(files):
+            t = TaskDefinition(
+                task_id=f"t{i}", phase="development", task_type="file_creation",
+                description=f"Create {fp}", metadata={"file_path": fp},
+            )
+            task_mgr.register_task(t)
+        target = TaskDefinition(
+            task_id="t3", phase="development", task_type="file_creation",
+            description="Create tests/test_main.py",
+            metadata={"file_path": "tests/test_main.py"},
+        )
+        prompt = task_mgr.build_file_prompt(target, tech_stack="Python Flask")
+        for fp in files:
+            assert fp in prompt, f"File tree should contain {fp}"

@@ -14,7 +14,7 @@ IMPORTANT: If design specifications are provided, carefully review them and inco
 
 Your analysis should include:
 1. User stories in the format: "As a [role], I want [feature], so that [benefit]"
-2. Gherkin scenarios for each user story using Given-When-Then format
+2. Gherkin scenarios for each user story using Given-When-Then format from business or user point of view. 
 3. Clear acceptance criteria
 4. Technical requirements and constraints
 5. Non-functional requirements (performance, security, scalability)

@@ -40,6 +40,13 @@ NOTE:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 STEP 2: CREATE ALL IMPLEMENTATION FILES
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+**CRITICAL: Module system rule — read tech_stack.md to find the declared module system.**
+- If tech_stack.md says "ES modules" → use `import`/`export` in ALL .js/.ts files. Do NOT use `require()` or `module.exports`.
+  HTML files must load scripts with `<script type="module">`.
+- If tech_stack.md says "CommonJS" → use `require()`/`module.exports` in ALL .js files. Do NOT use `import`/`export`.
+- If tech_stack.md says "Script tags" → do NOT use `import`/`export` or `require()`. Use global variables and plain `<script src="...">` tags.
+Every file in the project MUST follow the same module system. Do NOT mix them.
+
 **THIS IS MANDATORY - CREATE EVERY FILE IN TECH_STACK**
 
 For EACH implementation file in tech_stack.md:
@@ -61,6 +68,15 @@ DO NOT skip any implementation file!
 STEP 3: CREATE ALL TEST FILES
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 **THIS IS MANDATORY - CREATE EVERY TEST FILE**
+
+**CRITICAL: Test import matching rule — read tech_stack.md to determine the testing framework.**
+- Vanilla HTML/CSS/JS → use Jest + jsdom. Do NOT import React or @testing-library/react.
+- React / React Native → use Jest + @testing-library/react
+- Angular → use Jasmine + Karma
+- Python → use pytest
+- Java → use JUnit 5
+Test files must ONLY import libraries that are listed in the tech stack. Do NOT import
+React, Angular, Vue, or any framework that the project does not use.
 
 For EACH implementation file, create its test file:
 1. Call file_writer(file_path='src/tests/test_<module>.<ext>', content='...')

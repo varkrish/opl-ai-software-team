@@ -2,6 +2,7 @@
 Task Manager with SQLite persistence
 Manages task registry, creation tracking, and execution validation
 """
+import os
 import sqlite3
 import json
 import logging
@@ -11,6 +12,7 @@ from typing import List, Dict, Optional, Any
 from pathlib import Path
 from datetime import datetime
 import re
+from ..tools.file_tools import _sanitize_java_package_path
 
 logger = logging.getLogger(__name__)
 
@@ -295,7 +297,7 @@ class TaskManager:
                     ]
                     
                     if '/' in file_path:
-                        expected_files.append(file_path)
+                        expected_files.append(_sanitize_java_package_path(file_path))
                     elif any(file_path.endswith(root) or file_path == root for root in root_level_files):
                         expected_files.append(file_path)
                     elif file_path.startswith(('android', 'ios', 'node_modules')):
@@ -461,6 +463,28 @@ class TaskManager:
                     pass
         conn.close()
         return paths
+
+    def get_task_by_id(self, task_id: str) -> Optional[TaskDefinition]:
+        """Return a single task by its ID, or None if not found."""
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT task_id, phase, task_type, description, required, source, status, metadata "
+            "FROM tasks WHERE task_id = ?", (task_id,),
+        ).fetchone()
+        conn.close()
+        if row is None:
+            return None
+        return TaskDefinition(
+            task_id=row["task_id"],
+            phase=row["phase"],
+            task_type=row["task_type"],
+            description=row["description"] or "",
+            required=bool(row["required"]),
+            source=row["source"],
+            status=row["status"],
+            metadata=json.loads(row["metadata"]) if row["metadata"] else None,
+        )
 
     def get_incomplete_tasks(self) -> List[TaskDefinition]:
         """Get list of tasks that were created but not completed"""
@@ -671,6 +695,14 @@ class TaskManager:
         Model/core files are registered before views/controllers to express dependencies.
         File descriptions from tree comments are preserved in metadata.
         """
+        conn = sqlite3.connect(self.db_path)
+        conn.execute(
+            "DELETE FROM tasks WHERE project_id = ? AND task_type = 'file_creation' AND source IN ('tech_stack', ?)",
+            (self.project_id, str(self.db_path.parent / "tech_stack.md")),
+        )
+        conn.commit()
+        conn.close()
+
         file_entries = self._extract_files_with_descriptions(tech_stack_content)
         contexts = self._extract_bounded_contexts(design_spec)
 
@@ -906,6 +938,92 @@ class TaskManager:
                 best = desc
         return best
 
+    _JS_TS_EXTENSIONS = frozenset({".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs"})
+
+    @staticmethod
+    def _detect_module_system(tech_stack: Optional[str]) -> Optional[str]:
+        """Extract the declared module system from tech stack text.
+
+        Returns "esm", "commonjs", "script-tags", or None.
+        """
+        if not tech_stack:
+            return None
+        lower = tech_stack.lower()
+        if "es modules" in lower or "es module" in lower:
+            return "esm"
+        if "commonjs" in lower:
+            return "commonjs"
+        if "script tag" in lower or "script-tag" in lower:
+            return "script-tags"
+        return None
+
+    _MODULE_SYSTEM_INSTRUCTIONS: Dict[str, List[str]] = {
+        "esm": [
+            "MODULE SYSTEM: This project uses ES modules.",
+            "- Use `import`/`export` syntax in ALL .js/.ts files.",
+            "- Do NOT use `require()` or `module.exports`.",
+            "- HTML files must load scripts with `<script type=\"module\">`.",
+        ],
+        "commonjs": [
+            "MODULE SYSTEM: This project uses CommonJS.",
+            "- Use `require()` and `module.exports` in ALL .js files.",
+            "- Do NOT use `import`/`export` statements.",
+        ],
+        "script-tags": [
+            "MODULE SYSTEM: This project uses plain script tags (no module system).",
+            "- Do NOT use `import`/`export` or `require()`.",
+            "- Expose functionality via global variables or the `window` object.",
+            "- HTML loads scripts with plain `<script src=\"...\">` tags.",
+        ],
+    }
+
+    _TEST_FILE_RE = re.compile(
+        r"(?:test[_/]|[_/]test\.|\.test\.|\.spec\.|__tests__|tests/|spec/)",
+        re.IGNORECASE,
+    )
+
+    _TEST_FRAMEWORK_RULES: Dict[str, List[str]] = {
+        "vanilla-jest": [
+            "TEST IMPORTS — This is a Vanilla JS project tested with Jest + jsdom.",
+            "- Import from 'jest' globals (describe, test, expect) — do NOT import them.",
+            "- Do NOT import @testing-library/react, @testing-library/jest-dom, or any React packages.",
+            "- Do NOT import 'cheerio', 'enzyme', or other React/Vue/Angular test utilities.",
+            "- You MAY import '@jest/globals' if needed for TypeScript types.",
+            "- Import source modules using correct relative paths from the PROJECT FILE TREE below.",
+        ],
+        "react-jest": [
+            "TEST IMPORTS — This is a React project tested with Jest.",
+            "- You MAY import from @testing-library/react, @testing-library/jest-dom.",
+            "- Import React components using correct relative paths from the PROJECT FILE TREE below.",
+        ],
+        "pytest": [
+            "TEST IMPORTS — This is a Python project tested with pytest.",
+            "- Import pytest. Do NOT import unittest unless the tech stack specifies it.",
+            "- Import source modules using correct relative paths.",
+        ],
+        "junit": [
+            "TEST IMPORTS — This is a Java project tested with JUnit.",
+            "- Import org.junit.jupiter.api.* for JUnit 5.",
+            "- Import source classes using the correct package paths.",
+        ],
+    }
+
+    @staticmethod
+    def _detect_test_framework(tech_stack: str) -> Optional[str]:
+        """Identify the test framework from tech stack text."""
+        if not tech_stack:
+            return None
+        lower = tech_stack.lower()
+        if "react" in lower and ("jest" in lower or "testing-library" in lower):
+            return "react-jest"
+        if "jest" in lower or "jsdom" in lower:
+            return "vanilla-jest"
+        if "pytest" in lower:
+            return "pytest"
+        if "junit" in lower:
+            return "junit"
+        return None
+
     _ENTRYPOINT_NAMES = frozenset({
         "app", "main", "server", "index", "wsgi", "asgi", "application", "bootstrap",
     })
@@ -951,6 +1069,66 @@ class TaskManager:
             if fw in lower_stack:
                 return hints
         return []
+
+    _IMPORTABLE_EXTENSIONS = frozenset({
+        ".py", ".js", ".jsx", ".ts", ".tsx", ".java", ".kt",
+    })
+
+    @staticmethod
+    def _compute_import_hints(file_path: str, all_paths: List[str], max_hints: int = 15) -> List[str]:
+        """Compute correct relative import paths from *file_path* to other project files.
+
+        Returns lines like:
+          ``import { Foo } from './controllers/FooController'  (for backend/src/server.ts -> backend/src/controllers/FooController.ts)``
+        """
+        from pathlib import PurePosixPath
+
+        file_p = PurePosixPath(file_path)
+        file_dir = file_p.parent
+        file_ext = file_p.suffix.lower()
+
+        importable_exts = {".py", ".js", ".jsx", ".ts", ".tsx", ".java", ".kt"}
+        if file_ext not in importable_exts:
+            return []
+
+        hints: List[str] = []
+        for target in all_paths:
+            target_p = PurePosixPath(target)
+            if target == file_path or target_p.suffix.lower() not in importable_exts:
+                continue
+            # Skip test files from hints (they don't get imported by source)
+            target_name = target_p.name.lower()
+            if ("test" in target_name or "spec" in target_name) and file_ext != ".test.ts":
+                continue
+
+            try:
+                rel = PurePosixPath(os.path.relpath(str(target_p), str(file_dir)))
+            except ValueError:
+                continue
+
+            rel_str = str(rel)
+            if not rel_str.startswith("."):
+                rel_str = "./" + rel_str
+
+            if file_ext in {".ts", ".tsx", ".js", ".jsx"}:
+                # Strip extension for JS/TS imports
+                for ext in (".ts", ".tsx", ".js", ".jsx"):
+                    if rel_str.endswith(ext):
+                        rel_str = rel_str[: -len(ext)]
+                        break
+                hints.append(f"{target_p.stem}: import from '{rel_str}'")
+            elif file_ext == ".py":
+                module_path = rel_str.replace("/", ".").replace("\\", ".")
+                if module_path.endswith(".py"):
+                    module_path = module_path[:-3]
+                if module_path.startswith(".."):
+                    continue
+                hints.append(f"{target_p.stem}: from {module_path} import ...")
+
+            if len(hints) >= max_hints:
+                break
+
+        return hints
 
     _ROUTE_FILE_KEYWORDS = {"route", "routes", "router", "controller", "controllers",
                             "handler", "handlers", "endpoint", "api", "resource", "view", "views"}
@@ -1078,8 +1256,14 @@ class TaskManager:
 
     # ── Per-task execution helpers ───────────────────────────────────────────
 
-    def get_next_actionable_task(self, phase: str) -> Optional[TaskDefinition]:
-        """Return the next registered task whose dependencies are all completed/skipped."""
+    def get_next_actionable_task(
+        self, phase: str, *, task_id_filter: Optional[set] = None,
+    ) -> Optional[TaskDefinition]:
+        """Return the next registered task whose dependencies are all completed/skipped.
+
+        If *task_id_filter* is given, only tasks whose ID is in the set are
+        considered.  This allows parallel workers to process disjoint subsets.
+        """
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
@@ -1093,6 +1277,10 @@ class TaskManager:
 
         for row in cursor.fetchall():
             task_id = row["task_id"]
+
+            if task_id_filter is not None and task_id not in task_id_filter:
+                continue
+
             # Check dependencies
             dep_rows = conn.execute(
                 "SELECT depends_on_task_id FROM task_dependencies WHERE task_id = ?",
@@ -1232,6 +1420,33 @@ class TaskManager:
                 parts.append(f"- {hint}")
             parts.append("")
 
+        file_ext = Path(file_path).suffix.lower()
+        if file_ext in self._JS_TS_EXTENSIONS:
+            mod_sys = self._detect_module_system(tech_stack)
+            if mod_sys and mod_sys in self._MODULE_SYSTEM_INSTRUCTIONS:
+                parts.extend(self._MODULE_SYSTEM_INSTRUCTIONS[mod_sys])
+                parts.append("")
+
+        if self._TEST_FILE_RE.search(file_path):
+            fw = self._detect_test_framework(tech_stack)
+            if fw and fw in self._TEST_FRAMEWORK_RULES:
+                parts.extend(self._TEST_FRAMEWORK_RULES[fw])
+                parts.append("")
+
+        all_paths = sorted(self.get_registered_file_paths())
+        if all_paths:
+            parts.append("PROJECT FILE TREE (use these exact paths for imports):")
+            for p in all_paths:
+                parts.append(f"  {p}")
+            parts.append("")
+
+        import_hints = self._compute_import_hints(file_path, all_paths)
+        if import_hints:
+            parts.append("RESOLVED IMPORT PATHS (use these exact paths when importing project files):")
+            for hint in import_hints:
+                parts.append(f"  {hint}")
+            parts.append("")
+
         parts.extend([
             "REQUIREMENTS:",
             "- Write COMPLETE implementation code, not stubs or placeholders.",
@@ -1240,6 +1455,24 @@ class TaskManager:
             "- Follow the patterns and conventions of the tech stack.",
             f"- You MUST call file_writer(file_path='{file_path}', content='...') to create the file.",
             "- Do NOT just show code in your response; you must use the file_writer tool.",
+            f"- ONLY create the file `{file_path}`. Do NOT output or create any other files.",
+            "- Do NOT include test code or other file content in your response text.",
+            "  Test files will be created in a separate task.",
+            "",
+            "CRITICAL — DO NOT HALLUCINATE APIs:",
+            "- Only use APIs that actually exist in the libraries you import.",
+            "- Do NOT invent methods, props, or classes. If unsure, use the simplest documented API.",
+            "- Do NOT mix frameworks. If tech stack says Express, do NOT use NestJS decorators",
+            "  (@Injectable, @InjectRepository, @Module). If tech stack says React, do NOT import Angular.",
+            "- Express: create the app with `const app = express()`, NOT `express.createServer()`.",
+            "- React: `import React from 'react'` (default export), NOT `import { React } from 'react'`.",
+            "- Redux Toolkit: use `configureStore` from '@reduxjs/toolkit', NOT `createStore`.",
+            "  `useSelector`/`useDispatch` come from 'react-redux', NOT '@reduxjs/toolkit'.",
+            "- react-leaflet: `MapContainer`, `TileLayer` come from 'react-leaflet', NOT 'leaflet'.",
+            "- TypeORM: import decorators (`Entity`, `Column`, `PrimaryGeneratedColumn`) directly",
+            "  from 'typeorm', NOT via `declare module`.",
+            "- Every npm/pip import MUST correspond to a real, published package.",
+            "  Do NOT import packages from other ecosystems (e.g., no `flask` in a Node.js project).",
             "",
             f"Create `{file_path}` now.",
         ])

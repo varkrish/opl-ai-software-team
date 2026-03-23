@@ -27,10 +27,11 @@ help:
 	@echo "  reset-db               - Clear job DB and workspace"
 	@echo ""
 	@echo "Container Operations (Podman / Docker):"
-	@echo "  compose-up      - Build & start full stack (frontend + backend)"
+	@echo "  compose-up      - Build & start full stack (backend + frontend + validator)"
 	@echo "  compose-down    - Stop all services"
 	@echo "  compose-logs    - Follow all service logs"
 	@echo "  compose-clean   - Stop & remove volumes"
+	@echo "  compose-validate - Trigger a job and run validator E2E test"
 	@echo "  container-build - Build all images individually"
 	@echo ""
 	@echo "OpenShift / Helm Deployment:"
@@ -170,22 +171,27 @@ reset-db:
 
 # Podman / Docker Compose Operations
 compose-up:
-	@echo "🚀 Starting full stack (backend + frontend)..."
-	podman-compose up -d --build
-	@echo "✅ Frontend: http://localhost:3000"
-	@echo "✅ Backend:  http://localhost:8080"
+	@echo "🚀 Starting full stack (backend + frontend + validator)..."
+	podman compose up -d --build
+	@echo "✅ Frontend:  http://localhost:$${FRONTEND_PORT:-3000}"
+	@echo "✅ Backend:   http://localhost:$${BACKEND_PORT:-8080}"
+	@echo "✅ Validator: http://localhost:$${VALIDATOR_PORT:-8180}"
 
 compose-down:
 	@echo "🛑 Stopping all services..."
-	podman-compose down
+	podman compose down
 
 compose-logs:
 	@echo "📋 Following logs..."
-	podman-compose logs -f
+	podman compose logs -f
 
 compose-clean:
 	@echo "🗑️  Stopping and removing volumes..."
-	podman-compose down -v
+	podman compose down -v
+
+compose-validate:
+	@echo "🧪 Triggering job and running validation..."
+	./scripts/trigger-and-validate.sh
 
 # Individual container builds
 container-build-backend:
@@ -196,18 +202,23 @@ container-build-frontend:
 	@echo "🏗️  Building frontend image..."
 	podman build -t crew-frontend:latest -f Containerfile.frontend .
 
-container-build: container-build-backend container-build-frontend
+container-build-validator:
+	@echo "🏗️  Building validator image..."
+	podman build -t crew-validator:latest -f Containerfile $${VALIDATOR_DIR:-../crew-code-validator}
+
+container-build: container-build-backend container-build-frontend container-build-validator
 	@echo "✅ All images built"
 
 container-run:
 	@echo "🚀 Starting full stack..."
-	podman-compose up -d
-	@echo "✅ Frontend: http://localhost:3000"
-	@echo "✅ Backend:  http://localhost:8080"
+	podman compose up -d
+	@echo "✅ Frontend:  http://localhost:$${FRONTEND_PORT:-3000}"
+	@echo "✅ Backend:   http://localhost:$${BACKEND_PORT:-8080}"
+	@echo "✅ Validator: http://localhost:$${VALIDATOR_PORT:-8180}"
 
 container-stop:
 	@echo "🛑 Stopping all services..."
-	podman-compose down
+	podman compose down
 
 # ── OpenShift / Helm ─────────────────────────────────────────────────────────
 HELM_CHART   := deploy/helm/crew-studio

@@ -2,9 +2,13 @@
 Web GUI Application for AI Software Development Crew (LlamaIndex)
 Provides a web interface to trigger and monitor build jobs
 """
+# Disable HuggingFace tokenizers parallelism before any agent/embedding code runs,
+# to avoid "process got forked after parallelism has already been used" deadlock warnings.
+import os
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+
 import fnmatch
 import io
-import os
 import json
 import uuid
 import zipfile
@@ -107,7 +111,7 @@ def resume_pending_jobs(override_job_db=None):
         phase = j.get("current_phase", "")
 
         # Skip terminal states
-        if status in ("completed", "failed", "cancelled", "quota_exhausted"):
+        if status in ("completed", "partially_completed", "failed", "cancelled", "quota_exhausted"):
             continue
 
         # Skip jobs waiting for explicit user trigger
@@ -305,24 +309,38 @@ def run_job_async(job_id: str, vision: str, job_config: SecretConfig = None, res
             resume=resume,
         )
 
-        # Mark job as completed or failed based on task validation
+        # Mark job as completed, partially_completed, or failed
         task_validation = results.get('task_validation', {})
-        if task_validation.get('valid', True):  # If valid or no validation info
-            job_db.mark_completed(job_id, {
-                'status': results.get('status', 'completed'),
-                'budget_report': results.get('budget_report', {}),
-                'task_validation': task_validation
-            })
+        validation_report = results.get('validation_report', {})
+        task_ok = task_validation.get('valid', True)
+        val_ok = validation_report.get('overall') != 'ISSUES_FOUND'
+        result_payload = {
+            'status': results.get('status', 'completed'),
+            'budget_report': results.get('budget_report', {}),
+            'task_validation': task_validation,
+            'validation_report': validation_report,
+        }
+
+        if task_ok and val_ok:
+            job_db.mark_completed(job_id, result_payload)
+        elif task_ok and not val_ok:
+            failed_issues = job_db.get_failed_validation_issues(job_id)
+            warning = f"Code validation: {len(failed_issues)} unresolved issue(s)"
+            job_db.mark_partially_completed(job_id, warning=warning, results=result_payload)
         else:
-            # Task validation failed - mark as failed
-            incomplete_tasks = task_validation.get('incomplete_tasks', [])
-            failed_tasks = task_validation.get('failed_tasks', [])
-            error_msg = f"Task validation failed.\n"
-            if incomplete_tasks:
-                error_msg += f"\nIncomplete tasks ({len(incomplete_tasks)}): {', '.join(incomplete_tasks)}"
-            if failed_tasks:
-                error_msg += f"\nFailed tasks ({len(failed_tasks)}): {', '.join(failed_tasks)}"
-            job_db.mark_failed(job_id, error_msg)
+            error_parts = []
+            if not task_ok:
+                incomplete_tasks = task_validation.get('incomplete_tasks', [])
+                failed_tasks = task_validation.get('failed_tasks', [])
+                error_parts.append("Task validation failed")
+                if incomplete_tasks:
+                    error_parts.append(f"Incomplete tasks ({len(incomplete_tasks)}): {', '.join(incomplete_tasks)}")
+                if failed_tasks:
+                    error_parts.append(f"Failed tasks ({len(failed_tasks)}): {', '.join(failed_tasks)}")
+            if not val_ok:
+                failed_issues = job_db.get_failed_validation_issues(job_id)
+                error_parts.append(f"Code validation: {len(failed_issues)} unresolved issue(s)")
+            job_db.mark_failed(job_id, ". ".join(error_parts))
         
     except Exception as e:
         error_message = str(e)
@@ -1177,12 +1195,9 @@ def list_jobs():
     )
 
     def _summary(job):
-        vision = job['vision']
-        if len(vision) > 100:
-            vision = vision[:100] + '...'
         summary = {
             'id': job['id'],
-            'vision': vision,
+            'vision': job['vision'],
             'status': job['status'],
             'progress': job['progress'],
             'current_phase': job['current_phase'],
@@ -1444,6 +1459,24 @@ def get_job_budget(job_id):
         return jsonify(report)
     except Exception as e:
         return jsonify({'error': f'Could not get budget: {str(e)}'}), 500
+
+
+@app.route('/api/jobs/<job_id>/validation', methods=['GET'])
+def get_job_validation(job_id):
+    """Get validation issues and summary for a job."""
+    job = job_db.get_job(job_id)
+    if not job:
+        return jsonify({'error': 'Job not found'}), 404
+    issues = job_db.get_validation_issues(job_id)
+    total = len(issues)
+    fixed = sum(1 for i in issues if i['status'] == 'completed')
+    failed = sum(1 for i in issues if i['status'] == 'failed')
+    pending = total - fixed - failed
+    return jsonify({
+        'issues': issues,
+        'summary': {'total': total, 'fixed': fixed, 'failed': failed, 'pending': pending},
+        'overall': 'PASS' if failed == 0 and pending == 0 else 'ISSUES_FOUND',
+    })
 
 
 @app.route('/api/stats', methods=['GET'])

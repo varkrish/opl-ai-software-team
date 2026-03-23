@@ -1,5 +1,5 @@
 # ─────────────────────────────────────────────────────────────────────────────
-# AI Crew Studio — Full Stack Compose
+# AI Crew Studio — Full Stack Compose (Backend + Frontend + Validator)
 # Compatible with: podman-compose, docker compose
 #
 # Usage:
@@ -7,8 +7,12 @@
 #   podman compose up -d --build      # rebuild and start
 #   podman compose logs -f            # follow all logs
 #   podman compose logs -f backend    # follow backend only
+#   podman compose logs -f validator  # follow validator only
 #   podman compose down               # stop all
 #   podman compose down -v            # stop + remove volumes
+#
+# E2E test:
+#   ./scripts/trigger-and-validate.sh  # create job → wait → validate
 #
 # Environment:
 #   Copy .env.example → .env and fill in API keys before starting.
@@ -26,27 +30,54 @@ services:
     volumes:
       - crew-workspace:/app/workspace
       - crew-data:/app/data
-      # Mount config/secrets (read-only)
       - ${CONFIG_FILE:-./config.yaml}:/app/config.yaml:ro,z
     environment:
-      # LLM provider (OpenAI, Anthropic, Ollama, OpenRouter)
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
       - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
-      # Ollama (if using local models)
       - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://ollama:11434}
-      # App config
       - WORKSPACE_PATH=/app/workspace
       - JOB_DB_PATH=/app/data/crew_jobs.db
       - CONFIG_FILE_PATH=/app/config.yaml
       - FLASK_ENV=${FLASK_ENV:-production}
       - PYTHONUNBUFFERED=1
+      # Validator sidecar — backend can call this after code generation
+      - VALIDATOR_URL=http://validator:8080
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://localhost:8080/health"]
       interval: 30s
       timeout: 10s
       start_period: 60s
+      retries: 3
+    depends_on:
+      validator:
+        condition: service_healthy
+    networks:
+      - crew-net
+
+  # ── Code Validator: FastAPI Microservice ─────────────────────────────────
+  # Language-agnostic validation (syntax, imports, entrypoint, contract).
+  # Reads generated code from the shared workspace volume (read-only).
+  validator:
+    container_name: crew-validator
+    build:
+      context: ${VALIDATOR_DIR:-../crew-code-validator}
+      dockerfile: Containerfile
+    ports:
+      - "${VALIDATOR_PORT:-8180}:8080"
+    volumes:
+      # Same workspace PVC as backend — validator reads what agents write
+      - crew-workspace:/app/workspace:ro
+    environment:
+      - LOG_LEVEL=${VALIDATOR_LOG_LEVEL:-INFO}
+      - PYTHONUNBUFFERED=1
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/healthz')"]
+      interval: 10s
+      timeout: 5s
+      start_period: 5s
       retries: 3
     networks:
       - crew-net
@@ -82,14 +113,6 @@ services:
   #     - "${OLLAMA_PORT:-11434}:11434"
   #   volumes:
   #     - ollama-models:/root/.ollama
-  #   # GPU passthrough (NVIDIA)
-  #   # deploy:
-  #   #   resources:
-  #   #     reservations:
-  #   #       devices:
-  #   #         - driver: nvidia
-  #   #           count: all
-  #   #           capabilities: [gpu]
   #   restart: unless-stopped
   #   healthcheck:
   #     test: ["CMD", "curl", "-sf", "http://localhost:11434/api/tags"]

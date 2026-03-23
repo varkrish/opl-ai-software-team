@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
+import { useParams, useNavigate, Link } from 'react-router-dom';
 import {
   PageSection,
   Title,
@@ -92,7 +92,7 @@ const Migration: React.FC = () => {
   const [expandedIssue, setExpandedIssue] = useState<string | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
   const [fileChanges, setFileChanges] = useState<MigrationChanges | null>(null);
-  const [changesExpanded, setChangesExpanded] = useState(false);
+  const [changesExpanded, setChangesExpanded] = useState(true);
   const [retryingFailed, setRetryingFailed] = useState(false);
   const [progressAccordionExpanded, setProgressAccordionExpanded] = useState(false);
 
@@ -118,13 +118,14 @@ const Migration: React.FC = () => {
   const pollStatus = useCallback(async () => {
     if (!jobId) return;
     try {
-      // Fetch both job details and migration status
-      const [jobData, migData] = await Promise.all([
+      const [jobData, migData, changesData] = await Promise.all([
         getJob(jobId).catch(() => null),
         getMigrationStatus(jobId).catch(() => null),
+        getMigrationChanges(jobId).catch(() => null),
       ]);
       
       if (jobData) setJob(jobData);
+      if (changesData) setFileChanges(changesData);
       
       if (migData) {
         setIssues(migData.issues);
@@ -136,17 +137,12 @@ const Migration: React.FC = () => {
         }
       }
       
-      // Keep polling if parsing/analyzing or if migration is active
       const currentPhase = jobData?.current_phase ?? '';
+      const jobRunning = jobData?.status === 'running' || jobData?.status === 'queued';
       if (currentPhase === 'parsing' || currentPhase === 'analyzing' || 
-          (migData && (migData.summary.running > 0 || migData.summary.pending > 0))) {
+          (migData && (migData.summary.running > 0 || migData.summary.pending > 0)) ||
+          jobRunning) {
         setMigrating(true);
-      }
-
-      // Fetch file changes when migration is complete
-      if (migData && migData.summary.total > 0 &&
-          migData.summary.pending === 0 && migData.summary.running === 0) {
-        getMigrationChanges(jobId!).then(setFileChanges).catch(() => {});
       }
     } catch {
       // Silently fail polling
@@ -160,9 +156,11 @@ const Migration: React.FC = () => {
     Promise.all([
       getJob(jobId).catch(() => null),
       getMigrationStatus(jobId).catch(() => null),
-    ]).then(([jobData, migData]) => {
+      getMigrationChanges(jobId).catch(() => null),
+    ]).then(([jobData, migData, changesData]) => {
       if (cancelled) return;
       if (jobData) setJob(jobData);
+      if (changesData) setFileChanges(changesData);
       if (migData) {
         setIssues(migData.issues);
         setSummary(migData.summary);
@@ -170,16 +168,12 @@ const Migration: React.FC = () => {
           setMigrating(true);
         }
       }
-      // Start polling if parsing/analyzing or if migration is active
       const currentPhase = jobData?.current_phase ?? '';
+      const jobRunning = jobData?.status === 'running' || jobData?.status === 'queued';
       if (currentPhase === 'parsing' || currentPhase === 'analyzing' || 
-          (migData && (migData.summary.running > 0 || migData.summary.pending > 0))) {
+          (migData && (migData.summary.running > 0 || migData.summary.pending > 0)) ||
+          jobRunning) {
         setMigrating(true);
-      }
-      // Fetch file changes if migration is complete
-      if (migData && migData.summary.total > 0 &&
-          migData.summary.pending === 0 && migData.summary.running === 0) {
-        getMigrationChanges(jobId!).then(c => { if (!cancelled) setFileChanges(c); }).catch(() => {});
       }
     }).finally(() => {
       if (!cancelled) setDetailLoading(false);
@@ -471,6 +465,110 @@ const Migration: React.FC = () => {
 
       {/* Main content (full width) */}
       <div>
+      {/* File Change Log — always visible collapsible, placed first for visibility */}
+      <div
+        style={{
+          marginBottom: '1rem',
+          border: '1px solid #D2D2D2',
+          borderRadius: 6,
+          background: '#FAFAFA',
+        }}
+      >
+        <ExpandableSection
+          isExpanded={changesExpanded}
+          onToggle={() => setChangesExpanded(!changesExpanded)}
+          toggleContent={
+            <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.5rem', fontSize: '0.8125rem' }}>
+              <FolderOpenIcon style={{ color: '#0066CC', fontSize: '0.875rem' }} />
+              <span style={{ fontWeight: 600 }}>File Change Log</span>
+              {fileChanges && fileChanges.total_files > 0 ? (
+                <>
+                  <Label isCompact color="blue">{fileChanges.total_files} files</Label>
+                  <span style={{ color: '#3E8635', fontWeight: 600, fontFamily: 'monospace', fontSize: '0.75rem' }}>
+                    +{fileChanges.total_insertions}
+                  </span>
+                  <span style={{ color: '#C9190B', fontWeight: 600, fontFamily: 'monospace', fontSize: '0.75rem' }}>
+                    -{fileChanges.total_deletions}
+                  </span>
+                </>
+              ) : (
+                <Label isCompact color="grey">No changes yet</Label>
+              )}
+              {migrating && (
+                <SyncAltIcon style={{ color: '#0066CC', fontSize: '0.75rem', animation: 'spin 2s linear infinite' }} />
+              )}
+            </span>
+          }
+        >
+          <div style={{ borderTop: '1px solid #E8E8E8' }}>
+            {!fileChanges || fileChanges.total_files === 0 ? (
+              <div style={{ padding: '1.5rem', textAlign: 'center', color: '#6A6E73', fontSize: '0.8125rem' }}>
+                {migrating
+                  ? 'Waiting for file changes — the migration agent is working...'
+                  : 'No file changes recorded for this migration.'}
+              </div>
+            ) : (
+              <>
+                <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.8125rem' }}>
+                  <thead>
+                    <tr style={{ borderBottom: '2px solid #E8E8E8', textAlign: 'left' }}>
+                      <th style={{ padding: '0.5rem 1rem', fontWeight: 600, color: '#6A6E73' }}>File</th>
+                      <th style={{ padding: '0.5rem 1rem', fontWeight: 600, color: '#6A6E73', width: 80, textAlign: 'center' }}>Change</th>
+                      <th style={{ padding: '0.5rem 1rem', fontWeight: 600, color: '#6A6E73', width: 80, textAlign: 'right' }}>Added</th>
+                      <th style={{ padding: '0.5rem 1rem', fontWeight: 600, color: '#6A6E73', width: 80, textAlign: 'right' }}>Removed</th>
+                      <th style={{ padding: '0.5rem 1rem', fontWeight: 600, color: '#6A6E73', width: 200 }}>Impact</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {fileChanges.files.map((f) => {
+                      const total = f.insertions + f.deletions;
+                      const insPct = total > 0 ? (f.insertions / total) * 100 : 0;
+                      const changeLabel = f.change_type === 'A' ? 'Added' : f.change_type === 'D' ? 'Deleted' : f.change_type === 'R' ? 'Renamed' : 'Modified';
+                      const changeColor = f.change_type === 'A' ? '#3E8635' : f.change_type === 'D' ? '#C9190B' : '#0066CC';
+                      return (
+                        <tr key={f.path} style={{ borderBottom: '1px solid #F0F0F0' }}>
+                          <td style={{ padding: '0.4rem 1rem', fontFamily: 'monospace', fontSize: '0.75rem', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 0 }}>
+                            <Link
+                              to={`/files?job=${jobId}&file=${encodeURIComponent(f.path)}`}
+                              style={{ color: '#0066CC', textDecoration: 'none', fontFamily: 'monospace' }}
+                            >
+                              {f.path}
+                            </Link>
+                          </td>
+                          <td style={{ padding: '0.4rem 1rem', textAlign: 'center' }}>
+                            <Label isCompact style={{ color: changeColor, borderColor: changeColor, background: 'transparent', border: `1px solid ${changeColor}` }}>
+                              {changeLabel}
+                            </Label>
+                          </td>
+                          <td style={{ padding: '0.4rem 1rem', textAlign: 'right', color: '#3E8635', fontWeight: 500, fontFamily: 'monospace' }}>
+                            {f.insertions > 0 ? `+${f.insertions}` : '—'}
+                          </td>
+                          <td style={{ padding: '0.4rem 1rem', textAlign: 'right', color: '#C9190B', fontWeight: 500, fontFamily: 'monospace' }}>
+                            {f.deletions > 0 ? `-${f.deletions}` : '—'}
+                          </td>
+                          <td style={{ padding: '0.4rem 1rem' }}>
+                            {total > 0 && (
+                              <div style={{ display: 'flex', height: '8px', borderRadius: '4px', overflow: 'hidden', background: '#F0F0F0' }}>
+                                <div style={{ width: `${insPct}%`, background: '#3E8635', transition: 'width 0.3s' }} />
+                                <div style={{ width: `${100 - insPct}%`, background: '#C9190B', transition: 'width 0.3s' }} />
+                              </div>
+                            )}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+                <div style={{ padding: '0.375rem 1rem', borderTop: '1px solid #F0F0F0', fontSize: '0.75rem', color: '#6A6E73', display: 'flex', justifyContent: 'space-between' }}>
+                  <span>{fileChanges.baseline_commit} → {fileChanges.head_commit}</span>
+                  <span>{fileChanges.total_files} file{fileChanges.total_files !== 1 ? 's' : ''} changed</span>
+                </div>
+              </>
+            )}
+          </div>
+        </ExpandableSection>
+      </div>
+
       {/* No issues yet (only show if not parsing/analyzing) */}
       {(!summary || summary.total === 0) && !migrating && !showParsingProgress && (
         <Card style={{ marginBottom: '1rem' }}>
@@ -485,90 +583,6 @@ const Migration: React.FC = () => {
                 The migration agent is analysing the MTA report. Issues will appear here as they are discovered and processed.
               </EmptyStateBody>
             </EmptyState>
-          </CardBody>
-        </Card>
-      )}
-
-      {/* File Changes Summary */}
-      {fileChanges && fileChanges.total_files > 0 && (
-        <Card style={{ marginBottom: '1rem' }}>
-          <CardTitle>
-            <Split hasGutter>
-              <SplitItem isFilled>
-                <span style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                  <FolderOpenIcon style={{ color: '#0066CC' }} />
-                  File Changes Summary
-                  <Label isCompact color="blue">{fileChanges.total_files} files</Label>
-                </span>
-              </SplitItem>
-              <SplitItem>
-                <span style={{ fontSize: '0.8125rem', display: 'flex', gap: '0.75rem' }}>
-                  <span style={{ color: '#3E8635', fontWeight: 600 }}>+{fileChanges.total_insertions}</span>
-                  <span style={{ color: '#C9190B', fontWeight: 600 }}>-{fileChanges.total_deletions}</span>
-                  <span style={{ color: '#6A6E73', fontSize: '0.75rem' }}>
-                    ({fileChanges.baseline_commit} → {fileChanges.head_commit})
-                  </span>
-                </span>
-              </SplitItem>
-            </Split>
-          </CardTitle>
-          <CardBody style={{ padding: 0 }}>
-            {/* Always show top files, expandable for full list */}
-            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.8125rem' }}>
-              <thead>
-                <tr style={{ borderBottom: '2px solid #E8E8E8', textAlign: 'left' }}>
-                  <th style={{ padding: '0.5rem 1rem', fontWeight: 600, color: '#6A6E73' }}>File</th>
-                  <th style={{ padding: '0.5rem 1rem', fontWeight: 600, color: '#6A6E73', width: 80, textAlign: 'center' }}>Change</th>
-                  <th style={{ padding: '0.5rem 1rem', fontWeight: 600, color: '#6A6E73', width: 80, textAlign: 'right' }}>Added</th>
-                  <th style={{ padding: '0.5rem 1rem', fontWeight: 600, color: '#6A6E73', width: 80, textAlign: 'right' }}>Removed</th>
-                  <th style={{ padding: '0.5rem 1rem', fontWeight: 600, color: '#6A6E73', width: 200 }}>Impact</th>
-                </tr>
-              </thead>
-              <tbody>
-                {(changesExpanded ? fileChanges.files : fileChanges.files.slice(0, 8)).map((f) => {
-                  const total = f.insertions + f.deletions;
-                  const insPct = total > 0 ? (f.insertions / total) * 100 : 0;
-                  const changeLabel = f.change_type === 'A' ? 'Added' : f.change_type === 'D' ? 'Deleted' : f.change_type === 'R' ? 'Renamed' : 'Modified';
-                  const changeColor = f.change_type === 'A' ? '#3E8635' : f.change_type === 'D' ? '#C9190B' : '#0066CC';
-                  return (
-                    <tr key={f.path} style={{ borderBottom: '1px solid #F0F0F0' }}>
-                      <td style={{ padding: '0.4rem 1rem', fontFamily: 'monospace', fontSize: '0.75rem', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 0 }}>
-                        {f.path}
-                      </td>
-                      <td style={{ padding: '0.4rem 1rem', textAlign: 'center' }}>
-                        <Label isCompact style={{ color: changeColor, borderColor: changeColor, background: 'transparent', border: `1px solid ${changeColor}` }}>
-                          {changeLabel}
-                        </Label>
-                      </td>
-                      <td style={{ padding: '0.4rem 1rem', textAlign: 'right', color: '#3E8635', fontWeight: 500, fontFamily: 'monospace' }}>
-                        {f.insertions > 0 ? `+${f.insertions}` : '—'}
-                      </td>
-                      <td style={{ padding: '0.4rem 1rem', textAlign: 'right', color: '#C9190B', fontWeight: 500, fontFamily: 'monospace' }}>
-                        {f.deletions > 0 ? `-${f.deletions}` : '—'}
-                      </td>
-                      <td style={{ padding: '0.4rem 1rem' }}>
-                        {total > 0 && (
-                          <div style={{ display: 'flex', height: '8px', borderRadius: '4px', overflow: 'hidden', background: '#F0F0F0' }}>
-                            <div style={{ width: `${insPct}%`, background: '#3E8635', transition: 'width 0.3s' }} />
-                            <div style={{ width: `${100 - insPct}%`, background: '#C9190B', transition: 'width 0.3s' }} />
-                          </div>
-                        )}
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-            {fileChanges.files.length > 8 && (
-              <div style={{ padding: '0.5rem 1rem', textAlign: 'center', borderTop: '1px solid #F0F0F0' }}>
-                <Button variant="link" onClick={() => setChangesExpanded(!changesExpanded)}
-                  style={{ fontSize: '0.8125rem' }}>
-                  {changesExpanded
-                    ? 'Show fewer files'
-                    : `Show all ${fileChanges.files.length} files (+${fileChanges.files.length - 8} more)`}
-                </Button>
-              </div>
-            )}
           </CardBody>
         </Card>
       )}
@@ -591,12 +605,12 @@ const Migration: React.FC = () => {
               </Thead>
               <Tbody>
                 {issues.map((issue) => {
-                  let filesText = '';
+                  let filePaths: string[] = [];
                   try {
                     const files = typeof issue.files === 'string' ? JSON.parse(issue.files) : issue.files;
-                    filesText = Array.isArray(files) ? files.join(', ') : String(issue.files ?? '');
+                    filePaths = Array.isArray(files) ? files : files != null ? [String(files)] : [];
                   } catch {
-                    filesText = String(issue.files ?? '');
+                    filePaths = issue.files != null ? [String(issue.files)] : [];
                   }
                   return (
                   <React.Fragment key={issue.id}>
@@ -622,7 +636,20 @@ const Migration: React.FC = () => {
                           maxWidth: '25%',
                         }}
                       >
-                        {filesText}
+                        {filePaths.length === 0
+                          ? '—'
+                          : filePaths.map((path, idx) => (
+                              <React.Fragment key={path}>
+                                {idx > 0 && ', '}
+                                <Link
+                                  to={`/files?job=${jobId}&file=${encodeURIComponent(path)}`}
+                                  style={{ color: '#0066CC', textDecoration: 'none' }}
+                                  onClick={(e) => e.stopPropagation()}
+                                >
+                                  {path}
+                                </Link>
+                              </React.Fragment>
+                            ))}
                       </Td>
                     </Tr>
                     {expandedIssue === issue.id && (

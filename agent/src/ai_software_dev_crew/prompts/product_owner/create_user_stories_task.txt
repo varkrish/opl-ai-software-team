@@ -5,9 +5,10 @@ Project Context: {context_digest}
 
 Your task:
 1. Extract high-level requirements.
-2. Create detailed user stories in Gherkin format (Given/When/Then).
-3. Identify features and scenarios.
-
+2. Create detailed user stories in Gherkin format (Given/When/Then) from user perspective.
+3. Add clear acceptance Criteria 
+4. Identify features and scenarios.
+5. Add use cases for non-functional requires like operations, security and so on.
 Use the file_writer tool to create the following files:
 1. 'requirements.md': High-level requirements and features.
 2. 'user_stories.md': User stories with acceptance criteria.

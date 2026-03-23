@@ -3,10 +3,12 @@ export type JobStatus =
   | 'queued'
   | 'running'
   | 'completed'
+  | 'partially_completed'
   | 'failed'
   | 'cancelled'
   | 'quota_exhausted'
-  | 'refinement_failed';
+  | 'refinement_failed'
+  | 'validation_failed';
 
 /** Refinement record from GET /api/jobs/<id>/refinements */
 export interface Refinement {
@@ -152,5 +154,36 @@ export interface BackendOption {
   name: string;
   display_name: string;
   available: boolean;
+}
+
+/** A single validation issue from GET /api/jobs/<id>/validation */
+export interface ValidationIssue {
+  id: string;
+  job_id: string;
+  check_name: string;
+  severity: 'error' | 'warning';
+  file_path: string | null;
+  line_number: number | null;
+  description: string;
+  fix_strategy: string | null;
+  status: 'pending' | 'running' | 'completed' | 'failed';
+  error: string | null;
+  created_at: string;
+  completed_at: string | null;
+}
+
+/** Summary counts from GET /api/jobs/<id>/validation */
+export interface ValidationSummary {
+  total: number;
+  fixed: number;
+  failed: number;
+  pending: number;
+}
+
+/** Full validation report response from GET /api/jobs/<id>/validation */
+export interface ValidationReport {
+  issues: ValidationIssue[];
+  summary: ValidationSummary;
+  overall: 'PASS' | 'ISSUES_FOUND';
 }
 

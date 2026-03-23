@@ -3,9 +3,10 @@ Designer Agent - Creates high-level design specifications
 Migrated from DesignerCrew to LlamaIndex agent
 """
 import logging
-from typing import Optional
+from pathlib import Path
+from typing import Optional, Union
 from .base_agent import BaseLlamaIndexAgent
-from ..tools import FileWriterTool
+from ..tools import FileWriterTool, create_workspace_file_tools
 from ..utils.prompt_loader import load_prompt
 
 logger = logging.getLogger(__name__)
@@ -14,13 +15,19 @@ logger = logging.getLogger(__name__)
 class DesignerAgent:
     """Designer Agent for creating logical architecture"""
     
-    def __init__(self, custom_backstory: Optional[str] = None, budget_tracker=None):
+    def __init__(
+        self,
+        custom_backstory: Optional[str] = None,
+        budget_tracker=None,
+        workspace_path: Optional[Union[str, Path]] = None,
+    ):
         """
         Initialize Designer Agent
         
         Args:
             custom_backstory: Optional custom backstory (from Meta Agent)
             budget_tracker: Optional budget tracker instance
+            workspace_path: When set, file tools write to this path (avoids thread-local/env issues).
         """
         default_backstory = load_prompt(
             'designer/high_level_designer_backstory.txt',
@@ -31,12 +38,18 @@ You create C4 Model diagrams and define component capabilities."""
         )
         
         backstory = custom_backstory or default_backstory
+
+        if workspace_path is not None:
+            ws_tools = create_workspace_file_tools(Path(workspace_path))
+            tools = [ws_tools[0]]  # file_writer
+        else:
+            tools = [FileWriterTool]
         
         self.agent = BaseLlamaIndexAgent(
             role="High-Level Designer",
             goal="Design logical architecture and system boundaries",
             backstory=backstory,
-            tools=[FileWriterTool],
+            tools=tools,
             agent_type="manager",
             budget_tracker=budget_tracker,
             verbose=True

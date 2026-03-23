@@ -80,6 +80,7 @@ def run_build_pipeline(
             vision=vision,
             config=config,
             progress_callback=progress_callback,
+            job_db=job_db,
         )
         progress_callback("meta", 10, "Starting Meta phase...")
         results = workflow.run(resume=resume)

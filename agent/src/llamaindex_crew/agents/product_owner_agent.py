@@ -3,9 +3,10 @@ Product Owner Agent - Creates user stories from vision
 Migrated from ProductOwnerCrew to LlamaIndex agent
 """
 import logging
-from typing import Dict, Optional
+from pathlib import Path
+from typing import Dict, Optional, Union
 from .base_agent import BaseLlamaIndexAgent
-from ..tools import FileWriterTool
+from ..tools import FileWriterTool, create_workspace_file_tools
 from ..utils.prompt_loader import load_prompt
 from ..utils.document_indexer import DocumentIndexer
 
@@ -19,7 +20,8 @@ class ProductOwnerAgent:
         self,
         custom_backstory: Optional[str] = None,
         budget_tracker=None,
-        document_indexer: Optional[DocumentIndexer] = None
+        document_indexer: Optional[DocumentIndexer] = None,
+        workspace_path: Optional[Union[str, Path]] = None,
     ):
         """
         Initialize Product Owner Agent
@@ -28,6 +30,7 @@ class ProductOwnerAgent:
             custom_backstory: Optional custom backstory (from Meta Agent)
             budget_tracker: Optional budget tracker instance
             document_indexer: Optional document indexer for RAG
+            workspace_path: When set, file tools write to this path (avoids thread-local/env issues).
         """
         self.document_indexer = document_indexer
         default_backstory = load_prompt(
@@ -39,12 +42,18 @@ You break down requests into User Stories with Acceptance Criteria using Gherkin
         )
         
         backstory = custom_backstory or default_backstory
+
+        if workspace_path is not None:
+            ws_tools = create_workspace_file_tools(Path(workspace_path))
+            tools = [ws_tools[0]]  # file_writer
+        else:
+            tools = [FileWriterTool]
         
         self.agent = BaseLlamaIndexAgent(
             role="Product Owner",
             goal="Define user requirements and create user stories",
             backstory=backstory,
-            tools=[FileWriterTool],
+            tools=tools,
             agent_type="manager",
             budget_tracker=budget_tracker,
             verbose=True

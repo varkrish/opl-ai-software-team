@@ -32,6 +32,7 @@ import {
   Select,
   SelectOption,
   SelectList,
+  Tooltip,
 } from '@patternfly/react-core';
 import {
   CubesIcon,
@@ -44,7 +45,7 @@ import {
 } from '@patternfly/react-icons';
 import { useNavigate } from 'react-router-dom';
 import { usePolling } from '../hooks/usePolling';
-import { getStats, getJobs, getHealth, getJobProgress, restartJob } from '../api/client';
+import { getStats, getJobs, getHealth, getJobProgress, restartJob, cancelJob } from '../api/client';
 import JobSearchSelect from '../components/JobSearchSelect';
 import type { Stats, JobSummary, HealthCheck, ProgressMessage } from '../types';
 
@@ -52,8 +53,10 @@ const jobStatusColor = (status: string): 'green' | 'red' | 'blue' | 'orange' | '
   switch (status) {
     case 'running': return 'blue';
     case 'completed': return 'green';
+    case 'partially_completed': return 'orange';
     case 'failed':
-    case 'quota_exhausted': return 'red';
+    case 'quota_exhausted':
+    case 'validation_failed': return 'red';
     case 'cancelled': return 'orange';
     default: return 'grey';
   }
@@ -66,7 +69,7 @@ const PER_PAGE_OPTIONS = [
   { value: 50, title: '50' },
 ];
 
-const STATUS_OPTIONS = ['running', 'completed', 'failed', 'queued', 'cancelled', 'quota_exhausted'];
+const STATUS_OPTIONS = ['running', 'completed', 'partially_completed', 'failed', 'queued', 'cancelled', 'quota_exhausted'];
 type SortCol = 'vision' | 'status' | 'current_phase' | 'progress' | 'created_at';
 
 const Dashboard: React.FC = () => {
@@ -507,35 +510,37 @@ const Dashboard: React.FC = () => {
                       backgroundColor: job.id === selectedJobId ? '#F0F4FF' : 'transparent',
                     }}
                   >
-                    <td
-                      onClick={() => setSelectedJobId(job.id)}
-                      style={{
-                        padding: '0.625rem 1rem',
-                        overflow: 'hidden',
-                        textOverflow: 'ellipsis',
-                        whiteSpace: 'nowrap',
-                        cursor: 'pointer',
-                      }}
-                    >
-                      {job.vision.startsWith('[MTA') ? (
-                        <span style={{ display: 'flex', alignItems: 'center', gap: '0.35rem', overflow: 'hidden' }}>
-                          <Label isCompact color="blue" style={{ flexShrink: 0 }}>MTA</Label>
-                          <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                            {job.vision.replace(/^\[MTA[^\]]*\]\s*/, '') || job.vision}
+                    <Tooltip content={<div style={{ maxWidth: '400px', whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>{job.vision}</div>} maxWidth="420px">
+                      <td
+                        onClick={() => setSelectedJobId(job.id)}
+                        style={{
+                          padding: '0.625rem 1rem',
+                          overflow: 'hidden',
+                          textOverflow: 'ellipsis',
+                          whiteSpace: 'nowrap',
+                          cursor: 'pointer',
+                        }}
+                      >
+                        {job.vision.startsWith('[MTA') ? (
+                          <span style={{ display: 'flex', alignItems: 'center', gap: '0.35rem', overflow: 'hidden' }}>
+                            <Label isCompact color="blue" style={{ flexShrink: 0 }}>MTA</Label>
+                            <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                              {job.vision.replace(/^\[MTA[^\]]*\]\s*/, '') || job.vision}
+                            </span>
                           </span>
-                        </span>
-                      ) : job.vision.startsWith('[Refactor') ? (
-                        <span style={{ display: 'flex', alignItems: 'center', gap: '0.35rem', overflow: 'hidden' }}>
-                          <Label isCompact color="cyan" style={{ flexShrink: 0 }}>Refactor</Label>
-                          <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                            {job.vision.replace(/^\[Refactor[^\]]*\]\s*/, '') || job.vision}
+                        ) : job.vision.startsWith('[Refactor') ? (
+                          <span style={{ display: 'flex', alignItems: 'center', gap: '0.35rem', overflow: 'hidden' }}>
+                            <Label isCompact color="cyan" style={{ flexShrink: 0 }}>Refactor</Label>
+                            <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                              {job.vision.replace(/^\[Refactor[^\]]*\]\s*/, '') || job.vision}
+                            </span>
                           </span>
-                        </span>
-                      ) : job.vision}
-                    </td>
+                        ) : job.vision}
+                      </td>
+                    </Tooltip>
                     <td onClick={() => setSelectedJobId(job.id)} style={{ padding: '0.625rem 1rem', cursor: 'pointer' }}>
                       <Label isCompact color={jobStatusColor(job.status)}>
-                        {job.status === 'quota_exhausted' ? 'quota' : job.status}
+                        {job.status === 'quota_exhausted' ? 'quota' : job.status === 'partially_completed' ? 'partial' : job.status}
                       </Label>
                     </td>
                     <td onClick={() => setSelectedJobId(job.id)} style={{ padding: '0.625rem 1rem', color: '#6A6E73', textTransform: 'capitalize', cursor: 'pointer' }}>
@@ -550,7 +555,7 @@ const Dashboard: React.FC = () => {
                             title=""
                             measureLocation="none"
                             aria-label={`${job.progress}%`}
-                            variant={job.status === 'failed' ? ProgressVariant.danger : job.status === 'completed' ? ProgressVariant.success : undefined}
+                            variant={job.status === 'failed' ? ProgressVariant.danger : (job.status === 'completed' || job.status === 'partially_completed') ? ProgressVariant.success : undefined}
                           />
                         </div>
                         <span style={{ fontSize: '0.75rem', color: '#6A6E73', flexShrink: 0 }}>
@@ -607,7 +612,22 @@ const Dashboard: React.FC = () => {
                               job.vision.startsWith('[Refactor') ? 'View refactor' :
                                 'View files'}
                           </DropdownItem>
-                          {['failed', 'cancelled', 'quota_exhausted', 'completed'].includes(job.status) && (
+                          {['running', 'queued'].includes(job.status) && (
+                            <DropdownItem
+                              key="cancel"
+                              onClick={async () => {
+                                try {
+                                  await cancelJob(job.id);
+                                  window.location.reload();
+                                } catch (err) {
+                                  console.error('Cancel failed:', err);
+                                }
+                              }}
+                            >
+                              Cancel job
+                            </DropdownItem>
+                          )}
+                          {['failed', 'cancelled', 'quota_exhausted', 'completed', 'partially_completed'].includes(job.status) && (
                             <>
                               <DropdownItem
                                 key="restart"

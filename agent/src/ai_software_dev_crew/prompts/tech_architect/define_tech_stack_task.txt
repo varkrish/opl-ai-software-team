@@ -40,6 +40,57 @@ You MUST specify a COMPLETE, BUILDABLE file structure that includes:
 - Tests: JUnit 5, MockMvc or RestAssured
 - Documentation: README.md with mvn spring-boot:run or ./gradlew bootRun
 
+**FOR ANGULAR / TYPESCRIPT WEB APPS:**
+- Source files (components, services, modules under src/app/)
+- Unit test files (*.spec.ts next to every component/service)
+- Config files (angular.json, tsconfig.json, package.json)
+- Entry points (src/main.ts, src/index.html)
+- Tests: Jasmine + Karma (test.ts, karma.conf.js)
+- Documentation (README.md)
+
+**FOR HTML / CSS / JAVASCRIPT (Vanilla) APPS:**
+- HTML pages (index.html plus any sub-pages)
+- CSS stylesheets (styles, animations, responsive layouts)
+- Vanilla JavaScript files using ES modules (import/export). Declare the module system explicitly in the tech stack.
+- Tests: Jest with jsdom (for DOM testing WITHOUT React). Do NOT use @testing-library/react.
+- Config files (package.json with jest + jsdom only)
+- Documentation (README.md)
+- IMPORTANT: Do NOT import React, Angular, Vue, or any UI framework unless the vision explicitly asks for it.
+  Test files must use plain Jest assertions (describe/test/expect) with jsdom for DOM manipulation.
+
+**FOR NODE.JS / EXPRESS / TYPESCRIPT APPS:**
+- Entry point: src/server.ts (inside src/, NOT at project root)
+- Controllers: src/controllers/ (Express Router handlers)
+- Services: src/services/ (business logic)
+- Models: src/models/ (TypeORM entities or Mongoose schemas)
+- Config: src/config/ (database, socket, middleware setup)
+- Utils: src/utils/ (shared helpers)
+- Tests: __tests__/ directories next to source files (e.g. src/controllers/__tests__/)
+- Config files: tsconfig.json, package.json with ALL runtime AND dev dependencies
+- package.json MUST list every npm package imported in source code (express, typeorm, socket.io, cors, helmet, etc.)
+- package.json scripts: "dev": "ts-node src/server.ts", "build": "tsc", "start": "node dist/server.js", "test": "jest"
+- Testing: Jest + supertest + ts-jest
+- IMPORTANT: Do NOT use NestJS decorators (@Injectable, @InjectRepository, @Module) in an Express project.
+  Express uses plain classes/functions, NOT NestJS dependency injection.
+- IMPORTANT: Use `express()` to create the app, NOT `express.createServer()`.
+- Docker: docker-compose.yml if vision mentions PostgreSQL/Redis/etc.
+- Documentation (README.md)
+
+**FOR REACT / TYPESCRIPT FRONTEND APPS (with separate backend):**
+- Entry point: src/main.tsx (creates root and renders App)
+- App component: src/App.tsx (must import all page/layout components it references)
+- Components: src/components/ (organized by feature, e.g. MapRenderer/, Timeline/)
+- Services: src/services/ (API client, socket client)
+- Store: src/store/ (Redux Toolkit with configureStore, NOT createStore)
+- Utils: src/utils/ (shared helpers)
+- Tests: __tests__/ directories next to source files
+- Config: tsconfig.json, vite.config.ts, package.json
+- package.json MUST list every npm package imported (react, react-dom, react-router-dom, @reduxjs/toolkit, react-redux, etc.)
+- IMPORTANT: React is a default export: `import React from 'react'`, NOT `import {{ React }} from 'react'`
+- IMPORTANT: useSelector/useDispatch come from 'react-redux', NOT '@reduxjs/toolkit'
+- IMPORTANT: MapContainer/TileLayer come from 'react-leaflet', NOT 'leaflet'
+- Documentation (README.md)
+
 **FOR PYTHON APPS:**
 - Source files (modules, classes, functions)
 - Dependencies (requirements.txt or pyproject.toml)
@@ -50,6 +101,8 @@ You MUST specify a COMPLETE, BUILDABLE file structure that includes:
 **CRITICAL**: The file structure must allow someone to clone the repo and run:
 - Spring Boot: `./mvnw spring-boot:run` or `./gradlew bootRun`
 - React Native: `npm install && npx react-native run-android`
+- Node.js/Express: `npm install && npm run dev`
+- HTML/CSS/JS: `npm install && open index.html` or `npx serve .`
 - Python: `pip install -r requirements.txt && python main.py`
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -103,6 +156,83 @@ calculator-app/
 This structure allows: `npm install && npx react-native run-android`
 ```
 
+Example for Angular web app (COMPLETE structure):
+```
+# Technology Stack for Angular Todo App
+
+## Core Technology
+**Framework**: Angular 17+
+**Language**: TypeScript
+**Testing**: Jasmine + Karma
+
+## File Structure (COMPLETE BUILDABLE APP)
+```
+todo-app/
+├── src/
+│   ├── app/
+│   │   ├── app.module.ts            # Root module
+│   │   ├── app.component.ts         # Root component
+│   │   ├── app.component.spec.ts    # Root component tests
+│   │   ├── app-routing.module.ts    # Routing config
+│   │   ├── components/
+│   │   │   ├── todo-list/
+│   │   │   │   ├── todo-list.component.ts
+│   │   │   │   ├── todo-list.component.html
+│   │   │   │   ├── todo-list.component.css
+│   │   │   │   └── todo-list.component.spec.ts
+│   │   │   └── todo-form/
+│   │   │       ├── todo-form.component.ts
+│   │   │       ├── todo-form.component.html
+│   │   │       ├── todo-form.component.css
+│   │   │       └── todo-form.component.spec.ts
+│   │   ├── services/
+│   │   │   ├── todo.service.ts
+│   │   │   └── todo.service.spec.ts
+│   │   └── models/
+│   │       └── todo.model.ts
+│   ├── main.ts                      # Bootstrap entry point
+│   └── index.html                   # HTML shell
+├── angular.json                     # Angular CLI config
+├── tsconfig.json                    # TypeScript config
+├── package.json                     # Dependencies and scripts
+├── karma.conf.js                    # Karma test runner config
+├── README.md                        # Setup and run instructions
+└── .gitignore                       # Git ignore rules
+```
+
+This structure allows: `npm install && ng serve`
+```
+
+Example for HTML/CSS/JavaScript site (COMPLETE structure):
+```
+# Technology Stack for Recipe Guide
+
+## Core Technology
+**Framework**: Vanilla HTML5 + CSS3 + JavaScript (NO React, NO Angular)
+**Animation**: CSS3 Keyframes + requestAnimationFrame
+**Testing**: Jest with jsdom (NOT @testing-library/react)
+
+## File Structure (COMPLETE BUILDABLE APP)
+```
+recipe-guide/
+├── public/
+│   ├── index.html               # Main entry point
+│   ├── css/
+│   │   └── styles.css           # Global styles + animations
+│   └── js/
+│       ├── app.js               # Main application logic
+│       └── utils.js             # Utility functions
+├── tests/
+│   ├── app.test.js              # Tests for app.js
+│   └── utils.test.js            # Tests for utils.js
+├── package.json                 # jest + jsdom only
+├── README.md                    # Setup instructions
+└── .gitignore                   # Git ignore rules
+```
+
+This structure allows: `npm install && open public/index.html`
+```
+
 Example for Python CLI (COMPLETE structure):
 ```
 # Technology Stack for Python Calculator
@@ -132,6 +262,78 @@ calculator-cli/
 This structure allows: `pip install . && calculator-cli`
 ```
 
+Example for Node.js/Express/TypeScript API (COMPLETE structure):
+```
+# Technology Stack for Express API
+
+## Core Technology
+**Framework**: Express 4.x with TypeScript
+**Language**: TypeScript 5.x
+**ORM**: TypeORM (PostgreSQL)
+**Real-time**: Socket.IO 4.x
+**Module System**: ES modules
+**Testing**: Jest + supertest + ts-jest
+
+## Build & Development Tools
+**Build Tool**: TypeScript compiler (tsc)
+**Package Manager**: npm
+**Dev Server**: ts-node
+
+## File Structure (COMPLETE BUILDABLE APP)
+```
+project-root/
+├── backend/
+│   ├── src/
+│   │   ├── server.ts                          # Express app entry point: express(), middleware, routes, listen()
+│   │   ├── config/
+│   │   │   ├── db.ts                          # TypeORM DataSource config
+│   │   │   └── socket.ts                      # Socket.IO setup
+│   │   ├── controllers/
+│   │   │   ├── ItemController.ts              # Express Router with route handlers
+│   │   │   └── __tests__/
+│   │   │       └── ItemController.test.ts     # supertest-based route tests
+│   │   ├── services/
+│   │   │   ├── ItemService.ts                 # Business logic (plain class, NO @Injectable)
+│   │   │   └── __tests__/
+│   │   │       └── ItemService.test.ts        # Unit tests with jest.mock
+│   │   ├── models/
+│   │   │   ├── Item.ts                        # TypeORM @Entity with @Column decorators
+│   │   │   └── __tests__/
+│   │   │       └── Item.test.ts               # Model validation tests
+│   │   └── utils/
+│   │       └── helpers.ts                     # Shared utility functions
+│   ├── tsconfig.json                          # TypeScript config
+│   └── package.json                           # ALL deps: express, typeorm, pg, socket.io, cors, helmet, etc.
+├── frontend/
+│   ├── src/
+│   │   ├── main.tsx                           # ReactDOM.createRoot + render <App />
+│   │   ├── App.tsx                            # Root component (imports all sub-components)
+│   │   ├── components/
+│   │   │   └── ItemList/
+│   │   │       ├── ItemList.tsx
+│   │   │       └── __tests__/
+│   │   │           └── ItemList.test.tsx
+│   │   ├── services/
+│   │   │   ├── api.ts                         # Axios or fetch wrapper
+│   │   │   └── socket.ts                      # Socket.IO client
+│   │   └── store/
+│   │       ├── index.ts                       # configureStore (NOT createStore)
+│   │       └── rootReducer.ts                 # combineReducers
+│   ├── tsconfig.json
+│   ├── vite.config.ts
+│   └── package.json                           # ALL deps: react, react-dom, react-redux, @reduxjs/toolkit, etc.
+├── docker-compose.yml                         # PostgreSQL, Redis (if needed), backend, frontend
+├── README.md
+└── .gitignore
+```
+
+## Infrastructure Requirements
+- Node.js 18+
+- PostgreSQL 14+ (via Docker or local)
+
+This structure allows: `cd backend && npm install && npm run dev`
+```
+
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 CRITICAL RULES:
@@ -140,5 +342,34 @@ CRITICAL RULES:
 3. Include ALL necessary config files, entry points, and build files
 4. The structure must be runnable (e.g. ./mvnw spring-boot:run for Spring Boot, or npm install && ..., or pip install ...)
 5. You MUST call file_writer to create tech_stack.md
+6. EVERY source file (component, service, controller, module) MUST have a matching test file in the file tree:
+   - Angular/TypeScript: *.spec.ts next to the source file (e.g. todo.service.ts → todo.service.spec.ts)
+   - Python: test_*.py in a tests/ directory (e.g. operations.py → tests/test_operations.py)
+   - Java: *Test.java in src/test/java/ (e.g. TodoService.java → TodoServiceTest.java)
+   - React/JS: *.test.js or *.test.tsx in __tests__/ (e.g. App.js → __tests__/App.test.js)
+   - Express/TypeScript: *.test.ts in __tests__/ next to source (e.g. ItemController.ts → __tests__/ItemController.test.ts)
+   Do NOT omit test files — they are part of the COMPLETE BUILDABLE structure.
+   - Vanilla HTML/CSS/JS: *.test.js in tests/ using Jest + jsdom (e.g. app.js → tests/app.test.js)
+7. Test framework MUST match the project framework. Do NOT mix frameworks:
+   - Vanilla JS project → Jest + jsdom. Do NOT use @testing-library/react or import 'react'.
+   - React project → Jest + @testing-library/react
+   - Angular project → Jasmine + Karma
+   - Python project → pytest
+   - Java project → JUnit 5
+   If the project does NOT use React, you MUST NOT reference @testing-library/react or import React in test files.
+8. ALL test dependencies MUST be declared in the dependency manifest:
+   - Java: test libraries (JUnit 5, Mockito, etc.) must have <dependency> entries in pom.xml with <scope>test</scope>
+   - JavaScript: test libraries (jest, jsdom, etc.) must be in devDependencies in package.json
+   - Python: test libraries (pytest, etc.) must be in requirements.txt or pyproject.toml
+   If test code imports a library, that library MUST be in the manifest. A package.json MUST exist for every JS/TS directory that contains test files.
+9. You MUST explicitly declare the module system in the tech stack for JavaScript/TypeScript projects. Pick ONE and use it consistently:
+   - Vanilla JS browser app → "ES modules" (use `import`/`export`, HTML loads scripts with `<script type="module">`)
+   - Vanilla JS browser app (legacy) → "Script tags" (no import/export, globals only, HTML uses plain `<script src="...">`)
+   - Node.js app → "CommonJS" (use `require()`/`module.exports`) or "ES modules" (use `import`/`export` with `"type": "module"` in package.json)
+   - TypeScript → always ES modules (`import`/`export`)
+   - React / React Native → ES modules (`import`/`export`)
+   - Angular → ES modules (TypeScript `import`/`export`)
+   Do NOT mix require() with import/export in the same project. Every .js/.ts file must follow the declared module system.
+   State the module system clearly in the "Core Technology" section, e.g.: **Module System**: ES modules
 
 Your response should be: "✅ Created complete tech_stack.md with buildable [technology] structure"

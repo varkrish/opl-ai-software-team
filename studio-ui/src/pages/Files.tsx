@@ -1,4 +1,4 @@
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useEffect, useRef } from 'react';
 import {
   Alert,
   Button,
@@ -118,7 +118,38 @@ const Files: React.FC = () => {
   // isSelectOpen removed - handled by JobSearchSelect
   const [downloading, setDownloading] = useState(false);
   const [downloadError, setDownloadError] = useState<string | null>(null);
+  const lastAppliedFileParam = useRef<string | null>(null);
   /* Refine state now lives in RefineChat component */
+
+  /** When URL has ?job= & ?file=, open that file in the editor after tree is loaded. */
+  useEffect(() => {
+    const urlJob = searchParams.get('job');
+    const urlFile = searchParams.get('file');
+    const paramKey = urlJob && urlFile ? `${urlJob}:${urlFile}` : null;
+    if (!paramKey || lastAppliedFileParam.current === paramKey || selectedJobId !== urlJob || treeData.length === 0) {
+      return;
+    }
+    let cancelled = false;
+    lastAppliedFileParam.current = paramKey;
+    const filePath = decodeURIComponent(urlFile);
+    setLoadingFile(true);
+    getFileContent(filePath, selectedJobId)
+      .then((result) => {
+        if (!cancelled) setSelectedFile(result);
+      })
+      .catch((err) => {
+        if (!cancelled) {
+          console.error('Error loading file from URL:', err);
+          setSelectedFile({ path: filePath, content: 'Error loading file content.' });
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setLoadingFile(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [searchParams, selectedJobId, treeData]);
 
   /** Load jobs list and file tree. Pass jobId to immediately load files for that project (e.g. after dropdown change). */
   const loadData = useCallback(async (overrideJobId?: string) => {

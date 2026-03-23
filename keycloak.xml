@@ -1,0 +1,13 @@
+<keycloak-adapter-config xmlns="urn:jboss:domain:keycloak-adapter:1.0">
+    <realm name="${keycloak.realm.name}"/>
+    
+    <identity-provider>
+        <keystore path="${keycloak.idp.keystore.path}" password="${keycloak.idp.keystore.password}"/>
+        <truststore path="${keycloak.idp.truststore.path}" password="${keycloak.idp.truststore.password}"/>
+    </identity-provider>
+    
+    <service-provider>
+        <keystore path="${keycloak.sp.keystore.path}" password="${keycloak.sp.keystore.password}"/>
+        <truststore path="${keycloak.sp.truststore.path}" password="${keycloak.sp.truststore.password}"/>
+    </service-provider>
+</keycloak-adapter-config>

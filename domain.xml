@@ -1,0 +1,18 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<domain xmlns="urn:jboss:domain:16.0">
+    <extensions>
+        <!-- Existing extensions -->
+    </extensions>
+    <system-properties>
+        <!-- Existing properties -->
+        <property name="keycloak.idp.keystore.path" value="${keycloak.idp.keystore.path}"/>
+        <property name="keycloak.idp.keystore.password" value="${keycloak.idp.keystore.password}"/>
+        <property name="keycloak.idp.truststore.path" value="${keycloak.idp.truststore.path}"/>
+        <property name="keycloak.idp.truststore.password" value="${keycloak.idp.truststore.password}"/>
+        <property name="keycloak.sp.keystore.path" value="${keycloak.sp.keystore.path}"/>
+        <property name="keycloak.sp.keystore.password" value="${keycloak.sp.keystore.password}"/>
+        <property name="keycloak.sp.truststore.path" value="${keycloak.sp.truststore.path}"/>
+        <property name="keycloak.sp.truststore.password" value="${keycloak.sp.truststore.password}"/>
+    </system-properties>
+    <!-- Rest of domain.xml content -->
+</domain>

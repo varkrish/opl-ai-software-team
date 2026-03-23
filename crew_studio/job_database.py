@@ -128,6 +128,26 @@ class JobDatabase:
             """)
             conn.execute("CREATE INDEX IF NOT EXISTS idx_refactor_tasks_job ON refactor_tasks(job_id)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_refactor_tasks_status ON refactor_tasks(status)")
+            # ── Validation issues table ───────────────────────────────────
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS validation_issues (
+                    id TEXT PRIMARY KEY,
+                    job_id TEXT NOT NULL,
+                    check_name TEXT NOT NULL,
+                    severity TEXT NOT NULL DEFAULT 'error',
+                    file_path TEXT,
+                    line_number INTEGER,
+                    description TEXT NOT NULL,
+                    fix_strategy TEXT,
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    error TEXT,
+                    created_at TEXT NOT NULL,
+                    completed_at TEXT,
+                    FOREIGN KEY (job_id) REFERENCES jobs(id)
+                )
+            """)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_validation_issues_job ON validation_issues(job_id)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_validation_issues_status ON validation_issues(status)")
     
     def create_job(self, job_id: str, vision: str, workspace_path: str,
                    metadata: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -253,6 +273,7 @@ class JobDatabase:
             conn.execute("DELETE FROM refinements WHERE job_id = ?", (job_id,))
             conn.execute("DELETE FROM documents WHERE job_id = ?", (job_id,))
             conn.execute("DELETE FROM migration_issues WHERE job_id = ?", (job_id,))
+            conn.execute("DELETE FROM validation_issues WHERE job_id = ?", (job_id,))
             cursor = conn.execute("DELETE FROM jobs WHERE id = ?", (job_id,))
             return cursor.rowcount > 0
 
@@ -306,6 +327,25 @@ class JobDatabase:
             updates['results'] = json.dumps(results)
         return self.update_job(job_id, updates)
     
+    def mark_partially_completed(
+        self, job_id: str, warning: str, results: Optional[Dict[str, Any]] = None
+    ):
+        """Mark job as partially completed — all phases ran but validation issues remain.
+
+        Unlike ``mark_failed`` this signals that usable code was generated and
+        the job reached completion, but with known quality issues.
+        """
+        updates: Dict[str, Any] = {
+            'status': 'partially_completed',
+            'progress': 100,
+            'current_phase': 'completed',
+            'completed_at': datetime.now().isoformat(),
+            'error': warning,
+        }
+        if results:
+            updates['results'] = json.dumps(results)
+        return self.update_job(job_id, updates)
+
     def mark_failed(self, job_id: str, error: str):
         """Mark job as failed with error message."""
         return self.update_job(job_id, {
@@ -328,7 +368,7 @@ class JobDatabase:
             cursor = conn.execute("""
                 SELECT 
                     COUNT(*) as total,
-                    SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as completed,
+                    SUM(CASE WHEN status IN ('completed', 'partially_completed') THEN 1 ELSE 0 END) as completed,
                     SUM(CASE WHEN status = 'running' THEN 1 ELSE 0 END) as running,
                     SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) as failed,
                     SUM(CASE WHEN status = 'quota_exhausted' THEN 1 ELSE 0 END) as quota_exhausted,
@@ -709,6 +749,102 @@ class JobDatabase:
             )
             return cursor.rowcount
 
+
+    # ── Validation Issues ───────────────────────────────────────────
+
+    def create_validation_issue(
+        self,
+        issue_id: str,
+        job_id: str,
+        check_name: str,
+        severity: str,
+        file_path: Optional[str],
+        line_number: Optional[int],
+        description: str,
+    ) -> Dict[str, Any]:
+        """Create a validation issue record (status=pending)."""
+        now = datetime.now().isoformat()
+        with self._get_conn() as conn:
+            conn.execute("""
+                INSERT INTO validation_issues
+                    (id, job_id, check_name, severity, file_path, line_number,
+                     description, status, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?)
+            """, (issue_id, job_id, check_name, severity, file_path,
+                  line_number, description, now))
+        return {
+            'id': issue_id,
+            'job_id': job_id,
+            'check_name': check_name,
+            'severity': severity,
+            'file_path': file_path,
+            'line_number': line_number,
+            'description': description,
+            'fix_strategy': None,
+            'status': 'pending',
+            'error': None,
+            'created_at': now,
+            'completed_at': None,
+        }
+
+    def get_validation_issues(
+        self, job_id: str, check_name: Optional[str] = None,
+        status: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """Return validation issues for a job, optionally filtered."""
+        clauses = ["job_id = ?"]
+        params: list = [job_id]
+        if check_name:
+            clauses.append("check_name = ?")
+            params.append(check_name)
+        if status:
+            clauses.append("status = ?")
+            params.append(status)
+        where = " AND ".join(clauses)
+        with self._get_conn() as conn:
+            rows = conn.execute(
+                f"SELECT * FROM validation_issues WHERE {where} ORDER BY created_at",
+                params,
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def update_validation_issue_status(
+        self, issue_id: str, status: str,
+        error: Optional[str] = None,
+        fix_strategy: Optional[str] = None,
+    ) -> bool:
+        """Update a validation issue's status. Sets completed_at on terminal states."""
+        updates: Dict[str, Any] = {'status': status}
+        if error is not None:
+            updates['error'] = error
+        if fix_strategy is not None:
+            updates['fix_strategy'] = fix_strategy
+        if status in ('completed', 'failed'):
+            updates['completed_at'] = datetime.now().isoformat()
+        set_clause = ", ".join(f"{k} = ?" for k in updates)
+        values = list(updates.values()) + [issue_id]
+        with self._get_conn() as conn:
+            cursor = conn.execute(
+                f"UPDATE validation_issues SET {set_clause} WHERE id = ?", values
+            )
+            return cursor.rowcount > 0
+
+    def get_pending_validation_issues(self, job_id: str) -> List[Dict[str, Any]]:
+        """Return validation issues with status='pending'."""
+        return self.get_validation_issues(job_id, status='pending')
+
+    def get_failed_validation_issues(self, job_id: str) -> List[Dict[str, Any]]:
+        """Return validation issues with status='failed'."""
+        return self.get_validation_issues(job_id, status='failed')
+
+    def delete_validation_issues(self, job_id: str) -> int:
+        """Delete ALL validation issues for a job (used before clean re-runs)."""
+        with self._get_conn() as conn:
+            cursor = conn.execute(
+                "DELETE FROM validation_issues WHERE job_id = ?",
+                (job_id,),
+            )
+            return cursor.rowcount
 
     def _row_to_dict(self, row: sqlite3.Row) -> Dict[str, Any]:
         """Convert SQLite row to dictionary, parsing JSON fields."""

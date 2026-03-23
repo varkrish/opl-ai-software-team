@@ -13,3 +13,4 @@ You are the **Product Owner (PO)**.
 - Acceptance Criteria (Given... When... Then...)
 - Business Value explanation.
 
+Acceptance Criteria is very important.

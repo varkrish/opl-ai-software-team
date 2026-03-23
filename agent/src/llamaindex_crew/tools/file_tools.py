@@ -8,7 +8,7 @@ import logging
 import re
 import threading
 from pathlib import Path
-from typing import Optional
+from typing import Dict, Optional
 from functools import partial
 from llama_index.core.tools import FunctionTool
 from ..utils.code_safety import CodeSafetyChecker
@@ -72,17 +72,74 @@ def _normalize_content(content: str, file_path: str) -> str:
     return content
 
 
-_allowed_paths: Optional[set] = None
+def _sanitize_java_package_path(file_path: str) -> str:
+    """Convert dot-separated Java package segments to slash-separated.
+
+    LLMs frequently emit paths like
+    ``backend/src/main/java/com.example.todo/Todo.java`` when the correct
+    form is ``backend/src/main/java/com/example/todo/Todo.java``.
+
+    Only applies to segments that appear *after* a ``/java/`` or ``/test/java/``
+    component and look like a multi-part Java package name.
+    """
+    java_marker = "/java/"
+    idx = file_path.find(java_marker)
+    if idx == -1:
+        return file_path
+
+    prefix = file_path[:idx + len(java_marker)]
+    rest = file_path[idx + len(java_marker):]
+
+    parts = rest.split("/")
+    fixed: list[str] = []
+    for part in parts:
+        if re.match(r'^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+$', part):
+            fixed.extend(part.split("."))
+        else:
+            fixed.append(part)
+    return prefix + "/".join(fixed)
 
 
-def set_allowed_file_paths(paths: Optional[set]) -> None:
+def _normalize_manifest_path(file_path: str, allowed: set) -> str:
+    """Try to match *file_path* against the allowlist by stripping leading segments.
+
+    Tech-stack trees often have a project root directory (e.g. ``my-app/``,
+    ``todo-backend/``) that the tree parser strips when registering tasks.
+    The agent may use the full tree path when calling ``file_writer``.
+
+    Strategy: progressively strip leading path segments and check if the
+    remainder is in *allowed*.  This is completely generic — no hardcoded
+    project names.
+    """
+    parts = file_path.split("/")
+    for i in range(1, len(parts)):
+        candidate = "/".join(parts[i:])
+        if candidate in allowed:
+            return candidate
+    return file_path
+
+
+_allowed_paths_by_workspace: Dict[str, set] = {}
+
+
+def set_allowed_file_paths(paths: Optional[set], workspace: Optional[str] = None) -> None:
     """Set the allowed file paths for dev-phase writes.
 
-    When set, ``file_writer`` rejects writes to paths not in the set.
-    Pass ``None`` to disable the guard (for non-dev-phase agents).
+    When *workspace* is given, the guard applies only to that workspace
+    directory so concurrent jobs don't block each other.
+    When *paths* is ``None``, the guard is removed for the given workspace
+    (or for ALL workspaces if *workspace* is also ``None``).
     """
-    global _allowed_paths
-    _allowed_paths = paths
+    if paths is None:
+        if workspace:
+            _allowed_paths_by_workspace.pop(str(workspace), None)
+        else:
+            _allowed_paths_by_workspace.clear()
+    elif workspace:
+        _allowed_paths_by_workspace[str(workspace)] = {
+            _sanitize_java_package_path(p) for p in paths
+        }
+    # If workspace is None but paths is not None, ignore (no global guard).
 
 
 def file_writer(file_path: str, content: str, workspace_path: Optional[str] = None) -> str:
@@ -97,24 +154,47 @@ def file_writer(file_path: str, content: str, workspace_path: Optional[str] = No
         Success or error message
     """
     try:
+        file_path = (file_path or "").strip()
+        if not file_path or file_path.lower() == "unknown":
+            logger.warning("file_writer REJECTED invalid path %r", file_path or "(empty)")
+            return (
+                "❌ Rejected: file_path must be a valid path (e.g. 'src/app/main.ts'). "
+                "Do not use 'unknown' or empty."
+            )
+
+        if not isinstance(content, str):
+            import json as _json
+            try:
+                content = _json.dumps(content, indent=2, default=str)
+            except Exception:
+                content = str(content)
+            logger.warning("file_writer: converted non-string content for %s", file_path)
+
+        file_path = _sanitize_java_package_path(file_path)
         workspace = _resolve_workspace(workspace_path)
         workspace.mkdir(parents=True, exist_ok=True)
 
-        # Log resolved workspace at DEBUG to help debug "no files generated"
         logger.debug(
             "file_writer workspace=%s file_path=%s",
             workspace, file_path,
         )
 
-        if _allowed_paths is not None and file_path not in _allowed_paths:
-            logger.warning(
-                "file_writer REJECTED %s — not in the registered task list (%d allowed paths)",
-                file_path, len(_allowed_paths),
-            )
-            return (
-                f"❌ Rejected: '{file_path}' is not in the project file manifest. "
-                "Only create files that are listed in the tech stack."
-            )
+        ws_key = str(workspace)
+        allowed = _allowed_paths_by_workspace.get(ws_key)
+        if allowed is not None:
+            if file_path not in allowed:
+                normalized = _normalize_manifest_path(file_path, allowed)
+                if normalized in allowed:
+                    file_path = normalized
+                else:
+                    logger.warning(
+                        "file_writer REJECTED %s — not in the registered task list (%d allowed paths) workspace=%s",
+                        file_path, len(allowed), ws_key,
+                    )
+                    return (
+                        f"❌ Rejected: '{file_path}' is not in the project file manifest. "
+                        "Only create files that are listed in the tech stack."
+                    )
 
         # Normalize LLM serialization artifacts (literal \n etc.)
         content = _normalize_content(content, file_path)
@@ -224,6 +304,7 @@ def file_reader(file_path: str, workspace_path: Optional[str] = None) -> str:
         File content or error message
     """
     try:
+        file_path = _sanitize_java_package_path(file_path)
         workspace = _resolve_workspace(workspace_path)
         full_path = workspace / file_path
         

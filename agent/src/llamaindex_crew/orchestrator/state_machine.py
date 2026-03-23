@@ -20,6 +20,7 @@ class ProjectState(Enum):
     TECH_ARCHITECT = "tech_architect"
     DEVELOPMENT = "development"
     FRONTEND = "frontend"
+    DEVOPS = "devops"
     COMPLETED = "completed"
     FAILED = "failed"
     ROLLBACK = "rollback"
@@ -93,8 +94,14 @@ class ProjectStateMachine:
                 ProjectState.FAILED
             ],
             ProjectState.FRONTEND: [
+                ProjectState.DEVOPS,
                 ProjectState.COMPLETED,
                 ProjectState.DEVELOPMENT,  # Rollback
+                ProjectState.FAILED
+            ],
+            ProjectState.DEVOPS: [
+                ProjectState.COMPLETED,
+                ProjectState.FRONTEND,  # Rollback
                 ProjectState.FAILED
             ],
             ProjectState.ROLLBACK: [

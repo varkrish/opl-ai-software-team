@@ -15,6 +15,7 @@ import {
 } from '@patternfly/react-icons';
 import { getJob, getJobFiles, restartJob } from '../api/client';
 import type { Job, WorkspaceFile, ProgressMessage } from '../types';
+import { ValidationReportPanel } from './ValidationReportPanel';
 
 /* ── Phase metadata ───────────────────────────────────────────────────────── */
 const PHASE_META: Record<string, { label: string; icon: string; color: string }> = {
@@ -28,12 +29,13 @@ const PHASE_META: Record<string, { label: string; icon: string; color: string }>
   development:      { label: 'Development',         icon: '💻', color: '#3E8635' },
   frontend:         { label: 'Frontend',            icon: '🖥️', color: '#4A90E2' },
   completed:        { label: 'Completed',           icon: '✅', color: '#3E8635' },
+  devops:           { label: 'DevOps',               icon: '🐳', color: '#009596' },
   error:            { label: 'Error',               icon: '❌', color: '#C9190B' },
 };
 
 const PHASE_ORDER = [
   'queued', 'fetching_context', 'initializing', 'meta',
-  'product_owner', 'designer', 'tech_architect', 'development', 'frontend', 'completed',
+  'product_owner', 'designer', 'tech_architect', 'development', 'frontend', 'devops', 'completed',
 ];
 
 /* ── Internal file filter (same as fileTree.ts) ──────────────────────────── */
@@ -385,6 +387,27 @@ const BuildProgress: React.FC<Props> = ({ jobId, vision }) => {
         variant={job?.status === 'failed' ? 'danger' : job?.status === 'completed' ? 'success' : undefined}
       />
 
+      {/* User vision */}
+      {vision && (
+        <div style={{
+          background: '#F0F0F0', borderRadius: '8px', padding: '0.75rem 1rem',
+          marginBottom: '1.25rem', borderLeft: '3px solid #0066CC',
+        }}>
+          <div style={{
+            fontSize: '0.6875rem', fontWeight: 600, color: '#6A6E73',
+            textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: '0.35rem',
+          }}>
+            Project Vision
+          </div>
+          <div style={{
+            fontSize: '0.8125rem', color: '#151515', lineHeight: 1.5,
+            whiteSpace: 'pre-wrap', wordBreak: 'break-word',
+          }}>
+            {vision}
+          </div>
+        </div>
+      )}
+
       {/* Phase timeline */}
       {renderTimeline()}
 
@@ -397,6 +420,11 @@ const BuildProgress: React.FC<Props> = ({ jobId, vision }) => {
       {/* Terminal states */}
       {job?.status === 'completed' && renderCompleted()}
       {(job?.status === 'failed' || job?.status === 'cancelled') && renderFailed()}
+
+      {/* Validation report (shown when job is done) */}
+      {job && ['completed', 'failed', 'validation_failed'].includes(job.status) && (
+        <ValidationReportPanel jobId={jobId} />
+      )}
 
       {/* Pulse animation */}
       <style>{`
