@@ -125,15 +125,16 @@ const Files: React.FC = () => {
   useEffect(() => {
     const urlJob = searchParams.get('job');
     const urlFile = searchParams.get('file');
-    const paramKey = urlJob && urlFile ? `${urlJob}:${urlFile}` : null;
-    if (!paramKey || lastAppliedFileParam.current === paramKey || selectedJobId !== urlJob || treeData.length === 0) {
+    if (!urlJob || !urlFile) return;
+    const paramKey = `${urlJob}:${urlFile}`;
+    if (lastAppliedFileParam.current === paramKey || selectedJobId !== urlJob || treeData.length === 0) {
       return;
     }
     let cancelled = false;
     lastAppliedFileParam.current = paramKey;
     const filePath = decodeURIComponent(urlFile);
     setLoadingFile(true);
-    getFileContent(filePath, selectedJobId)
+    getFileContent(filePath, urlJob)
       .then((result) => {
         if (!cancelled) setSelectedFile(result);
       })
