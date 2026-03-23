@@ -551,282 +551,298 @@
 </div>
 
 <!-- ═══════════════════════════════════════════════════════════════
-     SLIDE 2 ─ AGENDA
+     SLIDE 2 ─ MOTIVATION & REMOTE DEPLOYMENT
      ═══════════════════════════════════════════════════════════════ -->
 <div class="slide">
     <div class="slide-header">
-        <h1>Agenda</h1>
+        <h1>Motivation &amp; Remote Deployment</h1>
     </div>
-    <div style="display:flex; gap:50px; margin-top:20px;">
+    <h2>Why was this built &mdash; and where does it run?</h2>
+
+    <div style="display:flex; gap:24px; margin-top:10px;">
         <div style="flex:1;">
-            <h3 style="color:var(--rh-red); margin-bottom:12px; font-size:1.1em; letter-spacing:1px; text-transform:uppercase;">Part I &mdash; Foundation</h3>
-            <ol class="agenda-list">
-                <li><span class="agenda-num">01</span> Motivation</li>
-                <li><span class="agenda-num">02</span> Overview</li>
-                <li><span class="agenda-num">03</span> Architecture</li>
-                <li><span class="agenda-num">04</span> Meet the Agents</li>
-            </ol>
-        </div>
-        <div style="flex:1;">
-            <h3 style="color:var(--rh-red); margin-bottom:12px; font-size:1.1em; letter-spacing:1px; text-transform:uppercase;">Part II &mdash; Capabilities</h3>
-            <ol class="agenda-list" start="5">
-                <li><span class="agenda-num">05</span> Build a New App</li>
-                <li><span class="agenda-num">06</span> MTA Migration</li>
-                <li><span class="agenda-num">07</span> Refactoring &amp; Refinement</li>
-            </ol>
-            <h3 style="color:var(--rh-red); margin:18px 0 12px; font-size:1.1em; letter-spacing:1px; text-transform:uppercase;">Part III &mdash; Ecosystem</h3>
-            <ol class="agenda-list" start="8">
-                <li><span class="agenda-num">08</span> Prompt Customization</li>
-                <li><span class="agenda-num">09</span> Jira Connector</li>
-                <li><span class="agenda-num">10</span> VS Code Extension</li>
-                <li><span class="agenda-num">11</span> Crew Studio Web UI</li>
-            </ol>
-        </div>
-    </div>
-</div>
-
-<!-- ═══════════════════════════════════════════════════════════════
-     SLIDE 3 ─ MOTIVATION
-     ═══════════════════════════════════════════════════════════════ -->
-<div class="slide">
-    <div class="slide-header">
-        <h1>Motivation</h1>
-    </div>
-    <h2>Why was this built?</h2>
-    <div class="motivation-cards">
-        <div class="motivation-card">
-            <div class="card-icon">&#9881;</div>
-            <h3>Enterprise-Scale Coding Agents</h3>
-            <p>AI coding agents can go far beyond IDE-level copilots. This project demonstrates orchestrating <strong>full software delivery pipelines</strong> &mdash; Product Owner, Designer, Architect, Developer, Frontend, DevOps &mdash; at enterprise scale.</p>
-        </div>
-        <div class="motivation-card">
-            <div class="card-icon">&#9729;</div>
-            <h3>Red Hat OCP AI Platform</h3>
-            <p>Showcasing <strong>Red Hat OpenShift AI</strong> as the platform for hosting and running AI agents &mdash; leveraging OCP-native model serving, UBI containers, and Tekton pipelines for a truly cloud-native AI workflow.</p>
-        </div>
-        <div class="motivation-card">
-            <div class="card-icon">&#128274;</div>
-            <h3>AI Sovereignty</h3>
-            <p>Eliminating dependency on cloud-hosted LLM providers (Claude, GPT, etc.). Enterprises can run <strong>self-hosted models</strong> on their own infrastructure &mdash; maintaining full control over data, intellectual property, and compliance.</p>
-        </div>
-    </div>
-</div>
-
-<!-- ═══════════════════════════════════════════════════════════════
-     SLIDE 4 ─ OVERVIEW
-     ═══════════════════════════════════════════════════════════════ -->
-<div class="slide">
-    <div class="slide-header">
-        <h1>Overview</h1>
-    </div>
-    <h2>What is the AI Software Development Crew?</h2>
-    <p style="margin-top:8px;">A <strong>multi-agent AI system</strong> that automates the full software development lifecycle &mdash; from vision statement to deployable, containerised application. Powered by <strong>LlamaIndex</strong> and orchestrated by a resilient state machine.</p>
-
-    <div class="metric-grid" style="margin-top:22px;">
-        <div class="metric-card">
-            <div class="value">Build</div>
-            <div class="label">New App Generation</div>
-            <p>End-to-end from vision to containerised code</p>
-        </div>
-        <div class="metric-card">
-            <div class="value">Migrate</div>
-            <div class="label">MTA Migration</div>
-            <p>Automated Java EE / Jakarta migrations via MTA reports</p>
-        </div>
-        <div class="metric-card">
-            <div class="value">Refactor</div>
-            <div class="label">Code Modernization</div>
-            <p>Legacy code to new tech stacks with AI agents</p>
-        </div>
-        <div class="metric-card">
-            <div class="value">Refine</div>
-            <div class="label">Natural-Language Edits</div>
-            <p>Edit existing codebases with plain English instructions</p>
-        </div>
-    </div>
-</div>
-
-<!-- ═══════════════════════════════════════════════════════════════
-     SLIDE 5 ─ HOW IT WORKS (ARCHITECTURE)
-     ═══════════════════════════════════════════════════════════════ -->
-<div class="slide">
-    <div class="slide-header">
-        <h1>How It Works</h1>
-    </div>
-    <h2>State Machine Pipeline</h2>
-    <p>Each project flows through a sequential pipeline. Agents hand off artefacts to the next phase. The orchestrator supports rollback and error recovery at every stage.</p>
-
-    <div class="pipeline" style="margin-top:18px;">
-        <div class="pipeline-step active-step">META</div>
-        <div class="pipeline-arrow">&#9654;</div>
-        <div class="pipeline-step">PRODUCT OWNER</div>
-        <div class="pipeline-arrow">&#9654;</div>
-        <div class="pipeline-step">DESIGNER</div>
-        <div class="pipeline-arrow">&#9654;</div>
-        <div class="pipeline-step">TECH ARCHITECT</div>
-        <div class="pipeline-arrow">&#9654;</div>
-        <div class="pipeline-step">DEVELOPMENT</div>
-        <div class="pipeline-arrow">&#9654;</div>
-        <div class="pipeline-step">FRONTEND</div>
-        <div class="pipeline-arrow">&#9654;</div>
-        <div class="pipeline-step">DEVOPS</div>
-        <div class="pipeline-arrow">&#9654;</div>
-        <div class="pipeline-step active-step">COMPLETED</div>
-    </div>
-
-    <h2 style="margin-top:18px;">Orchestrator Components</h2>
-    <div class="metric-grid">
-        <div class="metric-card">
-            <div class="label" style="font-size:.9em;">State Machine</div>
-            <p>Sequential phase transitions with rollback support</p>
-        </div>
-        <div class="metric-card">
-            <div class="label" style="font-size:.9em;">Task Manager</div>
-            <p>SQLite-backed task registry with per-file granularity</p>
-        </div>
-        <div class="metric-card">
-            <div class="label" style="font-size:.9em;">Code Validator</div>
-            <p>Stub detection, syntax checks, import validation</p>
-        </div>
-        <div class="metric-card">
-            <div class="label" style="font-size:.9em;">Error Recovery</div>
-            <p>Automatic retry, rollback, and reassignment</p>
-        </div>
-    </div>
-</div>
-
-<!-- ═══════════════════════════════════════════════════════════════
-     LLM BACKEND & MODEL FLEXIBILITY
-     ═══════════════════════════════════════════════════════════════ -->
-<div class="slide">
-    <div class="slide-header">
-        <h1>LLM Backend &amp; Model Flexibility</h1>
-    </div>
-    <h2>Bring any model &mdash; cloud, self-hosted, or local</h2>
-
-    <div style="display:flex; gap:28px; margin-top:14px;">
-        <div style="flex:1;">
-            <h3>Supported Providers</h3>
-            <div class="agent-grid" style="grid-template-columns: repeat(2, 1fr); gap:10px; margin-top:8px;">
-                <div class="agent-card">
-                    <div class="agent-role">OpenShift AI / vLLM</div>
-                    <div class="agent-desc">Self-hosted models on OCP via OpenAI-compatible API</div>
+            <div style="display:flex; flex-direction:column; gap:10px;">
+                <div class="motivation-card" style="padding:14px 16px; margin:0;">
+                    <h3 style="font-size:1em;">Remote, Production-Grade Agents</h3>
+                    <p style="font-size:.85em;">This is <strong>not another desktop IDE copilot</strong>. AI Crew runs as remote, enterprise-scale agents <strong>natively on OpenShift</strong> &mdash; orchestrating full software delivery pipelines in production.</p>
                 </div>
-                <div class="agent-card">
-                    <div class="agent-role">Red Hat MaaS</div>
-                    <div class="agent-desc">Managed model serving with automatic compatibility handling</div>
+                <div class="motivation-card" style="padding:14px 16px; margin:0;">
+                    <h3 style="font-size:1em;">Red Hat OCP AI Platform</h3>
+                    <p style="font-size:.85em;">Leveraging <strong>OpenShift AI</strong> for model serving, UBI containers for all components, and Tekton pipelines for cloud-native CI/CD.</p>
                 </div>
-                <div class="agent-card">
-                    <div class="agent-role">Ollama (Local)</div>
-                    <div class="agent-desc">Run models locally for development and air-gapped environments</div>
-                </div>
-                <div class="agent-card">
-                    <div class="agent-role">OpenAI / Azure / OpenRouter</div>
-                    <div class="agent-desc">Any endpoint exposing /v1/chat/completions</div>
+                <div class="motivation-card" style="padding:14px 16px; margin:0;">
+                    <h3 style="font-size:1em;">AI Sovereignty</h3>
+                    <p style="font-size:.85em;">Run <strong>self-hosted models</strong> on your own infrastructure. No data leaves the cluster. Full control over IP and compliance.</p>
                 </div>
             </div>
+        </div>
 
-            <h3 style="margin-top:14px;">Per-Agent Model Selection</h3>
-            <p>Different models for different roles &mdash; use powerful models for planning, efficient ones for coding:</p>
-            <div class="metric-grid" style="margin-top:6px;">
-                <div class="metric-card" style="padding:10px 14px;">
-                    <div class="label">Manager</div>
-                    <p style="margin:2px 0 0;">PO, Designer, Architect, Meta</p>
+        <div style="flex:0 0 420px;">
+            <h3>Deployment Architecture</h3>
+            <div style="display:flex; flex-direction:column; gap:0; margin-top:8px;">
+                <div style="background:#1e1e1e; color:white; border-radius:8px 8px 0 0; padding:10px 14px; border-bottom:3px solid var(--rh-red);">
+                    <div style="font-weight:700; font-size:.9em; margin-bottom:6px;">OpenShift Cluster</div>
+                    <div style="display:flex; gap:8px; flex-wrap:wrap;">
+                        <div style="background:#2a2a2a; border:1px solid #555; border-radius:4px; padding:6px 10px; flex:1; min-width:100px; text-align:center;">
+                            <div style="font-size:.65em; color:#aaa;">Pod</div>
+                            <div style="font-size:.8em; font-weight:600;">Crew Studio</div>
+                        </div>
+                        <div style="background:#2a2a2a; border:1px solid #555; border-radius:4px; padding:6px 10px; flex:1; min-width:100px; text-align:center;">
+                            <div style="font-size:.65em; color:#aaa;">Pod</div>
+                            <div style="font-size:.8em; font-weight:600;">Agent Workers</div>
+                        </div>
+                        <div style="background:#2a2a2a; border:1px solid #555; border-radius:4px; padding:6px 10px; flex:1; min-width:100px; text-align:center;">
+                            <div style="font-size:.65em; color:#aaa;">Pod</div>
+                            <div style="font-size:.8em; font-weight:600;">Jira Connector</div>
+                        </div>
+                    </div>
                 </div>
-                <div class="metric-card" style="padding:10px 14px;">
-                    <div class="label">Worker</div>
-                    <p style="margin:2px 0 0;">Developer, Frontend</p>
+                <div style="background:#292929; color:white; border-radius:0 0 8px 8px; padding:10px 14px; border-top:1px solid #444;">
+                    <div style="font-weight:700; font-size:.8em; margin-bottom:4px;">OpenShift AI / vLLM</div>
+                    <div style="display:flex; gap:6px;">
+                        <div style="background:#3a1a1a; border:1px solid var(--rh-red); border-radius:4px; padding:4px 8px; flex:1; text-align:center; font-size:.72em;">Granite-3 (Manager)</div>
+                        <div style="background:#3a1a1a; border:1px solid var(--rh-red); border-radius:4px; padding:4px 8px; flex:1; text-align:center; font-size:.72em;">Granite-Code (Worker)</div>
+                        <div style="background:#3a1a1a; border:1px solid var(--rh-red); border-radius:4px; padding:4px 8px; flex:1; text-align:center; font-size:.72em;">Granite-3 (Reviewer)</div>
+                    </div>
                 </div>
-                <div class="metric-card" style="padding:10px 14px;">
-                    <div class="label">Reviewer</div>
-                    <p style="margin:2px 0 0;">Code review agents</p>
+            </div>
+            <div class="metric-grid" style="margin-top:10px; gap:8px;">
+                <div class="metric-card" style="padding:8px 12px;">
+                    <div class="label" style="font-size:.8em;">Scalable</div>
+                    <p style="font-size:.78em; margin:2px 0 0;">Horizontal agent scaling on OCP</p>
+                </div>
+                <div class="metric-card" style="padding:8px 12px;">
+                    <div class="label" style="font-size:.8em;">Air-Gapped</div>
+                    <p style="font-size:.78em; margin:2px 0 0;">On-prem, no data leaves cluster</p>
+                </div>
+                <div class="metric-card" style="padding:8px 12px;">
+                    <div class="label" style="font-size:.8em;">UBI + Helm</div>
+                    <p style="font-size:.78em; margin:2px 0 0;">One-command deployment</p>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════════
+     SLIDE 3 ─ OVERVIEW
+     ═══════════════════════════════════════════════════════════════ -->
+<div class="slide">
+    <div class="slide-header">
+        <h1>Why AI Crew?</h1>
+    </div>
+    <h2>AI Sovereignty, centralised standards, and enterprise control</h2>
+
+    <div style="display:flex; gap:24px; margin-top:12px;">
+        <div style="flex:1;">
+            <div style="display:flex; flex-direction:column; gap:10px;">
+                <div class="motivation-card" style="padding:14px 16px; margin:0;">
+                    <h3 style="font-size:1em;">AI Sovereignty</h3>
+                    <p style="font-size:.85em;">Run <strong>self-hosted models</strong> on your own OpenShift cluster. No data leaves the organisation. Full control over intellectual property, compliance, and model selection &mdash; zero dependency on external LLM cloud providers.</p>
+                </div>
+                <div class="motivation-card" style="padding:14px 16px; margin:0;">
+                    <h3 style="font-size:1em;">Remote AI Agents on OCP</h3>
+                    <p style="font-size:.85em;">Agents run as <strong>containers on OpenShift</strong>, not on developer laptops. Horizontally scalable, air-gapped capable, and deployed via Helm &mdash; a true production-grade AI platform.</p>
+                </div>
+            </div>
+        </div>
+
+        <div style="flex:1;">
+            <div style="display:flex; flex-direction:column; gap:10px;">
+                <div class="motivation-card" style="padding:14px 16px; margin:0;">
+                    <h3 style="font-size:1em;">Centralised Coding Standards</h3>
+                    <p style="font-size:.85em;">26+ externalized prompt files encode your organisation&rsquo;s engineering practices &mdash; architecture patterns, naming conventions, testing strategies &mdash; applied <strong>consistently across every project</strong> the agents build.</p>
+                </div>
+                <div class="motivation-card" style="padding:14px 16px; margin:0;">
+                    <h3 style="font-size:1em;">Cost Management &amp; Observability</h3>
+                    <p style="font-size:.85em;"><strong>Budget tracking</strong> with per-project cost limits and circuit breakers. Per-agent model selection (Manager / Worker / Reviewer) optimises cost vs. quality. Full progress reporting and job-level observability across all builds.</p>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="metric-grid" style="margin-top:14px; gap:10px;">
+        <div class="metric-card" style="padding:10px 14px;">
+            <div class="value" style="font-size:1.6em;">Build</div>
+            <div class="label">New App Generation</div>
+        </div>
+        <div class="metric-card" style="padding:10px 14px;">
+            <div class="value" style="font-size:1.6em;">Migrate</div>
+            <div class="label">MTA Migration</div>
+        </div>
+        <div class="metric-card" style="padding:10px 14px;">
+            <div class="value" style="font-size:1.6em;">Refactor</div>
+            <div class="label">Code Modernization</div>
+        </div>
+        <div class="metric-card" style="padding:10px 14px;">
+            <div class="value" style="font-size:1.6em;">Refine</div>
+            <div class="label">Natural-Language Edits</div>
+        </div>
+    </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════════
+     SLIDE 4 ─ ARCHITECTURE & ORCHESTRATION
+     ═══════════════════════════════════════════════════════════════ -->
+<div class="slide">
+    <div class="slide-header">
+        <h1>Architecture &amp; Orchestration</h1>
+    </div>
+    <h2>Resilient state machine with task-level granularity</h2>
+
+    <div class="pipeline" style="margin-top:12px;">
+        <div class="pipeline-step active-step" style="padding:8px 12px; min-width:90px; font-size:.8em;">META</div>
+        <div class="pipeline-arrow">&#9654;</div>
+        <div class="pipeline-step" style="padding:8px 12px; min-width:90px; font-size:.8em;">PRODUCT OWNER</div>
+        <div class="pipeline-arrow">&#9654;</div>
+        <div class="pipeline-step" style="padding:8px 12px; min-width:90px; font-size:.8em;">DESIGNER</div>
+        <div class="pipeline-arrow">&#9654;</div>
+        <div class="pipeline-step" style="padding:8px 12px; min-width:90px; font-size:.8em;">ARCHITECT</div>
+        <div class="pipeline-arrow">&#9654;</div>
+        <div class="pipeline-step" style="padding:8px 12px; min-width:90px; font-size:.8em;">DEV</div>
+        <div class="pipeline-arrow">&#9654;</div>
+        <div class="pipeline-step" style="padding:8px 12px; min-width:90px; font-size:.8em;">FRONTEND</div>
+        <div class="pipeline-arrow">&#9654;</div>
+        <div class="pipeline-step" style="padding:8px 12px; min-width:90px; font-size:.8em;">DEVOPS</div>
+        <div class="pipeline-arrow">&#9654;</div>
+        <div class="pipeline-step active-step" style="padding:8px 12px; min-width:90px; font-size:.8em;">DONE</div>
+    </div>
+
+    <div style="display:flex; gap:24px; margin-top:14px;">
+        <div style="flex:1;">
+            <h3>How It Fits Together</h3>
+            <div style="display:flex; flex-direction:column; gap:0; margin-top:6px;">
+                <div style="background:var(--rh-gray-light); border:2px solid var(--rh-red); border-radius:6px 6px 0 0; padding:8px 14px;">
+                    <div style="font-weight:700; color:var(--rh-red); font-size:.88em;">1. Prompts Feed the Loop</div>
+                    <p style="font-size:.78em; margin:2px 0 0;">26+ externalized prompt files. Meta Agent enriches them per project. Injected at each phase transition.</p>
+                </div>
+                <div style="background:white; border:2px solid var(--rh-red); border-top:none; padding:8px 14px;">
+                    <div style="font-weight:700; color:var(--rh-red); font-size:.88em;">2. State Machine Drives Phases</div>
+                    <p style="font-size:.78em; margin:2px 0 0;">Sequential transitions with rollback gates. Each phase completes before the next starts.</p>
+                </div>
+                <div style="background:var(--rh-gray-light); border:2px solid var(--rh-red); border-top:none; padding:8px 14px;">
+                    <div style="font-weight:700; color:var(--rh-red); font-size:.88em;">3. Task Manager Tracks Work</div>
+                    <p style="font-size:.78em; margin:2px 0 0;">SQLite-backed registry with per-file granularity. Resume after failure, incremental builds.</p>
+                </div>
+                <div style="background:white; border:2px solid var(--rh-red); border-top:none; border-radius:0 0 6px 6px; padding:8px 14px;">
+                    <div style="font-weight:700; color:var(--rh-red); font-size:.88em;">4. Error Recovery &amp; Retry</div>
+                    <p style="font-size:.78em; margin:2px 0 0;">Automatic retry with enriched context. Code validator catches stubs, syntax errors, and import issues.</p>
                 </div>
             </div>
         </div>
 
         <div style="flex:0 0 300px;">
-            <h3>Configuration</h3>
-            <p style="font-size:.9em;">Single <code>config.yaml</code> controls everything:</p>
-            <div style="background:#1e1e1e; color:#d4d4d4; border-radius:6px; padding:14px; font-family:monospace; font-size:.75em; line-height:1.5; margin-top:8px;">
-                <span style="color:#9cdcfe;">llm</span>:<br>
-                &nbsp;&nbsp;<span style="color:#9cdcfe;">api_base_url</span>: <span style="color:#ce9178;">"https://..."</span><br>
-                &nbsp;&nbsp;<span style="color:#9cdcfe;">environment</span>: <span style="color:#ce9178;">"production"</span><br>
-                &nbsp;&nbsp;<span style="color:#9cdcfe;">model_manager</span>: <span style="color:#ce9178;">"granite-3"</span><br>
-                &nbsp;&nbsp;<span style="color:#9cdcfe;">model_worker</span>: <span style="color:#ce9178;">"granite-code"</span><br>
-                &nbsp;&nbsp;<span style="color:#9cdcfe;">model_reviewer</span>: <span style="color:#ce9178;">"granite-3"</span><br>
-                <br>
-                <span style="color:#9cdcfe;">budget</span>:<br>
-                &nbsp;&nbsp;<span style="color:#9cdcfe;">max_cost_per_project</span>: <span style="color:#b5cea8;">5.0</span><br>
-                &nbsp;&nbsp;<span style="color:#9cdcfe;">alert_threshold</span>: <span style="color:#b5cea8;">0.8</span>
+            <h3>Orchestrator Components</h3>
+            <div style="display:flex; flex-direction:column; gap:8px; margin-top:6px;">
+                <div class="metric-card" style="padding:10px 12px;">
+                    <div class="label" style="font-size:.82em;">State Machine</div>
+                    <p style="font-size:.78em; margin:2px 0 0;">Phase transitions with rollback and resume</p>
+                </div>
+                <div class="metric-card" style="padding:10px 12px;">
+                    <div class="label" style="font-size:.82em;">Task Manager</div>
+                    <p style="font-size:.78em; margin:2px 0 0;">Per-file status, dependencies, completeness</p>
+                </div>
+                <div class="metric-card" style="padding:10px 12px;">
+                    <div class="label" style="font-size:.82em;">Code Validator</div>
+                    <p style="font-size:.78em; margin:2px 0 0;">Stub detection, syntax, imports, entrypoints</p>
+                </div>
+                <div class="metric-card" style="padding:10px 12px;">
+                    <div class="label" style="font-size:.82em;">Document Indexer</div>
+                    <p style="font-size:.78em; margin:2px 0 0;">Phase artefacts indexed for downstream context</p>
+                </div>
             </div>
-            <p style="font-size:.82em; color:#666; margin-top:8px;">Also supports env vars, Docker secrets, K8s secrets, and Helm values</p>
-
-            <h3 style="margin-top:12px;">Budget Tracking</h3>
-            <p style="font-size:.9em;">Circuit breaker at 95% of budget. Per-project and per-hour cost limits.</p>
+            <p style="font-size:.82em; color:#555; margin-top:10px;"><strong>Agent Roles (7+):</strong> Meta &bull; PO &bull; Designer &bull; Architect &bull; Dev &bull; Frontend &bull; DevOps &bull; Migration</p>
         </div>
     </div>
 </div>
 
 <!-- ═══════════════════════════════════════════════════════════════
-     MEET THE AGENTS
+     SLIDE 5 ─ PLUGGABLE ENGINE & LLM FLEXIBILITY
      ═══════════════════════════════════════════════════════════════ -->
 <div class="slide">
     <div class="slide-header">
-        <h1>Meet the Agents</h1>
+        <h1>Pluggable Engine &amp; LLM Flexibility</h1>
     </div>
-    <h2>Specialised AI agents, each with OPL-inspired backstories</h2>
-    <div class="agent-grid">
-        <div class="agent-card">
-            <div class="agent-role">Meta Agent</div>
-            <div class="agent-desc">Extracts project DNA from the vision. Generates per-agent backstories tailored to the project context.</div>
+    <h2>Swap the agentic backend and the LLM provider independently</h2>
+
+    <div style="display:flex; gap:24px; margin-top:10px;">
+        <div style="flex:1;">
+            <h3>Pluggable Workflow Engine</h3>
+            <p style="font-size:.88em;">The orchestration platform is <strong>separate</strong> from the agentic engine. A simple <code>Backend</code> protocol lets you plug in any coding agent.</p>
+
+            <div style="display:flex; align-items:center; gap:0; margin:12px 0; flex-wrap:wrap; justify-content:center;">
+                <div class="jira-node jira-highlight" style="min-width:90px; padding:8px 10px; font-size:.82em;">Job Request<br><span style="font-size:.7em;">POST /api/jobs</span></div>
+                <div class="jira-arrow">&#9654;</div>
+                <div class="jira-node" style="min-width:100px; padding:8px 10px; font-size:.82em;">Registry<br><span style="font-size:.7em;">Select engine</span></div>
+                <div class="jira-arrow">&#9654;</div>
+                <div style="display:flex; flex-direction:column; gap:4px;">
+                    <div style="background:var(--rh-red); color:white; border:2px solid var(--rh-red-dark); border-radius:5px; padding:4px 10px; font-size:.78em; font-weight:600; text-align:center;">OPL Crew (Multi-Agent)</div>
+                    <div style="background:var(--rh-gray-light); border:2px solid var(--rh-red); border-radius:5px; padding:4px 10px; font-size:.78em; font-weight:600; text-align:center; color:var(--rh-black);">Aider (CLI Agent)</div>
+                    <div style="background:var(--rh-gray-light); border:2px solid var(--rh-gray-mid); border-radius:5px; padding:4px 10px; font-size:.78em; font-weight:600; text-align:center; color:var(--rh-gray-dark); border-style:dashed;">Your Engine</div>
+                </div>
+                <div class="jira-arrow">&#9654;</div>
+                <div class="jira-node" style="min-width:80px; padding:8px 10px; font-size:.82em;">Workspace</div>
+            </div>
+
+            <div style="background:#1e1e1e; color:#d4d4d4; border-radius:5px; padding:10px 12px; font-family:monospace; font-size:.68em; line-height:1.45;">
+                <span style="color:#569cd6;">class</span> <span style="color:#4ec9b0;">Backend</span>:&nbsp;&nbsp;<span style="color:#6a9955;"># implement &amp; register</span><br>
+                &nbsp;&nbsp;<span style="color:#9cdcfe;">name</span>: <span style="color:#4ec9b0;">str</span><br>
+                &nbsp;&nbsp;<span style="color:#569cd6;">def</span> <span style="color:#dcdcaa;">is_available</span>(<span style="color:#9cdcfe;">self</span>): ...<br>
+                &nbsp;&nbsp;<span style="color:#569cd6;">def</span> <span style="color:#dcdcaa;">run</span>(<span style="color:#9cdcfe;">self</span>, <span style="color:#9cdcfe;">job_id</span>, <span style="color:#9cdcfe;">vision</span>, <span style="color:#9cdcfe;">workspace</span>, <span style="color:#9cdcfe;">cb</span>): ...
+            </div>
         </div>
-        <div class="agent-card">
-            <div class="agent-role">Product Owner</div>
-            <div class="agent-desc">Impact Mapping, Mobius Loop, user stories with Gherkin acceptance criteria.</div>
-        </div>
-        <div class="agent-card">
-            <div class="agent-role">Designer</div>
-            <div class="agent-desc">Domain-Driven Design, Event Storming, bounded contexts, C4-style models.</div>
-        </div>
-        <div class="agent-card">
-            <div class="agent-role">Tech Architect</div>
-            <div class="agent-desc">Architecture Decision Records, concrete tech stack selection, API contracts.</div>
-        </div>
-        <div class="agent-card">
-            <div class="agent-role">Developer</div>
-            <div class="agent-desc">TDD, horizontal slicing (DB &rarr; API &rarr; UI), full backend implementation.</div>
-        </div>
-        <div class="agent-card">
-            <div class="agent-role">Frontend Developer</div>
-            <div class="agent-desc">Design systems, reusable components, responsive UI with accessibility.</div>
-        </div>
-        <div class="agent-card">
-            <div class="agent-role">DevOps</div>
-            <div class="agent-desc">Red Hat UBI containers, Tekton pipelines, OpenShift-ready Containerfiles.</div>
-        </div>
-        <div class="agent-card">
-            <div class="agent-role">Migration Analysis</div>
-            <div class="agent-desc">Parses MTA reports (issues.json) into structured migration plans.</div>
-        </div>
-        <div class="agent-card">
-            <div class="agent-role">Migration Execution</div>
-            <div class="agent-desc">Applies migration changes per file with 4-tier context and retry logic.</div>
+
+        <div style="flex:0 0 380px;">
+            <h3>LLM Model Flexibility</h3>
+            <div class="agent-grid" style="grid-template-columns: repeat(2, 1fr); gap:8px; margin-top:6px;">
+                <div class="agent-card" style="padding:8px 10px;">
+                    <div class="agent-role" style="font-size:.85em;">OpenShift AI / vLLM</div>
+                    <div class="agent-desc" style="font-size:.78em;">Self-hosted on OCP</div>
+                </div>
+                <div class="agent-card" style="padding:8px 10px;">
+                    <div class="agent-role" style="font-size:.85em;">Red Hat MaaS</div>
+                    <div class="agent-desc" style="font-size:.78em;">Managed model serving</div>
+                </div>
+                <div class="agent-card" style="padding:8px 10px;">
+                    <div class="agent-role" style="font-size:.85em;">Ollama (Local)</div>
+                    <div class="agent-desc" style="font-size:.78em;">Dev &amp; air-gapped</div>
+                </div>
+                <div class="agent-card" style="padding:8px 10px;">
+                    <div class="agent-role" style="font-size:.85em;">OpenAI / Azure</div>
+                    <div class="agent-desc" style="font-size:.78em;">Any /v1/chat endpoint</div>
+                </div>
+            </div>
+
+            <h3 style="margin-top:10px;">Per-Agent Model Selection</h3>
+            <div class="metric-grid" style="margin-top:4px; gap:6px;">
+                <div class="metric-card" style="padding:6px 10px;">
+                    <div class="label" style="font-size:.78em;">Manager</div>
+                    <p style="font-size:.72em; margin:0;">PO, Designer, Architect</p>
+                </div>
+                <div class="metric-card" style="padding:6px 10px;">
+                    <div class="label" style="font-size:.78em;">Worker</div>
+                    <p style="font-size:.72em; margin:0;">Dev, Frontend</p>
+                </div>
+                <div class="metric-card" style="padding:6px 10px;">
+                    <div class="label" style="font-size:.78em;">Reviewer</div>
+                    <p style="font-size:.72em; margin:0;">Code review</p>
+                </div>
+            </div>
+
+            <div style="background:#1e1e1e; color:#d4d4d4; border-radius:5px; padding:10px 12px; font-family:monospace; font-size:.68em; line-height:1.4; margin-top:8px;">
+                <span style="color:#9cdcfe;">llm</span>:<br>
+                &nbsp;&nbsp;<span style="color:#9cdcfe;">model_manager</span>: <span style="color:#ce9178;">"granite-3"</span><br>
+                &nbsp;&nbsp;<span style="color:#9cdcfe;">model_worker</span>: <span style="color:#ce9178;">"granite-code"</span><br>
+                <span style="color:#9cdcfe;">budget</span>:<br>
+                &nbsp;&nbsp;<span style="color:#9cdcfe;">max_cost_per_project</span>: <span style="color:#b5cea8;">5.0</span>
+            </div>
+            <p style="font-size:.75em; color:#666; margin-top:4px;">Supports env vars, Docker/K8s secrets, Helm values</p>
         </div>
     </div>
 </div>
 
 <!-- ═══════════════════════════════════════════════════════════════
-     SECTION DIVIDER ─ FEATURES
-     ═══════════════════════════════════════════════════════════════ -->
-<div class="slide section-slide">
-    <div class="section-number">Part II</div>
-    <div class="section-bar"></div>
-    <div class="section-title">Capabilities</div>
-    <div class="section-subtitle">Build new applications, migrate Java workloads, refactor legacy code, and refine with natural language.</div>
-</div>
-
-<!-- ═══════════════════════════════════════════════════════════════
-     SLIDE ─ BUILD A NEW APP
+     SLIDE 6 ─ BUILD A NEW APP
      ═══════════════════════════════════════════════════════════════ -->
 <div class="slide">
     <div class="slide-header">
@@ -852,370 +868,226 @@
         <div class="pipeline-step active-step" style="min-width:150px;">Containerfile &amp; Pipelines</div>
     </div>
 
-    <h2 style="margin-top:18px;">OPL Practices Embedded in Every Phase</h2>
+    <h2 style="margin-top:18px;">Enterprise-Ready Output</h2>
     <div class="metric-grid">
         <div class="metric-card">
-            <div class="label" style="font-size:.9em;">Impact Mapping</div>
-            <p>Goal &rarr; Actor &rarr; Impact &rarr; Deliverable</p>
+            <div class="label" style="font-size:.9em;">Production Containers</div>
+            <p>Red Hat UBI-based Containerfiles, multi-stage builds, minimal footprint</p>
         </div>
         <div class="metric-card">
-            <div class="label" style="font-size:.9em;">Event Storming</div>
-            <p>Domain events, commands, aggregates</p>
+            <div class="label" style="font-size:.9em;">Deployment Manifests</div>
+            <p>OpenShift / K8s manifests, Helm charts, Kustomize overlays</p>
         </div>
         <div class="metric-card">
-            <div class="label" style="font-size:.9em;">TDD</div>
-            <p>Test-first development with coverage</p>
+            <div class="label" style="font-size:.9em;">CI/CD Pipelines</div>
+            <p>Tekton pipeline definitions ready for OCP Pipelines</p>
         </div>
         <div class="metric-card">
-            <div class="label" style="font-size:.9em;">ADRs</div>
-            <p>Architecture decisions documented</p>
+            <div class="label" style="font-size:.9em;">Validated Code</div>
+            <p>Syntax-checked, import-validated, stub-free artefacts</p>
         </div>
     </div>
 </div>
 
 <!-- ═══════════════════════════════════════════════════════════════
-     SLIDE 8 ─ MTA MIGRATION (OVERVIEW)
+     SLIDE 7 ─ MTA MIGRATION (MERGED)
      ═══════════════════════════════════════════════════════════════ -->
 <div class="slide">
     <div class="slide-header">
         <h1>Feature: MTA Migration</h1>
     </div>
-    <h2>Migration Toolkit for Applications (MTA)</h2>
-    <p>Red Hat's MTA analyses Java applications and produces reports listing migration issues. The AI Crew <strong>automates the remediation</strong> of those issues using specialised agents.</p>
+    <h2>Automated Java migration powered by MTA reports + AI agents</h2>
 
-    <h2 style="margin-top:14px;">Supported Migrations</h2>
-    <div class="metric-grid">
-        <div class="metric-card">
-            <div class="value" style="font-size:1.3em;">javax &rarr; jakarta</div>
-            <div class="label">Java EE to Jakarta EE namespace migration</div>
-        </div>
-        <div class="metric-card">
-            <div class="value" style="font-size:1.3em;">EAP &rarr; Quarkus</div>
-            <div class="label">JBoss EAP to Quarkus modernisation</div>
-        </div>
-        <div class="metric-card">
-            <div class="value" style="font-size:1.3em;">Custom Rules</div>
-            <div class="label">Any MTA ruleset or custom report format</div>
-        </div>
-    </div>
-
-    <h2 style="margin-top:14px;">How the AI Crew Automates It</h2>
-    <ul style="margin-top:6px;">
-        <li><strong>Parse</strong> MTA reports (issues.json + files.json) into structured issue records</li>
-        <li><strong>Resolve</strong> file paths from the report to the actual workspace</li>
-        <li><strong>Apply</strong> changes per file using the Migration Execution Agent with 4-tier context</li>
-        <li><strong>Validate</strong> structural integrity (package, class name, line count)</li>
-    </ul>
-</div>
-
-<!-- ═══════════════════════════════════════════════════════════════
-     SLIDE 9 ─ MTA MIGRATION: HOW IT WORKS (DIAGRAM)
-     ═══════════════════════════════════════════════════════════════ -->
-<div class="slide">
-    <div class="slide-header">
-        <h1>MTA Migration: How It Works</h1>
-    </div>
-    <h2>Six-Phase Migration Pipeline</h2>
-    <div style="display:flex; gap:40px; margin-top:10px;">
-        <div class="phase-flow" style="flex:1;">
-            <div class="phase-box">
-                <div class="phase-number">0</div>
-                <div class="phase-label"><strong>Pre-migration Git Snapshot</strong><br><span style="font-size:.82em;color:#666;">Capture baseline for diff &amp; rollback</span></div>
-            </div>
-            <div class="phase-connector"></div>
-            <div class="phase-box">
-                <div class="phase-number">1</div>
-                <div class="phase-label"><strong>Parse MTA Report</strong><br><span style="font-size:.82em;color:#666;">Read issues.json &amp; files.json &rarr; structured records</span></div>
-            </div>
-            <div class="phase-connector"></div>
-            <div class="phase-box">
-                <div class="phase-number">2</div>
-                <div class="phase-label"><strong>Resolve File Paths</strong><br><span style="font-size:.82em;color:#666;">Map report paths to workspace locations</span></div>
-            </div>
-            <div class="phase-connector"></div>
-            <div class="phase-box">
-                <div class="phase-number">3</div>
-                <div class="phase-label"><strong>AI Agent Applies Changes</strong><br><span style="font-size:.82em;color:#666;">Per-issue migration with 4-tier context</span></div>
-            </div>
-            <div class="phase-connector"></div>
-            <div class="phase-box">
-                <div class="phase-number">4</div>
-                <div class="phase-label"><strong>Deterministic Sweep</strong><br><span style="font-size:.82em;color:#666;">javax &rarr; jakarta find-and-replace pass</span></div>
-            </div>
-            <div class="phase-connector"></div>
-            <div class="phase-box">
-                <div class="phase-number">5</div>
-                <div class="phase-label"><strong>Retry Failed Issues</strong><br><span style="font-size:.82em;color:#666;">Up to 6 retries with enriched context</span></div>
-            </div>
-            <div class="phase-connector"></div>
-            <div class="phase-box">
-                <div class="phase-number">6</div>
-                <div class="phase-label"><strong>Post-migration Validation</strong><br><span style="font-size:.82em;color:#666;">Structural checks: package, class name, line count</span></div>
-            </div>
-        </div>
-        <div style="flex:0 0 280px; display:flex; flex-direction:column; gap:12px; margin-top:10px;">
-            <div class="metric-card">
-                <div class="label" style="font-size:.85em;">Deterministic + AI</div>
-                <p>Combines rule-based sweeps with LLM reasoning for complex changes</p>
-            </div>
-            <div class="metric-card">
-                <div class="label" style="font-size:.85em;">4-Tier Context</div>
-                <p>Issue details, file content, migration hints, and project context</p>
-            </div>
-            <div class="metric-card">
-                <div class="label" style="font-size:.85em;">Resilient</div>
-                <p>Git snapshot baseline enables safe rollback at any point</p>
-            </div>
-        </div>
-    </div>
-</div>
-
-<!-- ═══════════════════════════════════════════════════════════════
-     SLIDE 10 ─ REFACTORING & REFINEMENT
-     ═══════════════════════════════════════════════════════════════ -->
-<div class="slide">
-    <div class="slide-header">
-        <h1>Refactoring &amp; Refinement</h1>
-    </div>
-    <div class="feature-split">
-        <div class="feature-block">
-            <h3>Code Refactoring</h3>
-            <p>Migrate legacy codebases to a new tech stack using specialised Architect and Executor agents.</p>
-            <ul style="margin-top:10px;">
-                <li>Analyses existing codebase structure</li>
-                <li>Generates a refactoring blueprint</li>
-                <li>Applies changes file-by-file</li>
-                <li>Preserves business logic while modernising</li>
-            </ul>
-            <div style="margin-top:14px; padding:10px; background:#fff; border-left:4px solid var(--rh-red); border-radius:4px;">
-                <strong>Use case:</strong> Spring Boot 2 &rarr; Spring Boot 3, monolith &rarr; microservices
-            </div>
-        </div>
-        <div class="feature-block">
-            <h3>Refinement</h3>
-            <p>Apply natural-language edits to existing codebases &mdash; describe what you want changed in plain English.</p>
-            <ul style="margin-top:10px;">
-                <li>File-level or project-wide scope</li>
-                <li>Context-aware &mdash; understands project structure</li>
-                <li>Iterative &mdash; refine until satisfied</li>
-                <li>Available via Web UI, VS Code, and Jira</li>
-            </ul>
-            <div style="margin-top:14px; padding:10px; background:#fff; border-left:4px solid var(--rh-red); border-radius:4px;">
-                <strong>Example:</strong> &ldquo;Add pagination to the /users endpoint&rdquo;
-            </div>
-        </div>
-    </div>
-</div>
-
-<!-- ═══════════════════════════════════════════════════════════════
-     SECTION DIVIDER ─ ECOSYSTEM & INTEGRATIONS
-     ═══════════════════════════════════════════════════════════════ -->
-<div class="slide section-slide">
-    <div class="section-number">Part III</div>
-    <div class="section-bar"></div>
-    <div class="section-title">Ecosystem &amp; Integrations</div>
-    <div class="section-subtitle">Customizable prompts, Jira automation, VS Code extension, and the Crew Studio web interface.</div>
-</div>
-
-<!-- ═══════════════════════════════════════════════════════════════
-     SLIDE ─ PROMPT EXTERNALIZATION & CUSTOMIZATION
-     ═══════════════════════════════════════════════════════════════ -->
-<div class="slide">
-    <div class="slide-header">
-        <h1>Prompt Externalization</h1>
-    </div>
-    <h2>Fully externalized and customizable prompt system</h2>
-    <div style="display:flex; gap:30px; margin-top:10px;">
+    <div style="display:flex; gap:24px; margin-top:10px;">
         <div style="flex:1;">
-            <h3>26+ Prompt Files</h3>
-            <p>Organized by agent role under <code>prompts/</code>:</p>
-            <ul style="font-size:.85em; margin-top:6px;">
-                <li><code>product_owner/</code> &mdash; backstory, user stories task</li>
-                <li><code>designer/</code> &mdash; backstory, design spec task</li>
-                <li><code>dev_crew/</code> &mdash; backstory, implement feature</li>
-                <li><code>tech_architect/</code> &mdash; backstory, tech stack task</li>
-                <li><code>migration/</code> &mdash; analyze report, apply changes</li>
-                <li><code>devops/</code> &mdash; backstory, OCP &amp; Tekton standards</li>
-            </ul>
+            <div class="metric-grid" style="gap:8px; margin:0 0 12px;">
+                <div class="metric-card" style="padding:8px 12px;">
+                    <div class="value" style="font-size:1.1em;">javax &rarr; jakarta</div>
+                    <div class="label" style="font-size:.78em;">Java EE to Jakarta EE</div>
+                </div>
+                <div class="metric-card" style="padding:8px 12px;">
+                    <div class="value" style="font-size:1.1em;">EAP &rarr; Quarkus</div>
+                    <div class="label" style="font-size:.78em;">JBoss EAP modernisation</div>
+                </div>
+                <div class="metric-card" style="padding:8px 12px;">
+                    <div class="value" style="font-size:1.1em;">Custom Rules</div>
+                    <div class="label" style="font-size:.78em;">Any MTA ruleset</div>
+                </div>
+            </div>
 
-            <h3 style="margin-top:12px;">Template Variables</h3>
-            <p style="font-size:.85em;"><code>{vision}</code>, <code>{context_digest}</code>, <code>{tech_stack}</code>, <code>{user_stories}</code>, <code>{design_spec}</code> &mdash; injected at runtime via <code>str.format()</code></p>
+            <h3>Migration Pipeline</h3>
+            <div class="phase-flow" style="margin:6px 0 0 10px; gap:0;">
+                <div class="phase-box">
+                    <div class="phase-number" style="width:32px; height:32px; font-size:.82em;">0</div>
+                    <div class="phase-label" style="font-size:.85em;"><strong>Git Snapshot</strong> &mdash; baseline for rollback</div>
+                </div>
+                <div class="phase-connector" style="height:8px; margin-left:14px;"></div>
+                <div class="phase-box">
+                    <div class="phase-number" style="width:32px; height:32px; font-size:.82em;">1</div>
+                    <div class="phase-label" style="font-size:.85em;"><strong>Parse Report</strong> &mdash; issues.json &rarr; structured records</div>
+                </div>
+                <div class="phase-connector" style="height:8px; margin-left:14px;"></div>
+                <div class="phase-box">
+                    <div class="phase-number" style="width:32px; height:32px; font-size:.82em;">2</div>
+                    <div class="phase-label" style="font-size:.85em;"><strong>Resolve Paths</strong> &mdash; map to workspace files</div>
+                </div>
+                <div class="phase-connector" style="height:8px; margin-left:14px;"></div>
+                <div class="phase-box">
+                    <div class="phase-number" style="width:32px; height:32px; font-size:.82em;">3</div>
+                    <div class="phase-label" style="font-size:.85em;"><strong>AI Applies Changes</strong> &mdash; per-issue with 4-tier context</div>
+                </div>
+                <div class="phase-connector" style="height:8px; margin-left:14px;"></div>
+                <div class="phase-box">
+                    <div class="phase-number" style="width:32px; height:32px; font-size:.82em;">4</div>
+                    <div class="phase-label" style="font-size:.85em;"><strong>Deterministic Sweep</strong> + <strong>Retry</strong> + <strong>Validate</strong></div>
+                </div>
+            </div>
         </div>
+
+        <div style="flex:0 0 260px;">
+            <h3>Key Approach</h3>
+            <div style="display:flex; flex-direction:column; gap:8px; margin-top:6px;">
+                <div class="metric-card" style="padding:10px 12px;">
+                    <div class="label" style="font-size:.82em;">Deterministic + AI</div>
+                    <p style="font-size:.78em; margin:2px 0 0;">Rule-based sweeps combined with LLM reasoning for complex changes</p>
+                </div>
+                <div class="metric-card" style="padding:10px 12px;">
+                    <div class="label" style="font-size:.82em;">4-Tier Context</div>
+                    <p style="font-size:.78em; margin:2px 0 0;">Issue details, file content, migration hints, project context</p>
+                </div>
+                <div class="metric-card" style="padding:10px 12px;">
+                    <div class="label" style="font-size:.82em;">Resilient</div>
+                    <p style="font-size:.78em; margin:2px 0 0;">Git snapshot baseline, up to 6 retries, safe rollback</p>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════════
+     SLIDE 8 ─ REFACTORING, REFINEMENT & PROMPTS
+     ═══════════════════════════════════════════════════════════════ -->
+<div class="slide">
+    <div class="slide-header">
+        <h1>Refactoring, Refinement &amp; Prompts</h1>
+    </div>
+
+    <div style="display:flex; gap:20px; margin-top:8px;">
+        <div style="flex:1;">
+            <div class="feature-block" style="padding:14px 16px; margin-bottom:10px;">
+                <h3 style="font-size:1.05em;">Code Refactoring</h3>
+                <p style="font-size:.85em;">Migrate legacy codebases to a new tech stack using Architect and Executor agents.</p>
+                <ul style="margin-top:6px; font-size:.82em;">
+                    <li>Analyse codebase &rarr; generate blueprint &rarr; apply file-by-file</li>
+                    <li>Preserves business logic while modernising</li>
+                </ul>
+                <div style="margin-top:8px; padding:6px 10px; background:#fff; border-left:3px solid var(--rh-red); border-radius:3px; font-size:.82em;">
+                    <strong>Use case:</strong> Spring Boot 2 &rarr; 3, monolith &rarr; microservices
+                </div>
+            </div>
+            <div class="feature-block" style="padding:14px 16px;">
+                <h3 style="font-size:1.05em;">Refinement</h3>
+                <p style="font-size:.85em;">Apply natural-language edits to existing codebases &mdash; describe changes in plain English.</p>
+                <ul style="margin-top:6px; font-size:.82em;">
+                    <li>File-level or project-wide scope, context-aware, iterative</li>
+                    <li>Available via Web UI, VS Code, and Jira</li>
+                </ul>
+                <div style="margin-top:8px; padding:6px 10px; background:#fff; border-left:3px solid var(--rh-red); border-radius:3px; font-size:.82em;">
+                    <strong>Example:</strong> &ldquo;Add pagination to the /users endpoint&rdquo;
+                </div>
+            </div>
+        </div>
+
         <div style="flex:0 0 320px;">
-            <h3 style="text-align:center; margin-bottom:10px;">Customization Layers</h3>
-            <div class="layer-stack">
-                <div class="layer-box layer-top">Custom Backstory Override</div>
+            <h3>Prompt Externalization</h3>
+            <p style="font-size:.85em; margin-bottom:6px;">26+ prompt files organized by role under <code>prompts/</code>. Template variables (<code>{vision}</code>, <code>{tech_stack}</code>, etc.) injected at runtime.</p>
+            <div class="layer-stack" style="gap:4px; margin:8px 0;">
+                <div class="layer-box layer-top" style="padding:10px 14px; font-size:.85em; width:65%;">Custom Backstory Override</div>
                 <div class="layer-arrow">&#9650;</div>
-                <div class="layer-box layer-mid">Meta Agent Generated (per project)</div>
+                <div class="layer-box layer-mid" style="padding:10px 14px; font-size:.85em; width:50%;">Meta Agent Generated</div>
                 <div class="layer-arrow">&#9650;</div>
-                <div class="layer-box layer-base">Default Prompts (.txt files)</div>
+                <div class="layer-box layer-base" style="padding:10px 14px; font-size:.85em; width:65%;">Default Prompts (.txt)</div>
             </div>
-            <p style="font-size:.8em; text-align:center; color:#666; margin-top:8px;">Higher layers override lower &bull; Workspace persistence for resume</p>
-        </div>
-    </div>
-</div>
+            <p style="font-size:.75em; text-align:center; color:#666;">Higher layers override lower &bull; Workspace persistence for resume</p>
 
-<!-- ═══════════════════════════════════════════════════════════════
-     SLIDE 12 ─ JIRA CONNECTOR
-     ═══════════════════════════════════════════════════════════════ -->
-<div class="slide">
-    <div class="slide-header">
-        <h1>Jira Connector</h1>
-    </div>
-    <h2>Move a Jira issue to &ldquo;Ready for Dev&rdquo; &rarr; AI builds it automatically</h2>
-    <div class="jira-flow" style="margin-top:18px;">
-        <div class="jira-node jira-highlight">Jira Issue<br><span style="font-size:.75em;">Status &rarr; Ready for Dev</span></div>
-        <div class="jira-arrow">&#9654;</div>
-        <div class="jira-node">Webhook<br><span style="font-size:.75em;">POST /webhooks/jira</span></div>
-        <div class="jira-arrow">&#9654;</div>
-        <div class="jira-node">AI Classifier<br><span style="font-size:.75em;">Mode + Repo + Gherkin</span></div>
-        <div class="jira-arrow">&#9654;</div>
-        <div class="jira-node jira-highlight">Crew Studio<br><span style="font-size:.75em;">Create Job via REST</span></div>
-        <div class="jira-arrow">&#9654;</div>
-        <div class="jira-node">Status Poller<br><span style="font-size:.75em;">Sync back to Jira</span></div>
-    </div>
-
-    <div style="display:flex; gap:20px; margin-top:20px;">
-        <div style="flex:1;">
-            <h3>Pluggable Backends</h3>
-            <ul style="font-size:.88em;">
-                <li><strong>Jira REST API</strong> &mdash; Server + Cloud auto-detection</li>
-                <li><strong>Atlassian MCP</strong> &mdash; Cloud via MCP gateway</li>
-                <li><strong>Local MCP</strong> &mdash; Self-hosted MCP servers</li>
-            </ul>
-        </div>
-        <div style="flex:1;">
-            <h3>Security &amp; Reliability</h3>
-            <ul style="font-size:.88em;">
-                <li>HMAC webhook authentication</li>
-                <li>Idempotency &mdash; no duplicate jobs</li>
-                <li>Content validation &amp; URL allowlisting</li>
-                <li>SSRF protection</li>
+            <h3 style="margin-top:12px;">Prompt Roles</h3>
+            <ul style="font-size:.78em; margin-top:4px;">
+                <li><code>product_owner/</code> &mdash; backstory, user stories</li>
+                <li><code>designer/</code> &mdash; DDD, event storming</li>
+                <li><code>dev_crew/</code> &mdash; implementation</li>
+                <li><code>tech_architect/</code> &mdash; tech stack, ADRs</li>
+                <li><code>migration/</code> &mdash; analyze, apply</li>
+                <li><code>devops/</code> &mdash; OCP, Tekton</li>
             </ul>
         </div>
     </div>
 </div>
 
 <!-- ═══════════════════════════════════════════════════════════════
-     SLIDE 13 ─ VS CODE EXTENSION
+     SLIDE 9 ─ ECOSYSTEM & INTEGRATIONS
      ═══════════════════════════════════════════════════════════════ -->
 <div class="slide">
     <div class="slide-header">
-        <h1>VS Code Extension</h1>
+        <h1>Ecosystem &amp; Integrations</h1>
     </div>
-    <h2>Crew AI Studio &mdash; build, migrate, and refine from your editor</h2>
-    <p style="margin-bottom:4px;">Works in <strong>VS Code</strong>, <strong>Cursor</strong>, and <strong>Red Hat Dev Spaces / Eclipse Che</strong></p>
+    <h2>Multiple entry points into the same agent platform</h2>
 
-    <div class="vscode-grid">
-        <div class="vscode-card">
-            <h4>Chat Panel</h4>
-            <p>Natural-language interaction via webview. Registers <code>@crewai</code> chat participant in VS Code with Copilot.</p>
-        </div>
-        <div class="vscode-card">
-            <h4>Jobs View</h4>
-            <p>Sidebar tree view listing all build jobs with real-time status updates.</p>
-        </div>
-        <div class="vscode-card">
-            <h4>Migration View</h4>
-            <p>Tree view showing MTA migration issues, affected files, and applied changes.</p>
-        </div>
-        <div class="vscode-card">
-            <h4>Refine with AI</h4>
-            <p>Right-click any file to refine with natural language, or refine the entire project.</p>
-        </div>
-        <div class="vscode-card">
-            <h4>New Build Project</h4>
-            <p>Create a new build job from a vision description directly in the editor.</p>
-        </div>
-        <div class="vscode-card">
-            <h4>Slash Commands</h4>
-            <p><code>/viewjobs</code> &bull; <code>/newproject</code> &bull; <code>/migration</code> &bull; <code>/refine</code></p>
-        </div>
-    </div>
-    <p style="margin-top:14px; font-size:.85em; color:#666;">Connects to Crew Studio backend via REST API &bull; Auto-detects Che/DevSpaces via environment variables</p>
-</div>
+    <div style="display:flex; gap:16px; margin-top:10px;">
+        <div style="flex:1; display:flex; flex-direction:column; gap:10px;">
+            <div style="background:var(--rh-gray-light); border-top:4px solid var(--rh-red); border-radius:6px; padding:14px 16px;">
+                <h3 style="color:var(--rh-red); font-size:1em; margin:0 0 6px;">Jira Connector</h3>
+                <p style="font-size:.82em; color:#555; margin:0;">Move a Jira issue to &ldquo;Ready for Dev&rdquo; &rarr; AI builds it automatically. Webhook-driven with HMAC auth, idempotency, and SSRF protection.</p>
+                <div style="display:flex; align-items:center; gap:0; margin-top:8px; flex-wrap:wrap;">
+                    <div class="jira-node jira-highlight" style="padding:4px 8px; font-size:.7em; min-width:auto;">Jira Issue</div>
+                    <div class="jira-arrow" style="font-size:.8em;">&#9654;</div>
+                    <div class="jira-node" style="padding:4px 8px; font-size:.7em; min-width:auto;">Webhook</div>
+                    <div class="jira-arrow" style="font-size:.8em;">&#9654;</div>
+                    <div class="jira-node" style="padding:4px 8px; font-size:.7em; min-width:auto;">AI Classifier</div>
+                    <div class="jira-arrow" style="font-size:.8em;">&#9654;</div>
+                    <div class="jira-node jira-highlight" style="padding:4px 8px; font-size:.7em; min-width:auto;">Crew Studio</div>
+                </div>
+            </div>
 
-<!-- ═══════════════════════════════════════════════════════════════
-     SLIDE 14 ─ CREW STUDIO (WEB UI)
-     ═══════════════════════════════════════════════════════════════ -->
-<div class="slide">
-    <div class="slide-header">
-        <h1>Crew Studio &mdash; Web UI</h1>
-    </div>
-    <h2>React + PatternFly frontend with Flask backend</h2>
-    <p>A full-featured web application for managing AI Crew jobs, monitoring progress, and exploring generated code.</p>
-    <div class="studio-features">
-        <div class="studio-feat">
-            <h4>Job Dashboard</h4>
-            <p>Create, list, and monitor build / migration / refactor jobs with real-time status.</p>
-        </div>
-        <div class="studio-feat">
-            <h4>Build Progress</h4>
-            <p>Live progress tracking through each pipeline phase with agent logs and artefact previews.</p>
-        </div>
-        <div class="studio-feat">
-            <h4>File Explorer</h4>
-            <p>Browse generated project files, view source code with syntax highlighting.</p>
-        </div>
-        <div class="studio-feat">
-            <h4>Validation Reports</h4>
-            <p>Code quality checks, stub detection, import validation &mdash; all surfaced in the UI.</p>
-        </div>
-        <div class="studio-feat">
-            <h4>Migration Dashboard</h4>
-            <p>Track MTA migration issues, file changes, and success rates per job.</p>
-        </div>
-        <div class="studio-feat">
-            <h4>Multi-Mode Support</h4>
-            <p>Build, Migrate, Refactor, and Refine modes &mdash; all from a single interface.</p>
-        </div>
-    </div>
-</div>
-
-<!-- ═══════════════════════════════════════════════════════════════
-     UPCOMING FEATURES
-     ═══════════════════════════════════════════════════════════════ -->
-<div class="slide">
-    <div class="slide-header">
-        <h1>What&rsquo;s Next</h1>
-    </div>
-    <h2>Upcoming Features on the Roadmap</h2>
-
-    <div class="feature-split" style="margin-top:18px;">
-        <div class="feature-block">
-            <h3>Sandbox Runner &mdash; K8s Deployment</h3>
-            <p>Automatically deploy generated applications into a live Kubernetes sandbox environment for validation and testing.</p>
-            <ul style="margin-top:10px;">
-                <li>Spin up ephemeral namespaces on OpenShift / K8s</li>
-                <li>Deploy Containerfile + manifests produced by the DevOps agent</li>
-                <li>Run smoke tests and health checks against the live app</li>
-                <li>Collect logs and surface deployment issues back to the agents</li>
-                <li>Tear down sandbox after validation completes</li>
-            </ul>
-            <div style="margin-top:14px; padding:10px; background:#fff; border-left:4px solid var(--rh-red); border-radius:4px;">
-                <strong>Goal:</strong> Close the loop &mdash; from vision to a running, verified application on Kubernetes
+            <div style="background:var(--rh-gray-light); border-top:4px solid var(--rh-red); border-radius:6px; padding:14px 16px;">
+                <h3 style="color:var(--rh-red); font-size:1em; margin:0 0 6px;">VS Code Extension &mdash; Crew AI Studio</h3>
+                <p style="font-size:.82em; color:#555; margin:0;">Build, migrate, and refine from your editor. Works in <strong>VS Code</strong>, <strong>Cursor</strong>, and <strong>Red Hat Dev Spaces</strong>.</p>
+                <div style="display:flex; gap:6px; margin-top:8px; flex-wrap:wrap;">
+                    <span style="background:white; border:1px solid var(--rh-gray-mid); border-radius:4px; padding:3px 8px; font-size:.72em; font-weight:600; color:var(--rh-red);">Chat Panel</span>
+                    <span style="background:white; border:1px solid var(--rh-gray-mid); border-radius:4px; padding:3px 8px; font-size:.72em; font-weight:600; color:var(--rh-red);">Jobs View</span>
+                    <span style="background:white; border:1px solid var(--rh-gray-mid); border-radius:4px; padding:3px 8px; font-size:.72em; font-weight:600; color:var(--rh-red);">Migration View</span>
+                    <span style="background:white; border:1px solid var(--rh-gray-mid); border-radius:4px; padding:3px 8px; font-size:.72em; font-weight:600; color:var(--rh-red);">Refine with AI</span>
+                    <span style="background:white; border:1px solid var(--rh-gray-mid); border-radius:4px; padding:3px 8px; font-size:.72em; font-weight:600; color:var(--rh-red);">@crewai</span>
+                </div>
             </div>
         </div>
-        <div class="feature-block">
-            <h3>Code Generation Improvements</h3>
-            <p>Raising the quality bar for AI-generated code across all agents and languages.</p>
-            <ul style="margin-top:10px;">
-                <li>Deeper cross-file consistency and import resolution</li>
-                <li>Improved entrypoint wiring and module system awareness</li>
-                <li>Richer test generation with higher coverage targets</li>
-                <li>Better handling of large codebases via chunked context</li>
-                <li>Enhanced stub detection and auto-fix capabilities</li>
-                <li>Multi-language strategy improvements (Java, Python, JS/TS)</li>
-            </ul>
-            <div style="margin-top:14px; padding:10px; background:#fff; border-left:4px solid var(--rh-red); border-radius:4px;">
-                <strong>Goal:</strong> Production-ready code that passes CI on the first run
+
+        <div style="flex:1; display:flex; flex-direction:column; gap:10px;">
+            <div style="background:var(--rh-gray-light); border-top:4px solid var(--rh-red); border-radius:6px; padding:14px 16px;">
+                <h3 style="color:var(--rh-red); font-size:1em; margin:0 0 6px;">Crew Studio &mdash; Web UI</h3>
+                <p style="font-size:.82em; color:#555; margin:0 0 8px;">React + PatternFly frontend with Flask backend. Full-featured job management and code exploration.</p>
+                <div style="display:flex; gap:6px; flex-wrap:wrap;">
+                    <span style="background:white; border:1px solid var(--rh-gray-mid); border-radius:4px; padding:3px 8px; font-size:.72em; font-weight:600; color:var(--rh-red);">Job Dashboard</span>
+                    <span style="background:white; border:1px solid var(--rh-gray-mid); border-radius:4px; padding:3px 8px; font-size:.72em; font-weight:600; color:var(--rh-red);">Build Progress</span>
+                    <span style="background:white; border:1px solid var(--rh-gray-mid); border-radius:4px; padding:3px 8px; font-size:.72em; font-weight:600; color:var(--rh-red);">File Explorer</span>
+                    <span style="background:white; border:1px solid var(--rh-gray-mid); border-radius:4px; padding:3px 8px; font-size:.72em; font-weight:600; color:var(--rh-red);">Validation</span>
+                    <span style="background:white; border:1px solid var(--rh-gray-mid); border-radius:4px; padding:3px 8px; font-size:.72em; font-weight:600; color:var(--rh-red);">Migration</span>
+                    <span style="background:white; border:1px solid var(--rh-gray-mid); border-radius:4px; padding:3px 8px; font-size:.72em; font-weight:600; color:var(--rh-red);">Multi-Mode</span>
+                </div>
+            </div>
+
+            <div style="background:var(--rh-black); color:white; border-top:4px solid var(--rh-red); border-radius:6px; padding:14px 16px;">
+                <h3 style="color:var(--rh-red); font-size:1em; margin:0 0 6px;">What&rsquo;s Next</h3>
+                <ul style="font-size:.82em; color:rgba(255,255,255,.85); margin:0; padding-left:18px;">
+                    <li><strong style="color:white;">Sandbox Runner</strong> &mdash; deploy generated apps to ephemeral K8s namespaces for smoke-test validation</li>
+                    <li><strong style="color:white;">Code Gen Improvements</strong> &mdash; cross-file consistency, test coverage, multi-language strategy</li>
+                </ul>
             </div>
         </div>
     </div>
 </div>
 
 <!-- ═══════════════════════════════════════════════════════════════
-     THANK YOU
+     SLIDE 10 ─ THANK YOU
      ═══════════════════════════════════════════════════════════════ -->
 <div class="slide title-slide">
     <div class="title-content">
@@ -1231,7 +1103,7 @@
     <div class="navigation">
         <button class="nav-btn" id="prevBtn" onclick="changeSlide(-1)">&#8249;</button>
         <span class="slide-counter">
-            <span id="currentSlide">1</span> / <span id="totalSlides">19</span>
+            <span id="currentSlide">1</span> / <span id="totalSlides">10</span>
         </span>
         <button class="nav-btn" id="nextBtn" onclick="changeSlide(1)">&#8250;</button>
     </div>

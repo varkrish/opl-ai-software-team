@@ -1,8 +1,16 @@
-.PHONY: setup agent-test studio-run studio-dev studio-build studio-test-component studio-test-e2e studio-test-open backend-test-api backend-test-e2e backend-test-e2e-quick backend-test-all refine-test refine-test-e2e connector-test test-all reset-db compose-up compose-down compose-logs compose-clean container-build container-build-backend container-build-frontend container-run container-stop help ci-install test-quick test-coverage ci-test-e2e install-docs docs docs-deploy
+.PHONY: setup agent-test studio-run studio-dev studio-build studio-test-component studio-test-e2e studio-test-open backend-test-api backend-test-e2e backend-test-e2e-quick backend-test-all refine-test refine-test-e2e connector-test test-all reset-db compose-up compose-down compose-logs compose-clean compose-validate container-build container-build-linux container-build-backend container-build-frontend container-build-validator container-run container-stop help ci-install test-quick test-coverage ci-test-e2e install-docs docs docs-deploy
 
 ROOT_DIR := $(shell pwd)
 # Jira connector repo (sibling dir or set CONNECTOR_DIR)
 CONNECTOR_DIR ?= $(shell dirname $(ROOT_DIR))/crew_jira_connector
+
+# Container image CPU/OS (empty = native host, e.g. arm64 on Apple Silicon).
+# Use linux/amd64 for typical Linux servers, Quay, and GitHub Actions (matches CI).
+CONTAINER_PLATFORM ?=
+PODMAN_PLATFORM_FLAGS := $(if $(strip $(CONTAINER_PLATFORM)),--platform $(CONTAINER_PLATFORM),)
+
+# Images pushed to Quay / run on OpenShift are almost always amd64.
+HELM_CONTAINER_PLATFORM ?= linux/amd64
 
 help:
 	@echo "AI Software Development Crew Monorepo"
@@ -32,7 +40,8 @@ help:
 	@echo "  compose-logs    - Follow all service logs"
 	@echo "  compose-clean   - Stop & remove volumes"
 	@echo "  compose-validate - Trigger a job and run validator E2E test"
-	@echo "  container-build - Build all images individually"
+	@echo "  container-build - Build all images (native platform)"
+	@echo "  container-build-linux - Same, forced linux/amd64 (servers / Quay / CI parity)"
 	@echo ""
 	@echo "OpenShift / Helm Deployment:"
 	@echo "  helm-build-push - Build & push images to Quay.io"
@@ -195,19 +204,22 @@ compose-validate:
 
 # Individual container builds
 container-build-backend:
-	@echo "🏗️  Building backend image..."
-	podman build -t crew-backend:latest -f Containerfile.backend .
+	@echo "🏗️  Building backend image$(if $(strip $(CONTAINER_PLATFORM)), for $(CONTAINER_PLATFORM),)..."
+	podman build $(PODMAN_PLATFORM_FLAGS) -t crew-backend:latest -f Containerfile.backend .
 
 container-build-frontend:
-	@echo "🏗️  Building frontend image..."
-	podman build -t crew-frontend:latest -f Containerfile.frontend .
+	@echo "🏗️  Building frontend image$(if $(strip $(CONTAINER_PLATFORM)), for $(CONTAINER_PLATFORM),)..."
+	podman build $(PODMAN_PLATFORM_FLAGS) -t crew-frontend:latest -f Containerfile.frontend .
 
 container-build-validator:
-	@echo "🏗️  Building validator image..."
-	podman build -t crew-validator:latest -f Containerfile $${VALIDATOR_DIR:-../crew-code-validator}
+	@echo "🏗️  Building validator image$(if $(strip $(CONTAINER_PLATFORM)), for $(CONTAINER_PLATFORM),)..."
+	podman build $(PODMAN_PLATFORM_FLAGS) -t crew-validator:latest -f Containerfile $${VALIDATOR_DIR:-../crew-code-validator}
 
 container-build: container-build-backend container-build-frontend container-build-validator
 	@echo "✅ All images built"
+
+container-build-linux:
+	@$(MAKE) container-build CONTAINER_PLATFORM=linux/amd64
 
 container-run:
 	@echo "🚀 Starting full stack..."
@@ -226,10 +238,10 @@ HELM_RELEASE := crew-studio
 HELM_NS      := crew-studio
 
 helm-build-push:
-	@echo "Building and pushing images to Quay.io..."
-	podman build -t quay.io/$(USER)/crew-backend:latest -f Containerfile.backend .
+	@echo "Building and pushing images to Quay.io ($(HELM_CONTAINER_PLATFORM))..."
+	podman build --platform $(HELM_CONTAINER_PLATFORM) -t quay.io/$(USER)/crew-backend:latest -f Containerfile.backend .
 	podman push quay.io/$(USER)/crew-backend:latest
-	podman build -t quay.io/$(USER)/crew-frontend:latest -f Containerfile.frontend .
+	podman build --platform $(HELM_CONTAINER_PLATFORM) -t quay.io/$(USER)/crew-frontend:latest -f Containerfile.frontend .
 	podman push quay.io/$(USER)/crew-frontend:latest
 
 helm-deploy: helm-build-push

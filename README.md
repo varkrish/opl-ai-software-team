@@ -164,6 +164,16 @@ make compose-logs        # Follow logs
 make compose-clean       # Stop & remove volumes
 ```
 
+**Linux `amd64` images (from macOS ARM or to match CI / Quay):** default `podman compose build` uses your host CPU. For typical Linux servers and OpenShift nodes, build with `linux/amd64`:
+
+```bash
+make container-build-linux          # backend + frontend + validator (sibling crew-code-validator)
+# or per-service:
+CONTAINER_PLATFORM=linux/amd64 make container-build-backend
+```
+
+`make helm-build-push` already uses `linux/amd64` by default (`HELM_CONTAINER_PLATFORM` overrides).
+
 | Service | URL |
 |---------|-----|
 | Frontend (Crew Studio UI) | http://localhost:3000 |
@@ -314,7 +324,8 @@ npm run cy:e2e         # E2E tests (requires dev server + backend)
 | `make backend-test-all` | Run all backend tests |
 | `make compose-up` | Build & start full stack via compose |
 | `make compose-down` | Stop all compose services |
-| `make container-build` | Build backend + frontend images |
+| `make container-build` | Build backend + frontend + validator (native platform) |
+| `make container-build-linux` | Same images for `linux/amd64` (servers / Quay parity) |
 | `make helm-deploy` | Build, push, deploy to OpenShift via Helm |
 | `make helm-deploy-dev` | Deploy with dev overlay |
 | `make helm-status` | Check Helm release status |
