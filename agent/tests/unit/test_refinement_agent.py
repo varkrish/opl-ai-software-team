@@ -88,16 +88,17 @@ def test_refinement_agent_build_prompt_project_wide_fallback():
     assert "file_writer" in prompt
 
 
-def test_create_workspace_file_tools_returns_four_tools():
-    """create_workspace_file_tools returns list of four tools bound to workspace"""
+def test_create_workspace_file_tools_returns_five_tools():
+    """create_workspace_file_tools returns list of five tools bound to workspace"""
     from src.llamaindex_crew.tools.file_tools import create_workspace_file_tools
     tools = create_workspace_file_tools(Path("/tmp/job-123"))
-    assert len(tools) == 4
+    assert len(tools) == 5
     names = [t.metadata.name for t in tools]
     assert "file_writer" in names
     assert "file_reader" in names
     assert "file_lister" in names
     assert "file_deleter" in names
+    assert "file_line_replacer" in names
 
 
 def test_file_tools_accept_workspace_path_parameter():
