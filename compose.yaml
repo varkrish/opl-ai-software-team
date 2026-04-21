@@ -106,6 +106,34 @@ services:
     networks:
       - crew-net
 
+  # ── Skills Service (optional): Semantic search over skill docs ──────────
+  # Standalone repo: https://github.com/varkrish/skills-service
+  # Set SKILLS_SERVICE_DIR in .env to point to your local checkout.
+  # Uncomment to enable skill-aware agents.
+  #
+  # skills-service:
+  #   container_name: crew-skills
+  #   build:
+  #     context: ${SKILLS_SERVICE_DIR:-../skills-service}
+  #     dockerfile: Containerfile
+  #   ports:
+  #     - "${SKILLS_PORT:-8090}:8090"
+  #   volumes:
+  #     - ${SKILLS_DIR:-./skills}:/app/skills:ro
+  #   environment:
+  #     - SKILLS_BASE_DIR=/app/skills
+  #     - SKILLS_INDEX_CACHE_DIR=/app/cache
+  #     - PYTHONUNBUFFERED=1
+  #   restart: unless-stopped
+  #   healthcheck:
+  #     test: ["CMD", "curl", "-sf", "http://localhost:8090/health/ready"]
+  #     interval: 10s
+  #     timeout: 5s
+  #     start_period: 30s
+  #     retries: 10
+  #   networks:
+  #     - crew-net
+
   # ── Ollama (optional): Local LLM inference ──────────────────────────────
   # Uncomment to run models locally instead of using cloud APIs
   #

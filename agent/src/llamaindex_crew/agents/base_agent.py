@@ -192,28 +192,43 @@ IMPORTANT INSTRUCTIONS:
         if not budget_status['allowed']:
             raise ValueError(f"Budget exceeded: {budget_status['message']}")
         
-        # Execute agent
-        try:
-            # Try synchronous chat first
-            if hasattr(self.agent, 'chat'):
-                logger.info(f"🚀 Starting agent execution ({self.role})")
-                logger.debug(f"Input message: {message}")
-                response = self.agent.chat(message, **kwargs)
-                logger.debug(f"Agent raw response: {response}")
-                logger.info("✅ Agent execution completed")
-            elif hasattr(self.agent, 'run'):
-                # Fallback to run (async)
-                async def async_run():
-                    return await self.agent.run(user_msg=message, max_iterations=100, **kwargs)
-                
-                logger.info(f"🚀 Starting agent execution (async {self.role})")
-                response = asyncio.run(async_run())
-                logger.info("✅ Agent execution completed")
-            else:
-                raise AttributeError(f"Agent {type(self.agent)} has neither 'run' nor 'chat' method")
-        except Exception as e:
-            logger.error(f"Error during agent execution: {e}")
-            raise
+        # Execute agent with retry for transient LLM parsing failures
+        max_agent_retries = 3
+        last_err = None
+        for attempt in range(1, max_agent_retries + 1):
+            try:
+                if hasattr(self.agent, 'chat'):
+                    logger.info(f"🚀 Starting agent execution ({self.role}) [attempt {attempt}/{max_agent_retries}]")
+                    logger.debug(f"Input message: {message}")
+                    response = self.agent.chat(message, **kwargs)
+                    logger.debug(f"Agent raw response: {response}")
+                    logger.info("✅ Agent execution completed")
+                elif hasattr(self.agent, 'run'):
+                    async def async_run():
+                        return await self.agent.run(user_msg=message, max_iterations=100, **kwargs)
+                    
+                    logger.info(f"🚀 Starting agent execution (async {self.role}) [attempt {attempt}/{max_agent_retries}]")
+                    response = asyncio.run(async_run())
+                    logger.info("✅ Agent execution completed")
+                else:
+                    raise AttributeError(f"Agent {type(self.agent)} has neither 'run' nor 'chat' method")
+                last_err = None
+                break
+            except (TypeError, AttributeError) as e:
+                if "'NoneType'" in str(e) and attempt < max_agent_retries:
+                    logger.warning(f"⚠️ Agent got empty/malformed LLM response (attempt {attempt}/{max_agent_retries}), retrying...")
+                    import time; time.sleep(2 * attempt)
+                    if hasattr(self.agent, 'memory'):
+                        self.agent.memory.reset()
+                    last_err = e
+                    continue
+                logger.error(f"Error during agent execution: {e}")
+                raise
+            except Exception as e:
+                logger.error(f"Error during agent execution: {e}")
+                raise
+        if last_err is not None:
+            raise last_err
         
         # Track budget - try to extract from response
         try:

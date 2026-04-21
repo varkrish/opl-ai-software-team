@@ -7,6 +7,8 @@ from pathlib import Path
 from typing import Optional, Union
 from .base_agent import BaseLlamaIndexAgent
 from ..tools import FileWriterTool, create_workspace_file_tools
+from ..tools.tool_loader import load_tools
+from ..config import ConfigLoader
 from ..utils.prompt_loader import load_prompt
 
 logger = logging.getLogger(__name__)
@@ -44,7 +46,22 @@ You create C4 Model diagrams and define component capabilities."""
             tools = [ws_tools[0]]  # file_writer
         else:
             tools = [FileWriterTool]
-        
+
+        try:
+            config = ConfigLoader.load()
+            entries = config.tools.global_tools + config.tools.agent_tools.get("designer", [])
+            extra_tools = load_tools(entries)
+            tools.extend(extra_tools)
+            if extra_tools:
+                backstory += (
+                    "\n\nYou have access to a skill_query tool. Use it to search for framework-specific "
+                    "design patterns and architecture guidelines (e.g. 'Frappe DocType design', "
+                    "'domain model patterns') before creating the design specification."
+                )
+            logger.info("DesignerAgent: loaded %d extra tool(s) from config", len(extra_tools))
+        except Exception:
+            logger.warning("DesignerAgent: failed to load extra tools — continuing with built-ins", exc_info=True)
+
         self.agent = BaseLlamaIndexAgent(
             role="High-Level Designer",
             goal="Design logical architecture and system boundaries",

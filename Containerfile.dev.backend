@@ -1,0 +1,66 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# AI Crew Studio — DEV Backend Base Image
+# All dependencies pre-installed; source code mounted at runtime.
+# ─────────────────────────────────────────────────────────────────────────────
+FROM registry.access.redhat.com/ubi9/python-311:latest
+
+USER root
+
+RUN dnf install -y --nodocs \
+        git \
+        gcc \
+        gcc-c++ \
+        make \
+        nodejs \
+        npm \
+    && dnf clean all \
+    && rm -rf /var/cache/dnf
+
+WORKDIR /app
+
+# Install Python dependencies (no source code yet — that's bind-mounted)
+COPY agent/pyproject.toml /app/agent/pyproject.toml
+RUN cd /app/agent && \
+    pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir -e . 2>/dev/null || \
+    pip install --no-cache-dir \
+        "llama-index>=0.10.0" \
+        "llama-index-core>=0.10.0" \
+        "llama-index-agent-openai>=0.2.0" \
+        "llama-index-llms-openai>=0.1.0" \
+        "llama-index-llms-anthropic>=0.1.0" \
+        "llama-index-llms-ollama>=0.1.0" \
+        "llama-index-embeddings-openai>=0.1.0" \
+        "llama-index-embeddings-huggingface>=0.1.0" \
+        "gitpython>=3.1.43" \
+        "PyYAML>=6.0.2" \
+        "rich>=13.9.4" \
+        "python-dotenv>=1.0.1" \
+        "requests>=2.32.3" \
+        "flask>=3.0.0" \
+        "flask-cors>=4.0.0" \
+        "jsonschema[format]>=4.0.0" \
+        "litellm>=1.0.0" \
+        "cryptography>=41.0.0"
+
+# ASGI stack + dev extras
+RUN pip install --no-cache-dir \
+    "fastapi>=0.115.0" \
+    "uvicorn[standard]>=0.34.0" \
+    "httpx>=0.28.0" \
+    debugpy watchdog
+
+RUN mkdir -p /app/workspace /app/data && \
+    chown -R 1001:0 /app && \
+    chmod -R g=u /app
+
+ENV PYTHONPATH=/app/agent:/app/agent/src:/app \
+    PYTHONUNBUFFERED=1 \
+    WORKSPACE_PATH=/app/workspace \
+    JOB_DB_PATH=/app/data/crew_jobs.db \
+    FLASK_ENV=development \
+    MOUNT_FLASK_FALLBACK=1 \
+    PORT=8080
+
+USER 1001
+EXPOSE 8080

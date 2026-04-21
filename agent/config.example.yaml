@@ -60,3 +60,48 @@ workspace:
 logging:
   # Log level: DEBUG, INFO, WARNING, ERROR, CRITICAL
   level: "INFO"
+
+# ── Skills Service ────────────────────────────────────────────────────────────
+# Optional: connects agents to the skills-service for domain-specific guidance.
+# When service_url is unset (null), the skill query tool is not loaded.
+skills:
+  service_url: null  # e.g. "http://skills-service:8090"
+
+# ── Extra Tools ───────────────────────────────────────────────────────────────
+# Declare additional tools to inject into agents at startup.
+# Two types: "native" (Python module) and "mcp" (MCP server bridge).
+#
+# global_tools:  added to ALL agents
+# agent_tools:   keyed by agent role slug — added only to that agent
+tools:
+  global_tools: []
+    # Example: give every agent the skill query tool
+    # - type: native
+    #   module: "llamaindex_crew.tools.skill_tools"
+    #   name: "SkillQueryTool"
+    #   config:
+    #     service_url: "http://skills-service:8090"
+
+  agent_tools: {}
+    # Example: developer agent gets skill search scoped to python + a Jira MCP server
+    # developer:
+    #   - type: native
+    #     module: "llamaindex_crew.tools.skill_tools"
+    #     name: "SkillQueryTool"
+    #     config:
+    #       service_url: "http://skills-service:8090"
+    #       default_tags: ["python", "backend"]
+    #   - type: mcp
+    #     server_name: "jira"
+    #     command: "python"
+    #     args: ["-m", "crew_jira_connector.server"]
+    #     env:
+    #       JIRA_URL: "https://jira.example.com"
+    #       JIRA_TOKEN: "${JIRA_TOKEN}"
+    # frontend:
+    #   - type: native
+    #     module: "llamaindex_crew.tools.skill_tools"
+    #     name: "SkillQueryTool"
+    #     config:
+    #       service_url: "http://skills-service:8090"
+    #       default_tags: ["react", "frontend"]

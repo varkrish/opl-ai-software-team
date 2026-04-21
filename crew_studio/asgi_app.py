@@ -1,0 +1,276 @@
+"""
+ASGI entry point — FastAPI application that replaces the Flask dev server.
+
+Strategy:
+  - Critical hot-path routes (health, jobs CRUD) are native async FastAPI.
+  - Everything else is delegated to the existing Flask app via WSGIMiddleware.
+  - Long-running job execution is dispatched with asyncio.to_thread so it
+    never blocks the event loop.
+"""
+
+import asyncio
+import json
+import logging
+import os
+import uuid
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+from fastapi import FastAPI, HTTPException, Query, Request, UploadFile, File, Form
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel
+
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+
+from crew_studio.job_database import JobDatabase
+
+logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Database & workspace setup (mirrors Flask app's init logic)
+# ---------------------------------------------------------------------------
+db_path = Path(os.getenv("JOB_DB_PATH", "./crew_jobs.db"))
+job_db = JobDatabase(db_path)
+
+base_workspace_path = Path(os.getenv("WORKSPACE_PATH", "./workspace"))
+base_workspace_path.mkdir(parents=True, exist_ok=True)
+
+# ---------------------------------------------------------------------------
+# Config — loaded lazily so tests can patch before first use
+# ---------------------------------------------------------------------------
+_config = None
+
+
+def _get_config():
+    global _config
+    if _config is None:
+        try:
+            from src.llamaindex_crew.config import ConfigLoader
+            _config = ConfigLoader.load()
+        except Exception as e:
+            logger.warning("Failed to load config: %s", e)
+    return _config
+
+
+# ---------------------------------------------------------------------------
+# Job runner — imported lazily to avoid heavy imports at module level
+# ---------------------------------------------------------------------------
+
+def _run_job_sync(job_id: str, vision: str, config_obj):
+    """Synchronous wrapper that runs in a thread via asyncio.to_thread."""
+    from crew_studio.llamaindex_web_app import run_job_async
+    run_job_async(job_id, vision, config_obj)
+
+
+def _run_job_with_backend_sync(job_id: str, vision: str, backend):
+    from crew_studio.llamaindex_web_app import run_job_with_backend
+    run_job_with_backend(job_id, vision, backend)
+
+
+# ---------------------------------------------------------------------------
+# FastAPI app
+# ---------------------------------------------------------------------------
+
+app = FastAPI(title="AI Software Development Crew", version="2.0.0")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+# ---------------------------------------------------------------------------
+# Health endpoints — native async, zero blocking
+# ---------------------------------------------------------------------------
+
+@app.get("/health")
+async def health():
+    return {"status": "healthy", "service": "AI Software Development Crew",
+            "version": "2.0.0", "timestamp": datetime.now().isoformat()}
+
+
+@app.get("/health/live")
+async def health_live():
+    return {"status": "alive", "timestamp": datetime.now().isoformat()}
+
+
+# ---------------------------------------------------------------------------
+# Job CRUD — native async, DB calls are sync but fast (SQLite)
+# ---------------------------------------------------------------------------
+
+class CreateJobRequest(BaseModel):
+    vision: str
+    backend: str = "opl-ai-team"
+    github_urls: List[str] = []
+    mode: str = "build"
+    metadata: Dict[str, Any] = {}
+
+
+def _resolve_backend(name: str):
+    """Look up the backend, returning None for the default OPL path."""
+    try:
+        from src.llamaindex_crew.backends import registry
+        backend = registry.get_backend(name)
+        if not backend:
+            return None, f"Unknown backend: {name}"
+        if not backend.is_available():
+            return None, f"Backend not available: {name}"
+        return backend, None
+    except ImportError:
+        return None, None if name == "opl-ai-team" else f"Backend not available: {name}"
+    except Exception as e:
+        logger.warning("Backend registry error: %s", e)
+        return None, None if name == "opl-ai-team" else f"Backend not available: {name}"
+
+
+def _dispatch_job(job_id: str, vision: str, backend_name: str):
+    """Runs in executor thread — safe to do slow imports/work here."""
+    config_obj = _get_config()
+    if backend_name != "opl-ai-team":
+        backend, _ = _resolve_backend(backend_name)
+        if backend:
+            _run_job_with_backend_sync(job_id, vision, backend)
+            return
+    _run_job_sync(job_id, vision, config_obj)
+
+
+@app.post("/api/jobs", status_code=201)
+async def create_job(body: CreateJobRequest):
+    """Create a new build job. Returns 201 immediately; execution is async."""
+
+    if not body.vision:
+        raise HTTPException(status_code=400, detail="Vision is required")
+
+    if body.backend != "opl-ai-team":
+        _, err = _resolve_backend(body.backend)
+        if err:
+            raise HTTPException(status_code=400, detail=err)
+
+    job_id = str(uuid.uuid4())
+    job_workspace = base_workspace_path / f"job-{job_id}"
+    job_workspace.mkdir(parents=True, exist_ok=True)
+
+    job_db.create_job(job_id, body.vision, str(job_workspace), metadata=body.metadata)
+
+    if body.mode in ("migration", "refactor"):
+        phase = "awaiting_migration" if body.mode == "migration" else "awaiting_refactor"
+        job_db.update_job(job_id, {"status": "queued", "current_phase": phase})
+        return {"job_id": job_id, "status": "queued", "documents": 0,
+                "source_files": 0, "github_repos": 0}
+
+    loop = asyncio.get_running_loop()
+    loop.run_in_executor(None, _dispatch_job, job_id, body.vision, body.backend)
+
+    return {"job_id": job_id, "status": "queued",
+            "documents": 0, "github_repos": 0}
+
+
+@app.get("/api/jobs")
+async def list_jobs(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(10, ge=1, le=100),
+    vision_contains: Optional[str] = None,
+    status: Optional[str] = None,
+    sort_by: Optional[str] = None,
+    sort_order: Optional[str] = None,
+):
+    offset = (page - 1) * page_size
+    total = job_db.get_jobs_count(
+        vision_filter=vision_contains, status_filter=status)
+    jobs = job_db.get_jobs_paginated(
+        limit=page_size, offset=offset,
+        vision_filter=vision_contains, status_filter=status,
+        sort_by=sort_by, sort_order=sort_order,
+    )
+
+    def _summary(job):
+        summary = {
+            "id": job["id"], "vision": job["vision"],
+            "status": job["status"], "progress": job["progress"],
+            "current_phase": job["current_phase"],
+            "created_at": job["created_at"],
+            "completed_at": job.get("completed_at"),
+        }
+        if job.get("metadata"):
+            summary["metadata"] = job["metadata"]
+        return summary
+
+    return {"jobs": [_summary(j) for j in jobs],
+            "total": total, "page": page, "page_size": page_size}
+
+
+@app.get("/api/jobs/{job_id}")
+async def get_job(job_id: str):
+    job = job_db.get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return job
+
+
+@app.get("/api/jobs/{job_id}/progress")
+async def get_job_progress(job_id: str):
+    job = job_db.get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    last_messages = job.get("last_message", [])
+    if isinstance(last_messages, str):
+        try:
+            last_messages = json.loads(last_messages)
+        except (json.JSONDecodeError, TypeError):
+            last_messages = []
+    return {
+        "status": job["status"],
+        "progress": job["progress"],
+        "current_phase": job["current_phase"],
+        "last_message": last_messages[-10:],
+    }
+
+
+@app.get("/api/backends")
+async def list_backends():
+    try:
+        from src.llamaindex_crew.backends import registry
+        backends = registry.list_backends()
+        return {"backends": backends}
+    except Exception:
+        return {"backends": [
+            {"name": "opl-ai-team", "display_name": "OPL AI Team", "available": True}
+        ]}
+
+
+@app.get("/api/stats")
+async def stats():
+    total = job_db.get_jobs_count()
+    running = job_db.get_jobs_count(status_filter="running")
+    completed = job_db.get_jobs_count(status_filter="completed")
+    failed = job_db.get_jobs_count(status_filter="failed")
+    return {"total": total, "running": running,
+            "completed": completed, "failed": failed}
+
+
+# ---------------------------------------------------------------------------
+# Mount the existing Flask app for all remaining routes
+# ---------------------------------------------------------------------------
+
+def mount_flask_fallback():
+    """Mount the existing Flask WSGI app for routes not yet ported to FastAPI.
+
+    Call this explicitly in production startup (e.g. dev-backend.sh).
+    Skipped automatically during tests or when the Flask app isn't available.
+    """
+    try:
+        from starlette.middleware.wsgi import WSGIMiddleware
+        from crew_studio.llamaindex_web_app import app as flask_app
+        app.mount("/", WSGIMiddleware(flask_app))
+        logger.info("Flask WSGI app mounted as fallback for unported routes")
+    except Exception as e:
+        logger.warning("Flask WSGI mount skipped: %s", e)
+
+
+if os.getenv("MOUNT_FLASK_FALLBACK", "").lower() in ("1", "true", "yes"):
+    mount_flask_fallback()

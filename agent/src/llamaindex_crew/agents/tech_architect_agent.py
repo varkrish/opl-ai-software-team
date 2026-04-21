@@ -5,8 +5,13 @@ Migrated from TechArchitectCrew to LlamaIndex agent
 import logging
 from pathlib import Path
 from typing import Optional, Union
+
+import httpx
+
 from .base_agent import BaseLlamaIndexAgent
 from ..tools import FileWriterTool, FileReaderTool, create_workspace_file_tools
+from ..tools.tool_loader import load_tools
+from ..config import ConfigLoader
 from ..utils.prompt_loader import load_prompt
 
 logger = logging.getLogger(__name__)
@@ -44,7 +49,23 @@ You consider the project vision and constraints when making decisions."""
             tools = [ws_tools[0], ws_tools[1]]  # file_writer, file_reader
         else:
             tools = [FileWriterTool, FileReaderTool]
-        
+
+        try:
+            config = ConfigLoader.load()
+            entries = config.tools.global_tools + config.tools.agent_tools.get("tech_architect", [])
+            extra_tools = load_tools(entries)
+            tools.extend(extra_tools)
+            if extra_tools:
+                backstory += (
+                    "\n\nYou have access to a skill_query tool. ALWAYS use it before defining the "
+                    "tech stack to search for framework-specific skills and coding patterns "
+                    "(e.g. 'Frappe app architecture', 'Frappe DocType patterns', 'custom app development'). "
+                    "This ensures your tech stack decisions align with the target framework's conventions."
+                )
+            logger.info("TechArchitectAgent: loaded %d extra tool(s) from config", len(extra_tools))
+        except Exception:
+            logger.warning("TechArchitectAgent: failed to load extra tools — continuing with built-ins", exc_info=True)
+
         self.agent = BaseLlamaIndexAgent(
             role="Technical Architect",
             goal="Select tech stack and define technical standards",
@@ -55,6 +76,38 @@ You consider the project vision and constraints when making decisions."""
             verbose=True
         )
     
+    @staticmethod
+    def _prefetch_skills(vision: str) -> str:
+        """Pre-fetch framework-specific skills to inject as ground truth."""
+        try:
+            config = ConfigLoader.load()
+            url = getattr(config, 'skills', None)
+            service_url = getattr(url, 'service_url', None) if url else None
+            if not service_url:
+                return ""
+
+            queries = [
+                f"{vision} app folder structure scaffold conventions",
+                f"{vision} DocType patterns architecture",
+            ]
+            sections: list[str] = []
+            for q in queries:
+                resp = httpx.post(
+                    f"{service_url}/query",
+                    json={"query": q, "top_k": 3},
+                    timeout=15,
+                )
+                resp.raise_for_status()
+                for r in resp.json().get("results", []):
+                    sections.append(f"[Skill: {r['skill_name']}]\n{r['content']}")
+
+            if sections:
+                logger.info("TechArchitectAgent: pre-fetched %d skill sections", len(sections))
+                return "\n\n---\n\n".join(sections)
+        except Exception:
+            logger.warning("TechArchitectAgent: skill pre-fetch failed", exc_info=True)
+        return ""
+
     def define_tech_stack(
         self,
         design_spec: str,
@@ -72,36 +125,22 @@ You consider the project vision and constraints when making decisions."""
         Returns:
             Result message
         """
-        # Load task prompt
+        skill_context = self._prefetch_skills(vision)
+
         task_prompt = load_prompt(
             'tech_architect/define_tech_stack_task.txt',
-            fallback="""Review the design specification and define the concrete technology stack.
-
-Design Specification: {design_spec}
-Project Context: {context_digest}
-Project Vision: {vision}
-
-Select specific technologies (databases, frameworks, infrastructure) with justification.
-Save to tech_stack.md"""
+            fallback=_DEFAULT_TECH_STACK_PROMPT,
         )
-        
-        # Format prompt
-        if context_digest:
-            prompt = task_prompt.format(
-                design_spec=design_spec,
-                context_digest=context_digest,
-                vision=vision
-            )
-        else:
-            prompt = task_prompt.format(
-                design_spec=design_spec,
-                context_digest="",
-                vision=vision
-            )
-        
-        # Execute agent
+
+        prompt = task_prompt.format(
+            design_spec=design_spec,
+            context_digest=context_digest or "",
+            vision=vision,
+            skill_context=skill_context,
+        )
+
         response = self.agent.chat(prompt)
-        
+
         return str(response)
     
     def generate_api_contract(
@@ -150,6 +189,51 @@ Save to tech_stack.md"""
             Result message
         """
         return self.define_tech_stack(design_spec, vision, context_digest)
+
+
+_DEFAULT_TECH_STACK_PROMPT = """\
+You are the Technical Architect. Define the concrete technology stack for this project.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+INPUTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Design Specification:
+{design_spec}
+
+Project Context:
+{context_digest}
+
+Project Vision:
+{vision}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+FRAMEWORK REFERENCE (GROUND TRUTH — you MUST follow this)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+The following skill documents describe the REAL conventions for the target framework.
+Your file structure and coding patterns MUST match these exactly.
+Do NOT invent folders, files, or patterns that are not shown here.
+
+{skill_context}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+TASK — Define Tech Stack
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Based on the FRAMEWORK REFERENCE above and the design specification:
+
+1. Select specific technologies (database, framework, infrastructure) with justification.
+2. The file structure MUST be copied from the FRAMEWORK REFERENCE skill documents above.
+   Do NOT use generic MVC patterns (models/, controllers/, views/) unless the framework
+   reference explicitly shows them.
+3. For Frappe apps: the structure comes from `bench new-app`. DocTypes are defined by
+   JSON files, not Python model classes. There are no migrations/ folders.
+4. List every file the developer agents need to create, using the exact folder layout
+   from the skill reference.
+
+Call file_writer(file_path='tech_stack.md', content='<your tech stack>')
+"""
 
 
 _DEFAULT_CONTRACT_PROMPT = """\

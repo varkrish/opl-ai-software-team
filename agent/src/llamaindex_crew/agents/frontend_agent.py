@@ -7,6 +7,8 @@ from pathlib import Path
 from typing import Optional
 from .base_agent import BaseLlamaIndexAgent
 from ..tools import FileWriterTool, FileReaderTool, FileListTool, create_workspace_file_tools
+from ..tools.tool_loader import load_tools
+from ..config import ConfigLoader
 from ..utils.prompt_loader import load_prompt
 
 logger = logging.getLogger(__name__)
@@ -40,10 +42,19 @@ You create reusable components and ensure responsive design."""
 
         if workspace_path is not None:
             ws_tools = create_workspace_file_tools(Path(workspace_path))
-            tools = [ws_tools[0], ws_tools[1], ws_tools[2]]  # file_writer, file_reader, file_lister
+            tools = [ws_tools[0], ws_tools[1], ws_tools[2]]
         else:
             tools = [FileWriterTool, FileReaderTool, FileListTool]
-        
+
+        try:
+            config = ConfigLoader.load()
+            entries = config.tools.global_tools + config.tools.agent_tools.get("frontend", [])
+            extra_tools = load_tools(entries)
+            tools.extend(extra_tools)
+            logger.info("FrontendAgent: loaded %d extra tool(s) from config", len(extra_tools))
+        except Exception:
+            logger.warning("FrontendAgent: failed to load extra tools from config — continuing with built-ins", exc_info=True)
+
         self.agent = BaseLlamaIndexAgent(
             role="Frontend Developer",
             goal="Implement UI components and user interfaces",

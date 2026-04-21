@@ -91,7 +91,21 @@ You MUST specify a COMPLETE, BUILDABLE file structure that includes:
 - IMPORTANT: MapContainer/TileLayer come from 'react-leaflet', NOT 'leaflet'
 - Documentation (README.md)
 
-**FOR PYTHON APPS:**
+**FOR FRAPPE APPS:**
+- Frappe Desk AUTO-GENERATES all UI (forms, lists, reports) from DocType JSON. You do NOT need custom templates, pages, or HTML.
+- A Frappe app is primarily: DocTypes + hooks.py + config/desktop.py. That's it.
+- The folder structure MUST match what `bench new-app` produces.
+- App root: `<app_name>/` containing an inner package `<app_name>/`
+- REQUIRED files: __init__.py, hooks.py, modules.txt, patches.txt, config/__init__.py, config/desktop.py, setup.py, setup.cfg, MANIFEST.in, requirements.txt, README.md, license.txt
+- REQUIRED per DocType: `<module>/doctype/<doctype_name>/` with __init__.py, .json, .py, .js, test_.py
+- DO NOT create these OPTIONAL directories unless user explicitly asks for web portal: templates/, templates/pages/, templates/includes/, templates/generators/, public/css/, public/js/, www/
+- NO models/, controllers/, views/, migrations/ directories — these do NOT exist in Frappe
+- NO manifest.json, desktop_entry.json, bench_config.yml, app.py — these do NOT exist
+- Schema is defined in DocType JSON files, NOT in Python model classes
+- `import os`, `import json`, `open()` are NORMAL Python — they are NOT dangerous
+- See the FRAMEWORK REFERENCE section below for the exact canonical structure
+
+**FOR PYTHON APPS (non-Frappe):**
 - Source files (modules, classes, functions)
 - Dependencies (requirements.txt or pyproject.toml)
 - Entry points (main.py, __init__.py)
@@ -335,12 +349,21 @@ This structure allows: `cd backend && npm install && npm run dev`
 ```
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+FRAMEWORK REFERENCE (from skills service — follow this exactly)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+The following skill documents describe the REAL conventions for the target framework.
+Your file structure MUST match these. Do NOT invent folders or files not shown here.
+
+{skill_context}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 CRITICAL RULES:
 1. You MUST use the EXACT technology stated in the vision (e.g. Spring Boot + PostgreSQL + OpenAPI, or Python + FastAPI, or React Native). Never substitute a different stack.
 2. You MUST specify a COMPLETE, BUILDABLE file structure (not just source files)
 3. Include ALL necessary config files, entry points, and build files
 4. The structure must be runnable (e.g. ./mvnw spring-boot:run for Spring Boot, or npm install && ..., or pip install ...)
+4a. If the FRAMEWORK REFERENCE section above contains skill content, your file structure MUST follow it exactly. Do NOT add folders or files that are not shown in the reference (e.g. no models/, controllers/, views/, migrations/ for Frappe).
 5. You MUST call file_writer to create tech_stack.md
 6. EVERY source file (component, service, controller, module) MUST have a matching test file in the file tree:
    - Angular/TypeScript: *.spec.ts next to the source file (e.g. todo.service.ts → todo.service.spec.ts)

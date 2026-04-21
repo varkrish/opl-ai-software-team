@@ -12,6 +12,8 @@ from ..tools import (
     PytestRunnerTool, CodeCoverageTool,
     create_workspace_file_tools,
 )
+from ..tools.tool_loader import load_tools
+from ..config import ConfigLoader
 from ..utils.prompt_loader import load_prompt
 
 logger = logging.getLogger(__name__)
@@ -46,7 +48,6 @@ You verify and use the technology stack defined by the Technical Architect."""
 
         if workspace_path is not None:
             ws_tools = create_workspace_file_tools(Path(workspace_path))
-            # file_writer, file_reader, file_lister, file_deleter, file_line_replacer + git + test
             tools = list(ws_tools) + [
                 GitInitTool, GitCommitTool, GitStatusTool,
                 PytestRunnerTool, CodeCoverageTool,
@@ -62,7 +63,16 @@ You verify and use the technology stack defined by the Technical Architect."""
                 PytestRunnerTool,
                 CodeCoverageTool,
             ]
-        
+
+        try:
+            config = ConfigLoader.load()
+            entries = config.tools.global_tools + config.tools.agent_tools.get("developer", [])
+            extra_tools = load_tools(entries)
+            tools.extend(extra_tools)
+            logger.info("DevAgent: loaded %d extra tool(s) from config", len(extra_tools))
+        except Exception:
+            logger.warning("DevAgent: failed to load extra tools from config — continuing with built-ins", exc_info=True)
+
         self.agent = BaseLlamaIndexAgent(
             role="Developer",
             goal="Implement features using TDD and horizontal slicing",

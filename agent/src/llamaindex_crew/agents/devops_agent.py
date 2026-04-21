@@ -1,10 +1,15 @@
 """
 DevOps Agent — Creates Containerfile(s) and pipeline YAML (default: OpenShift Pipelines / Tekton).
-Uses externalized standards from prompts/devops/standards/ (UBI, OCP best practices).
+
+Pre-fetches framework-specific containerization skills from the skills service
+so that Frappe apps get S2I/SNE-based Containerfiles (not generic UBI builds).
 """
 import logging
+import os
 from pathlib import Path
 from typing import Optional, List
+
+import httpx
 
 from .base_agent import BaseLlamaIndexAgent
 from ..tools.file_tools import create_workspace_file_tools
@@ -13,12 +18,14 @@ from ..utils.prompt_loader import load_prompt
 
 logger = logging.getLogger(__name__)
 
-# Fallbacks when prompt/standards files are missing
 DEVOPS_BACKSTORY = (
-    "You are a DevOps engineer. You create production-ready Containerfiles using "
-    "Red Hat UBI base images only and OpenShift/OCP best practices (non-root user, "
-    "root group permissions, no privileged ports). You create OpenShift Pipelines (Tekton) "
-    "pipeline YAML by default. Use the file_writer tool to write files under the workspace."
+    "You are a DevOps engineer specialising in containerising applications. "
+    "You MUST check the FRAMEWORK-SPECIFIC CONTAINERIZATION REFERENCE section in the "
+    "task prompt before writing any Containerfile — different frameworks (Frappe, Django, "
+    "Spring, etc.) have their own builder images and patterns. "
+    "You create OpenShift Pipelines (Tekton) pipeline YAML by default. "
+    "Use the file_writer tool to write files under the workspace. "
+    "Also generate a compose.yml for local development if framework skills provide one."
 )
 
 MINIMAL_OCP_FALLBACK = (
@@ -58,13 +65,64 @@ class DevOpsAgent:
 
         self.agent = BaseLlamaIndexAgent(
             role="DevOps Agent",
-            goal="Create Containerfile(s) and CI/CD pipeline (Tekton) following UBI and OCP standards.",
+            goal="Create Containerfile(s) and CI/CD pipeline (Tekton) following framework-specific best practices.",
             backstory=backstory,
             tools=tools,
             agent_type="worker",
             budget_tracker=tracker,
             verbose=True,
         )
+
+    # ------------------------------------------------------------------
+    # Skills pre-fetch — mirrors TechArchitectAgent._prefetch_skills
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _prefetch_containerization_skills(tech_stack: str) -> str:
+        """Query the skills service for framework-specific containerization patterns."""
+        try:
+            service_url = os.environ.get("SKILLS_SERVICE_URL", "").rstrip("/")
+            if not service_url:
+                try:
+                    from ..config import ConfigLoader
+                    config = ConfigLoader.load()
+                    url_obj = getattr(config, "skills", None)
+                    service_url = getattr(url_obj, "service_url", "") if url_obj else ""
+                except Exception:
+                    pass
+            if not service_url:
+                return ""
+
+            queries = [
+                f"{tech_stack} containerfile container image builder",
+                f"{tech_stack} compose development local container",
+            ]
+            sections: list[str] = []
+            seen: set[str] = set()
+            for q in queries:
+                resp = httpx.post(
+                    f"{service_url}/query",
+                    json={"query": q, "top_k": 3},
+                    timeout=15,
+                )
+                resp.raise_for_status()
+                for r in resp.json().get("results", []):
+                    key = (r["skill_name"], r["content"][:80])
+                    if key not in seen:
+                        seen.add(key)
+                        sections.append(f"[Skill: {r['skill_name']}]\n{r['content']}")
+
+            if sections:
+                logger.info(
+                    "DevOpsAgent: pre-fetched %d containerization skill sections",
+                    len(sections),
+                )
+                return "\n\n---\n\n".join(sections)
+        except Exception:
+            logger.warning("DevOpsAgent: skill pre-fetch failed", exc_info=True)
+        return ""
+
+    # ------------------------------------------------------------------
 
     def _load_externalized_standards(self) -> str:
         """Load OCP/UBI and Tekton standards from prompts/devops/standards/."""
@@ -87,15 +145,29 @@ class DevOpsAgent:
         pipeline_type: str = "tekton",
         standards_context: Optional[str] = None,
         project_context: Optional[str] = None,
+        skill_context: Optional[str] = None,
     ) -> str:
-        """Build the task prompt from inputs. Externalized standards are always included."""
+        """Build the task prompt. Framework skills take priority over generic standards."""
         sections: List[str] = []
 
         sections.append(f"## Tech stack\n{tech_stack}")
         sections.append(f"## Pipeline type\n{pipeline_type}")
 
+        if skill_context:
+            sections.append(
+                "## FRAMEWORK-SPECIFIC CONTAINERIZATION REFERENCE (GROUND TRUTH — follow this)\n"
+                "The following skills describe the CORRECT way to containerise this application.\n"
+                "You MUST follow these patterns instead of inventing your own Containerfile.\n"
+                "If the skill recommends S2I builder images, use those — NOT generic UBI images.\n"
+                "If the skill provides a compose.yml template, generate one as well.\n\n"
+                f"{skill_context}"
+            )
+
         externalized = self._load_externalized_standards()
-        sections.append(f"## Containerfile and pipeline standards (must follow)\n{externalized}")
+        sections.append(
+            "## Generic Containerfile and pipeline standards (use ONLY if no framework skill above)\n"
+            f"{externalized}"
+        )
 
         if standards_context:
             sections.append(f"## Additional standards (from request)\n{standards_context}")
@@ -118,9 +190,13 @@ class DevOpsAgent:
                 "Use file_writer for each file."
             )
 
-        sections.append("## Instructions\nCreate and write the following using file_writer:")
-        sections.append("- One or more Containerfile(s) (UBI-based, OCP-compliant).")
-        sections.append(f"- {pipeline_instruction}")
+        sections.append(
+            "## Instructions\nCreate and write the following using file_writer:\n"
+            "- Containerfile(s) matching the framework skill above (e.g. S2I-based for Frappe).\n"
+            "- apps.json if the skill requires it.\n"
+            "- compose.yml for local development if the skill provides a template.\n"
+            f"- {pipeline_instruction}"
+        )
         return "\n\n".join(sections)
 
     def run(
@@ -131,10 +207,13 @@ class DevOpsAgent:
         project_context: Optional[str] = None,
     ) -> str:
         """Run the DevOps agent to produce Containerfile and pipeline files."""
+        skill_context = self._prefetch_containerization_skills(tech_stack)
+
         prompt = self.build_prompt(
             tech_stack=tech_stack,
             pipeline_type=pipeline_type,
             standards_context=standards_context,
             project_context=project_context,
+            skill_context=skill_context,
         )
         return str(self.agent.chat(prompt))

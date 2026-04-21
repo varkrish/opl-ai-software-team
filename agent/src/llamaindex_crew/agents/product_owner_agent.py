@@ -7,6 +7,8 @@ from pathlib import Path
 from typing import Dict, Optional, Union
 from .base_agent import BaseLlamaIndexAgent
 from ..tools import FileWriterTool, create_workspace_file_tools
+from ..tools.tool_loader import load_tools
+from ..config import ConfigLoader
 from ..utils.prompt_loader import load_prompt
 from ..utils.document_indexer import DocumentIndexer
 
@@ -48,7 +50,22 @@ You break down requests into User Stories with Acceptance Criteria using Gherkin
             tools = [ws_tools[0]]  # file_writer
         else:
             tools = [FileWriterTool]
-        
+
+        try:
+            config = ConfigLoader.load()
+            entries = config.tools.global_tools + config.tools.agent_tools.get("product_owner", [])
+            extra_tools = load_tools(entries)
+            tools.extend(extra_tools)
+            if extra_tools:
+                backstory += (
+                    "\n\nYou have access to a skill_query tool. BEFORE writing user stories, "
+                    "use it to search for relevant framework skills and patterns (e.g. 'Frappe app user stories', "
+                    "'invoicing workflow') to understand the target platform's capabilities and constraints."
+                )
+            logger.info("ProductOwnerAgent: loaded %d extra tool(s) from config", len(extra_tools))
+        except Exception:
+            logger.warning("ProductOwnerAgent: failed to load extra tools — continuing with built-ins", exc_info=True)
+
         self.agent = BaseLlamaIndexAgent(
             role="Product Owner",
             goal="Define user requirements and create user stories",

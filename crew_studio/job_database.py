@@ -21,8 +21,14 @@ class JobDatabase:
     
     @contextmanager
     def _get_conn(self):
-        """Get a database connection with automatic commit/rollback."""
-        conn = sqlite3.connect(str(self.db_path))
+        """Get a database connection with automatic commit/rollback.
+
+        Uses WAL journal mode and a generous busy_timeout so concurrent
+        readers never block writers and vice-versa.
+        """
+        conn = sqlite3.connect(str(self.db_path), timeout=10)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=5000")
         conn.row_factory = sqlite3.Row
         try:
             yield conn
@@ -277,33 +283,49 @@ class JobDatabase:
             cursor = conn.execute("DELETE FROM jobs WHERE id = ?", (job_id,))
             return cursor.rowcount > 0
 
+    _TERMINAL_STATUSES = frozenset({"completed", "partially_completed", "failed", "cancelled"})
+
     def update_progress(self, job_id: str, phase: str, progress: int, message: str = None):
-        """Update job progress and optionally append a message."""
-        job = self.get_job(job_id)
-        if not job:
-            return False
-        
-        updates = {
-            'current_phase': phase,
-            'progress': progress
-        }
-        
-        if message:
-            # Parse existing messages, append new one, keep last 50
-            try:
-                messages = json.loads(job.get('last_message', '[]'))
-            except (json.JSONDecodeError, TypeError):
-                messages = []
-            
-            messages.append({
-                'timestamp': datetime.now().isoformat(),
-                'phase': phase,
-                'message': message
-            })
-            messages = messages[-50:]  # Keep last 50 messages
-            updates['last_message'] = json.dumps(messages)
-        
-        return self.update_job(job_id, updates)
+        """Update job progress and optionally append a message.
+
+        Refuses to overwrite a job that has already reached a terminal
+        status (completed, failed, cancelled) — prevents late progress
+        writes from reverting final state.
+        """
+        with self._get_conn() as conn:
+            row = conn.execute(
+                "SELECT status, last_message FROM jobs WHERE id = ?", (job_id,)
+            ).fetchone()
+            if not row:
+                return False
+            if row["status"] in self._TERMINAL_STATUSES:
+                return False
+
+            updates: Dict[str, Any] = {
+                "current_phase": phase,
+                "progress": progress,
+            }
+
+            if message:
+                try:
+                    messages = json.loads(row["last_message"] or "[]")
+                except (json.JSONDecodeError, TypeError):
+                    messages = []
+                messages.append({
+                    "timestamp": datetime.now().isoformat(),
+                    "phase": phase,
+                    "message": message,
+                })
+                messages = messages[-50:]
+                updates["last_message"] = json.dumps(messages)
+
+            set_clause = ", ".join(f"{k} = ?" for k in updates)
+            values = list(updates.values()) + [job_id]
+            conn.execute(
+                f"UPDATE jobs SET {set_clause} WHERE id = ? AND status NOT IN ({','.join('?' for _ in self._TERMINAL_STATUSES)})",
+                values + list(self._TERMINAL_STATUSES),
+            )
+            return True
     
     def mark_started(self, job_id: str):
         """Mark job as started (running)."""

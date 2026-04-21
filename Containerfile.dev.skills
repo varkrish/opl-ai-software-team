@@ -1,0 +1,35 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Skills Service — DEV Base Image
+#
+# Uses python:3.11-slim for native ARM support on Apple Silicon.
+# All deps + embedding model pre-installed; source mounted at runtime.
+# ─────────────────────────────────────────────────────────────────────────────
+FROM python:3.11-slim
+
+WORKDIR /app
+
+RUN mkdir -p /app/skills /app/cache/llama /app/cache/hf /app/src
+
+ENV HF_HOME=/app/cache/hf \
+    TRANSFORMERS_CACHE=/app/cache/hf \
+    LLAMA_INDEX_CACHE_DIR=/app/cache/llama \
+    PYTHONUNBUFFERED=1 \
+    SKILLS_BASE_DIR=/app/skills \
+    SKILLS_INDEX_CACHE_DIR=/app/cache
+
+RUN pip install --no-cache-dir \
+        "torch>=2.2.0" --index-url https://download.pytorch.org/whl/cpu && \
+    pip install --no-cache-dir \
+        "fastapi>=0.110.0" \
+        "uvicorn[standard]>=0.29.0" \
+        "llama-index-core>=0.10.0" \
+        "llama-index-embeddings-huggingface>=0.1.0" \
+        "pydantic>=2.0.0" \
+        "pyyaml>=6.0.0" \
+        "fastmcp>=2.0.0" \
+        watchdog
+
+# Pre-download the embedding model so first request is instant
+RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('BAAI/bge-small-en-v1.5')"
+
+EXPOSE 8090

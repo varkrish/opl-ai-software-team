@@ -1,0 +1,186 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# AI Crew Studio — DEV Compose
+#
+# Source code is bind-mounted into containers built from base images that have
+# all dependencies pre-installed.  Saves are picked up immediately via
+# Flask reloader / uvicorn --reload — no image rebuild needed.
+#
+# Usage:
+#   docker compose -f compose.dev.yaml up --build     # first time (builds base images)
+#   docker compose -f compose.dev.yaml up              # subsequent starts (instant)
+#   docker compose -f compose.dev.yaml up backend      # start only backend
+#   docker compose -f compose.dev.yaml logs -f         # follow all logs
+#   docker compose -f compose.dev.yaml down            # stop all
+#   docker compose -f compose.dev.yaml down -v         # stop + remove volumes
+#
+# After changing pyproject.toml / adding a new pip dependency:
+#   docker compose -f compose.dev.yaml build --no-cache <service>
+#
+# Environment:
+#   Copy .env.example → .env and fill in API keys before starting.
+# ─────────────────────────────────────────────────────────────────────────────
+
+services:
+  # ── Backend: FastAPI ASGI + AI Agents (hot-reload) ─────────────────────────
+  backend:
+    container_name: crew-dev-backend
+    build:
+      context: .
+      dockerfile: Containerfile.dev.backend
+    ports:
+      - "${BACKEND_PORT:-8080}:8080"
+    volumes:
+      - ./agent/src:/app/agent/src:z
+      - ./crew_studio:/app/crew_studio:z
+      - ./scripts:/app/scripts:ro,z
+      - ${CONFIG_FILE:-./config.yaml}:/app/config.yaml:z
+      - crew-workspace:/app/workspace
+      - crew-data:/app/data
+      - backend-cache:/app/cache
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
+      - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://ollama:11434}
+      - WORKSPACE_PATH=/app/workspace
+      - JOB_DB_PATH=/app/data/crew_jobs.db
+      - CONFIG_FILE_PATH=/app/config.yaml
+      - MOUNT_FLASK_FALLBACK=1
+      - PYTHONUNBUFFERED=1
+      - VALIDATOR_URL=http://validator:8080
+      - SKILLS_SERVICE_URL=http://skills-service:8090
+      - NLTK_DATA=/app/cache/nltk
+    command: ["sh", "/app/scripts/dev-backend.sh"]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c 'import urllib.request; urllib.request.urlopen(\"http://localhost:8080/health\")'"]
+      interval: 60s
+      timeout: 5s
+      start_period: 30s
+      retries: 3
+    depends_on:
+      validator:
+        condition: service_healthy
+    networks:
+      - crew-net
+    deploy:
+      resources:
+        limits:
+          cpus: '4.00'
+          memory: 10G
+        reservations:
+          cpus: '2.00'
+          memory: 4G
+
+  # ── Code Validator (hot-reload) ────────────────────────────────────────────
+  validator:
+    container_name: crew-dev-validator
+    build:
+      context: ${VALIDATOR_DIR:-../crew-code-validator}
+      dockerfile: ${VALIDATOR_DEV_DOCKERFILE:-../opl-ai-software-team/Containerfile.dev.validator}
+    ports:
+      - "${VALIDATOR_PORT:-8180}:8080"
+    volumes:
+      - ${VALIDATOR_DIR:-../crew-code-validator}/src/crew_validator:/opt/app-root/src/crew_validator:ro,z
+      - crew-workspace:/app/workspace:ro
+    environment:
+      - LOG_LEVEL=${VALIDATOR_LOG_LEVEL:-DEBUG}
+      - PYTHONUNBUFFERED=1
+      - WATCHFILES_FORCE_POLLING=true
+    command: >
+      uvicorn crew_validator.app:create_app --factory
+      --host 0.0.0.0 --port 8080
+      --reload --reload-dir /opt/app-root/src/crew_validator
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c 'import urllib.request; urllib.request.urlopen(\"http://localhost:8080/healthz\")'"]
+      interval: 60s
+      timeout: 5s
+      start_period: 60s
+      retries: 5
+    networks:
+      - crew-net
+
+  # ── Skills Service (hot-reload) ────────────────────────────────────────────
+  # Standalone repo: https://github.com/varkrish/skills-service
+  # Set SKILLS_SERVICE_DIR in .env to point to your local checkout.
+  skills-service:
+    container_name: crew-dev-skills
+    build:
+      context: ${SKILLS_SERVICE_DIR:-../skills-service}
+      dockerfile: Containerfile
+    ports:
+      - "${SKILLS_PORT:-8090}:8090"
+    volumes:
+      - ${SKILLS_SERVICE_DIR:-../skills-service}/src:/app/src:z
+      - ${SKILLS_DIR:-./skills}:/app/skills/base:ro,z
+      - ${FRAPPE_SKILLS_DIR}:/app/skills/frappe:ro,z
+      - skills-cache:/app/cache
+    environment:
+      - SKILLS_BASE_DIRS=/app/skills/base:/app/skills/frappe
+      - SKILLS_INDEX_CACHE_DIR=/app/cache
+      - LLAMA_INDEX_CACHE_DIR=/app/cache/llama
+      - HF_HOME=/app/cache/hf
+      - TRANSFORMERS_CACHE=/app/cache/hf
+      - HF_HUB_OFFLINE=${HF_HUB_OFFLINE:-0}
+      - PYTHONUNBUFFERED=1
+      - WATCHFILES_FORCE_POLLING=true
+    command: >
+      uvicorn main:app
+      --host 0.0.0.0 --port 8090
+      --reload --reload-dir /app/src
+    working_dir: /app/src
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c 'import urllib.request; urllib.request.urlopen(\"http://localhost:8090/health\")'"]
+      interval: 60s
+      timeout: 60s
+      start_period: 60s
+      retries: 5
+    networks:
+      - crew-net
+
+  # ── Frontend: Vite dev server (HMR) ──────────────────────────────────────────
+  # Source is bind-mounted; node_modules lives in a named volume so native
+  # binaries (rollup, esbuild) match the container's linux arch.
+  # First start runs `npm install` (~15s); subsequent starts are instant.
+  frontend:
+    container_name: crew-dev-frontend
+    image: registry.access.redhat.com/ubi9/nodejs-20:latest
+    ports:
+      - "${FRONTEND_PORT:-3000}:3000"
+    volumes:
+      - ./studio-ui:/app:z
+      - frontend-node-modules:/app/node_modules
+    working_dir: /app
+    command: sh -c "npm install && npm run dev -- --host 0.0.0.0"
+    environment:
+      - VITE_DEV_PROXY_TARGET=http://backend:8080
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:3000/ || exit 1"]
+      interval: 60s
+      timeout: 5s
+      start_period: 30s
+      retries: 3
+    networks:
+      - crew-net
+
+volumes:
+  crew-workspace:
+    driver: local
+  crew-data:
+    driver: local
+  backend-cache:
+    driver: local
+  skills-cache:
+    driver: local
+  frontend-node-modules:
+    driver: local
+
+networks:
+  crew-net:
+    driver: bridge

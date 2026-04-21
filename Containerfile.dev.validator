@@ -1,0 +1,23 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Crew Code Validator — DEV Base Image
+# All dependencies pre-installed; source code mounted at runtime.
+# ─────────────────────────────────────────────────────────────────────────────
+FROM registry.access.redhat.com/ubi9/python-311:latest
+
+USER root
+WORKDIR /opt/app-root/src
+
+COPY pyproject.toml ./
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir \
+        "fastapi>=0.115.0" \
+        "uvicorn[standard]>=0.32.0" \
+        "pydantic>=2.9.0" \
+        "PyYAML>=6.0.2" \
+        watchdog debugpy
+
+RUN chown -R 1001:0 /opt/app-root && chmod -R g=u /opt/app-root
+
+ENV PYTHONUNBUFFERED=1
+USER 1001
+EXPOSE 8080

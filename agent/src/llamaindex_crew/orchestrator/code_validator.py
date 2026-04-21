@@ -72,14 +72,17 @@ class CodeCompletenessValidator:
             return {"complete": False, "issues": [f"Cannot read: {e}"], "file": str(path)}
 
         if not content.strip():
+            if path.name == "__init__.py":
+                return {"complete": True, "issues": [], "file": str(path)}
             return {"complete": False, "issues": ["File is empty"], "file": str(path)}
 
+        is_init = path.name == "__init__.py"
         lines = [l for l in content.splitlines() if l.strip() and not l.strip().startswith(("#", "//", "/*", "*"))]
 
-        if len(lines) < _MIN_MEANINGFUL_LINES:
+        if not is_init and len(lines) < _MIN_MEANINGFUL_LINES:
             issues.append(f"Only {len(lines)} non-comment lines (minimum {_MIN_MEANINGFUL_LINES})")
 
-        if len(content.strip()) < _MIN_MEANINGFUL_CHARS:
+        if not is_init and len(content.strip()) < _MIN_MEANINGFUL_CHARS:
             issues.append(f"Only {len(content.strip())} chars of content (minimum {_MIN_MEANINGFUL_CHARS})")
 
         for pattern, label in _STUB_PATTERNS:

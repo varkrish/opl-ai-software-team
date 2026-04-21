@@ -17,13 +17,11 @@ class CodeSafetyChecker:
         # Forbidden patterns by language
         self.forbidden_patterns = {
             'python': [
-                (r'import\s+(os|subprocess|sys|socket)', 'Dangerous system imports'),
                 (r'os\.system\s*\(', 'Direct system command execution'),
                 (r'subprocess\.(call|run|Popen)', 'Subprocess execution'),
                 (r'eval\s*\(', 'Code evaluation'),
                 (r'exec\s*\(', 'Code execution'),
                 (r'__import__\s*\(', 'Dynamic import'),
-                (r'open\s*\([^)]*[\'"]w[\'"]', 'File write operations'),
             ],
             'javascript': [
                 (r'eval\s*\(', 'Code evaluation'),

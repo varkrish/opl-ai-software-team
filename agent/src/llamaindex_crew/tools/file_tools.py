@@ -174,6 +174,13 @@ def file_writer(file_path: str, content: str, workspace_path: Optional[str] = No
         workspace = _resolve_workspace(workspace_path)
         workspace.mkdir(parents=True, exist_ok=True)
 
+        # Strip absolute workspace prefix so the safety checker doesn't reject it
+        ws_str = str(workspace.resolve())
+        if file_path.startswith(ws_str):
+            file_path = file_path[len(ws_str):].lstrip("/")
+        elif file_path.startswith(str(workspace)):
+            file_path = file_path[len(str(workspace)):].lstrip("/")
+
         logger.debug(
             "file_writer workspace=%s file_path=%s",
             workspace, file_path,

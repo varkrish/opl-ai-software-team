@@ -439,20 +439,29 @@ class PythonStrategy(LanguageStrategy):
             "asyncio", "threading", "subprocess", "uuid", "time",
         }
 
-    @staticmethod
-    def _load_third_party_names(workspace: Path) -> set:
-        names: set = set()
-        req_file = workspace / "requirements.txt"
-        if req_file.exists():
-            for line in req_file.read_text(encoding="utf-8", errors="replace").splitlines():
-                line = line.strip()
-                if line and not line.startswith("#"):
-                    pkg = re.split(r"[>=<!\[;]", line)[0].strip()
-                    if pkg:
-                        names.add(pkg.replace("-", "_").lower())
-                        names.add(pkg.replace("-", "_"))
-                        names.add(pkg.replace("_", "-"))
-                        names.add(pkg)
+    _KNOWN_FRAMEWORKS = frozenset({
+        "frappe", "erpnext", "frappe_microservice",
+        "django", "flask", "fastapi", "celery", "gunicorn",
+        "requests", "httpx", "pydantic", "sqlalchemy",
+        "numpy", "pandas", "scipy", "matplotlib",
+        "pytest", "click", "typer", "boto3", "redis",
+    })
+
+    @classmethod
+    def _load_third_party_names(cls, workspace: Path) -> set:
+        names: set = set(cls._KNOWN_FRAMEWORKS)
+        for manifest in ("requirements.txt", "setup.py", "setup.cfg"):
+            req_file = workspace / manifest
+            if req_file.exists():
+                for line in req_file.read_text(encoding="utf-8", errors="replace").splitlines():
+                    line = line.strip()
+                    if line and not line.startswith("#"):
+                        pkg = re.split(r"[>=<!\[;]", line)[0].strip()
+                        if pkg and pkg[0].isalpha():
+                            names.add(pkg.replace("-", "_").lower())
+                            names.add(pkg.replace("-", "_"))
+                            names.add(pkg.replace("_", "-"))
+                            names.add(pkg)
         return names
 
     @staticmethod

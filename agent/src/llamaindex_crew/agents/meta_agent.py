@@ -9,6 +9,8 @@ from pathlib import Path
 from typing import Dict, Optional
 from .base_agent import BaseLlamaIndexAgent
 from ..tools import FileWriterTool
+from ..tools.tool_loader import load_tools
+from ..config import ConfigLoader
 from ..utils.prompt_loader import load_prompt
 
 logger = logging.getLogger(__name__)
@@ -25,7 +27,17 @@ class MetaAgent:
             budget_tracker: Optional budget tracker instance
         """
         self.budget_tracker = budget_tracker
-        
+
+        # Load skills/tools from config for all meta sub-agents
+        meta_tools: list = []
+        try:
+            config = ConfigLoader.load()
+            entries = config.tools.global_tools + config.tools.agent_tools.get("meta", [])
+            meta_tools = load_tools(entries)
+            logger.info("MetaAgent: loaded %d extra tool(s) from config", len(meta_tools))
+        except Exception:
+            logger.warning("MetaAgent: failed to load extra tools — continuing without", exc_info=True)
+
         # Create vision agent
         vision_backstory = load_prompt('vision_agent.txt', fallback="""You are the Vision Agent.
 Your goal is to analyze the raw project vision/idea and extract the core "Project DNA" to guide the team.
@@ -37,11 +49,19 @@ Responsibilities:
 
 Output Format: A concise textual summary titled "Project Context Digest".""")
         
+        vision_tool_hint = ""
+        if meta_tools:
+            vision_tool_hint = (
+                "\n\nYou have access to a skill_query tool. Use it to search for relevant "
+                "coding skills and framework patterns (e.g. Frappe, React, Python) to enrich "
+                "your analysis with concrete technical context."
+            )
+
         self.vision_agent = BaseLlamaIndexAgent(
             role='Visionary',
             goal='Extract the core DNA and requirements from the project vision',
-            backstory=vision_backstory + "\n\nIMPORTANT: Do not use any tools. Just provide a textual response.",
-            tools=[],  # Vision agent doesn't need tools
+            backstory=vision_backstory + vision_tool_hint,
+            tools=list(meta_tools),
             agent_type="manager",
             budget_tracker=budget_tracker,
             verbose=True
@@ -135,6 +155,15 @@ IMPORTANT:
 - Developer: Horizontal Slicing, TDD.
 - Frontend: Design System.
 - Code Reviewer: Exploratory Testing.
+
+CRITICAL — SKILL TOOLS:
+Every agent has access to a skill_query tool that searches project coding skills and 
+framework-specific patterns. Each backstory MUST instruct the agent to call skill_query 
+BEFORE starting their main task, to discover framework conventions and coding patterns.
+For the Tech Architect specifically, the backstory MUST say:
+"You MUST call skill_query to look up the target framework's real folder structure 
+and coding conventions BEFORE defining the tech stack. Do NOT invent file structures — 
+use what the skill results show."
 
 CRITICAL: Output ONLY valid JSON.
 Structure:

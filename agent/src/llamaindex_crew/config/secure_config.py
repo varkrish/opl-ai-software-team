@@ -22,7 +22,7 @@ import os
 import stat
 import logging
 from pathlib import Path
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Literal, Union
 from pydantic import BaseModel, Field, validator
 import yaml
 from cryptography.fernet import Fernet, InvalidToken
@@ -88,6 +88,42 @@ class PromptLimitsConfig(BaseModel):
     )
 
 
+class SkillsConfig(BaseModel):
+    """Skills service connection configuration"""
+    service_url: Optional[str] = Field(None, description="URL of the skills service (None = disabled)")
+
+
+class NativeToolEntry(BaseModel):
+    """A Python-importable tool: module path + factory/symbol name + kwargs."""
+    type: Literal["native"] = "native"
+    module: str = Field(..., description="Dotted module path, e.g. 'llamaindex_crew.tools.skill_tools'")
+    name: str = Field(..., description="Callable or FunctionTool symbol inside the module")
+    config: dict = Field(default_factory=dict, description="Kwargs forwarded to the factory")
+
+
+class McpToolEntry(BaseModel):
+    """An MCP server whose tools are bridged into the agent at startup."""
+    type: Literal["mcp"] = "mcp"
+    server_name: str = Field(..., description="Logical name used for logging and tool-name prefixing")
+    command: Optional[str] = Field(None, description="Executable for stdio transport (e.g. 'python')")
+    args: List[str] = Field(default_factory=list, description="CLI args for the command")
+    url: Optional[str] = Field(None, description="URL for SSE / streamable-HTTP transport")
+    env: Dict[str, str] = Field(default_factory=dict, description="Extra env vars for the server process")
+    tools: List[str] = Field(default_factory=list, description="Allow-list of tool names (empty = all)")
+
+
+ToolEntry = Union[NativeToolEntry, McpToolEntry]
+
+
+class ToolsConfig(BaseModel):
+    """Registry of extra tools injected into agents at startup."""
+    global_tools: List[ToolEntry] = Field(default_factory=list, description="Tools added to every agent")
+    agent_tools: Dict[str, List[ToolEntry]] = Field(
+        default_factory=dict,
+        description="Per-agent-role tool lists, keyed by role slug (e.g. 'developer', 'frontend')",
+    )
+
+
 class SecretConfig(BaseModel):
     """
     Main configuration model with validation
@@ -100,6 +136,8 @@ class SecretConfig(BaseModel):
     workspace: WorkspaceConfig = Field(default_factory=WorkspaceConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
     prompt_limits: PromptLimitsConfig = Field(default_factory=PromptLimitsConfig)
+    skills: SkillsConfig = Field(default_factory=SkillsConfig)
+    tools: ToolsConfig = Field(default_factory=ToolsConfig)
     
     # Encryption key for encrypted values
     _encryption_key: Optional[bytes] = None
