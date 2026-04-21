@@ -9,6 +9,7 @@ import Files from './pages/Files';
 import Settings from './pages/Settings';
 import Migration from './pages/Migration';
 import Refactor from './pages/Refactor';
+import Skills from './pages/Skills';
 
 const App: React.FC = () => {
   return (
@@ -20,6 +21,7 @@ const App: React.FC = () => {
           <Route path="/agents" element={<Agents />} />
           <Route path="/tasks" element={<Tasks />} />
           <Route path="/files" element={<Files />} />
+          <Route path="/skills" element={<Skills />} />
           <Route path="/settings" element={<Settings />} />
           <Route path="/migration" element={<Migration />} />
           <Route path="/migration/:jobId" element={<Migration />} />

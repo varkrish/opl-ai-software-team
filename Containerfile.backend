@@ -52,7 +52,8 @@ RUN cd /app/agent && \
         "flask-cors>=4.0.0" \
         "jsonschema[format]>=4.0.0" \
         "litellm>=1.0.0" \
-        "cryptography>=41.0.0"
+        "cryptography>=41.0.0" \
+        "httpx>=0.28.0"
 
 # ── Copy application source ──────────────────────────────────────────────────
 COPY agent/src/ /app/agent/src/

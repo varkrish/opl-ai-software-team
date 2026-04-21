@@ -11,6 +11,8 @@ import type {
   HealthCheck,
   BackendOption,
   Refinement,
+  SkillInfo,
+  SkillSearchResult,
 } from '../types';
 
 const api = axios.create({
@@ -433,6 +435,31 @@ export interface RefactorStatus {
 
 export async function getRefactorStatus(jobId: string): Promise<RefactorStatus> {
   const { data } = await api.get<RefactorStatus>(`/api/jobs/${jobId}/refactor`);
+  return data;
+}
+
+// ── Skills ───────────────────────────────────────────────────────────────────
+export async function getSkills(): Promise<{ skills: SkillInfo[]; available: boolean }> {
+  const { data } = await api.get<{ skills: SkillInfo[]; available: boolean }>('/api/skills');
+  return data;
+}
+
+export async function querySkills(
+  query: string,
+  topK = 5,
+  tags?: string[],
+): Promise<{ results: SkillSearchResult[]; available: boolean }> {
+  const payload: { query: string; top_k: number; tags?: string[] } = { query, top_k: topK };
+  if (tags && tags.length > 0) payload.tags = tags;
+  const { data } = await api.post<{ results: SkillSearchResult[]; available: boolean }>(
+    '/api/skills/query',
+    payload,
+  );
+  return data;
+}
+
+export async function reloadSkills(): Promise<{ status: string }> {
+  const { data } = await api.post<{ status: string }>('/api/skills/reload');
   return data;
 }
 

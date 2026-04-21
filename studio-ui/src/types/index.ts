@@ -187,3 +187,18 @@ export interface ValidationReport {
   overall: 'PASS' | 'ISSUES_FOUND';
 }
 
+/** Skill metadata from GET /api/skills */
+export interface SkillInfo {
+  name: string;
+  description: string;
+  tags: string[];
+  file_count: number;
+}
+
+/** Semantic search result from POST /api/skills/query */
+export interface SkillSearchResult {
+  skill_name: string;
+  content: string;
+  tags: string[];
+}
+

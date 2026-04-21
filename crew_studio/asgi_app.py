@@ -17,6 +17,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+import httpx
 from fastapi import FastAPI, HTTPException, Query, Request, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -251,6 +252,70 @@ async def stats():
     failed = job_db.get_jobs_count(status_filter="failed")
     return {"total": total, "running": running,
             "completed": completed, "failed": failed}
+
+
+# ---------------------------------------------------------------------------
+# Skills proxy — forwards to the skills-service if available
+# ---------------------------------------------------------------------------
+
+SKILLS_SERVICE_URL = os.getenv("SKILLS_SERVICE_URL", "").rstrip("/")
+
+
+class SkillQueryRequest(BaseModel):
+    query: str
+    top_k: int = 5
+    tags: Optional[List[str]] = None
+
+
+@app.get("/api/skills")
+async def list_skills():
+    """List all available skills. Returns empty list if skills service is down."""
+    if not SKILLS_SERVICE_URL:
+        return {"skills": [], "available": False}
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(f"{SKILLS_SERVICE_URL}/skills")
+            resp.raise_for_status()
+            data = resp.json()
+            return {**data, "available": True}
+    except Exception:
+        logger.debug("Skills service unreachable at %s", SKILLS_SERVICE_URL)
+        return {"skills": [], "available": False}
+
+
+@app.post("/api/skills/query")
+async def query_skills(body: SkillQueryRequest):
+    """Semantic search over skills. Returns empty results if service is down."""
+    if not SKILLS_SERVICE_URL:
+        return {"results": [], "available": False}
+    try:
+        payload: dict = {"query": body.query, "top_k": body.top_k}
+        if body.tags:
+            payload["tags"] = body.tags
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.post(
+                f"{SKILLS_SERVICE_URL}/query", json=payload
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            return {**data, "available": True}
+    except Exception:
+        logger.debug("Skills query failed against %s", SKILLS_SERVICE_URL)
+        return {"results": [], "available": False}
+
+
+@app.post("/api/skills/reload", status_code=202)
+async def reload_skills():
+    """Trigger a skills index rebuild. 503 if service is unreachable."""
+    if not SKILLS_SERVICE_URL:
+        raise HTTPException(status_code=503, detail="Skills service not configured")
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.post(f"{SKILLS_SERVICE_URL}/reload")
+            resp.raise_for_status()
+            return resp.json()
+    except Exception:
+        raise HTTPException(status_code=503, detail="Skills service unreachable")
 
 
 # ---------------------------------------------------------------------------

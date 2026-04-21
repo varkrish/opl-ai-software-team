@@ -25,6 +25,7 @@ const navItems = [
   { path: '/agents', label: 'AI Crew' },
   { path: '/tasks', label: 'Tasks' },
   { path: '/files', label: 'Files' },
+  { path: '/skills', label: 'Skills' },
   { path: '/migration', label: 'MTA Migration' },
   { path: '/refactor', label: 'Refactor' },
   { path: '/settings', label: 'Settings' },
