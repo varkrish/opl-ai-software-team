@@ -1,4 +1,4 @@
-.PHONY: setup agent-test studio-run studio-dev studio-build studio-test-component studio-test-e2e studio-test-open backend-test-api backend-test-e2e backend-test-e2e-quick backend-test-all refine-test refine-test-e2e connector-test test-all reset-db compose-up compose-down compose-logs compose-clean compose-validate container-build container-build-linux container-build-backend container-build-frontend container-build-validator container-run container-stop help ci-install test-quick test-coverage ci-test-e2e install-docs docs docs-deploy
+.PHONY: setup agent-test studio-run backend-test-api backend-test-e2e backend-test-e2e-quick backend-test-all refine-test refine-test-e2e connector-test test-all reset-db compose-up compose-down compose-logs compose-clean compose-validate container-build container-build-linux container-build-backend container-build-validator container-run container-stop help ci-install test-quick test-coverage ci-test-e2e install-docs docs docs-deploy
 
 ROOT_DIR := $(shell pwd)
 # Jira connector repo (sibling dir or set CONNECTOR_DIR)
@@ -13,15 +13,13 @@ PODMAN_PLATFORM_FLAGS := $(if $(strip $(CONTAINER_PLATFORM)),--platform $(CONTAI
 HELM_CONTAINER_PLATFORM ?= linux/amd64
 
 help:
-	@echo "AI Software Development Crew Monorepo"
-	@echo "======================================"
+	@echo "AI Software Development Crew — Backend & Agents"
+	@echo "================================================"
 	@echo ""
 	@echo "Setup & Development:"
 	@echo "  setup           - Install agent dependencies"
 	@echo "  agent-test      - Run agent framework tests"
 	@echo "  studio-run      - Start backend (Flask on port 8081)"
-	@echo "  studio-dev      - Start frontend dev server (Vite on port 3000)"
-	@echo "  studio-build    - Production build to studio-ui/dist/"
 	@echo ""
 	@echo "Testing:"
 	@echo "  backend-test-api       - Run backend API tests (pytest)"
@@ -35,7 +33,7 @@ help:
 	@echo "  reset-db               - Clear job DB and workspace"
 	@echo ""
 	@echo "Container Operations (Podman / Docker):"
-	@echo "  compose-up      - Build & start full stack (backend + frontend + validator)"
+	@echo "  compose-up      - Build & start backend + validator"
 	@echo "  compose-down    - Stop all services"
 	@echo "  compose-logs    - Follow all service logs"
 	@echo "  compose-clean   - Stop & remove volumes"
@@ -44,12 +42,14 @@ help:
 	@echo "  container-build-linux - Same, forced linux/amd64 (servers / Quay / CI parity)"
 	@echo ""
 	@echo "OpenShift / Helm Deployment:"
-	@echo "  helm-build-push - Build & push images to Quay.io"
+	@echo "  helm-build-push - Build & push backend image to Quay.io"
 	@echo "  helm-deploy     - Build, push, deploy to OCP via Helm"
 	@echo "  helm-deploy-dev - Deploy with dev overlay"
 	@echo "  helm-status     - Check Helm release status"
 	@echo "  helm-uninstall  - Remove Helm release from cluster"
 	@echo "  oc-logs         - Follow backend pod logs"
+	@echo ""
+	@echo "Note: Frontend (opl-studio-ui) is in a separate repo."
 	@echo ""
 	@echo "Required env vars for helm-deploy:"
 	@echo "  LLM_API_KEY      - API key for the LLM provider"
@@ -93,12 +93,12 @@ docs-deploy:
 	cd agent && mkdocs gh-deploy --force --clean --verbose
 
 agent-test:
-	@echo "🧪 Running Agent Tests..."
+	@echo "Running Agent Tests..."
 	cd agent && pytest
 
 # Jira connector tests (run from crew_jira_connector; requires CONNECTOR_DIR with dev deps)
 connector-test:
-	@echo "🧪 Running Jira Connector Tests..."
+	@echo "Running Jira Connector Tests..."
 	@test -d "$(CONNECTOR_DIR)" || (echo "CONNECTOR_DIR=$(CONNECTOR_DIR) not found. Set CONNECTOR_DIR or clone crew_jira_connector as sibling."; exit 1)
 	cd "$(CONNECTOR_DIR)" && pip install -q -e ".[dev]" && pytest -v --tb=short
 
@@ -106,34 +106,13 @@ connector-test:
 test-all: agent-test connector-test
 
 studio-run:
-	@echo "🚀 Starting Crew Studio backend (port 8081 to avoid conflict with JBoss on 8080)..."
+	@echo "Starting Crew Studio backend (port 8081 to avoid conflict with JBoss on 8080)..."
 	@rm -rf agent/src/llamaindex_crew/web
 	@ln -sfn $(ROOT_DIR)/crew_studio agent/src/llamaindex_crew/web
 	export PYTHONPATH=$(ROOT_DIR)/agent:$(ROOT_DIR)/agent/src:$(PYTHONPATH) && \
 	export WORKSPACE_PATH=$(ROOT_DIR)/agent/workspace && \
 	export PORT=8081 && \
 	python3.10 -m src.llamaindex_crew.web.llamaindex_web_app
-
-# Studio UI (PatternFly React)
-studio-dev:
-	@echo "Starting Studio UI dev server..."
-	cd studio-ui && npm run dev
-
-studio-build:
-	@echo "Building Studio UI for production..."
-	cd studio-ui && npm run build
-
-studio-test-component:
-	@echo "Running Cypress component tests..."
-	cd studio-ui && npx cypress run --component
-
-studio-test-e2e:
-	@echo "Running Cypress E2E tests..."
-	cd studio-ui && npx cypress run --e2e
-
-studio-test-open:
-	@echo "Opening Cypress interactive runner..."
-	cd studio-ui && npx cypress open
 
 backend-test-api:
 	@echo "Running backend API tests..."
@@ -180,56 +159,50 @@ reset-db:
 
 # Podman / Docker Compose Operations
 compose-up:
-	@echo "🚀 Starting full stack (backend + frontend + validator)..."
+	@echo "Starting backend + validator..."
 	podman compose up -d --build
-	@echo "✅ Frontend:  http://localhost:$${FRONTEND_PORT:-3000}"
-	@echo "✅ Backend:   http://localhost:$${BACKEND_PORT:-8080}"
-	@echo "✅ Validator: http://localhost:$${VALIDATOR_PORT:-8180}"
+	@echo "Backend:   http://localhost:$${BACKEND_PORT:-8080}"
+	@echo "Validator: http://localhost:$${VALIDATOR_PORT:-8180}"
 
 compose-down:
-	@echo "🛑 Stopping all services..."
+	@echo "Stopping all services..."
 	podman compose down
 
 compose-logs:
-	@echo "📋 Following logs..."
+	@echo "Following logs..."
 	podman compose logs -f
 
 compose-clean:
-	@echo "🗑️  Stopping and removing volumes..."
+	@echo "Stopping and removing volumes..."
 	podman compose down -v
 
 compose-validate:
-	@echo "🧪 Triggering job and running validation..."
+	@echo "Triggering job and running validation..."
 	./scripts/trigger-and-validate.sh
 
 # Individual container builds
 container-build-backend:
-	@echo "🏗️  Building backend image$(if $(strip $(CONTAINER_PLATFORM)), for $(CONTAINER_PLATFORM),)..."
+	@echo "Building backend image$(if $(strip $(CONTAINER_PLATFORM)), for $(CONTAINER_PLATFORM),)..."
 	podman build $(PODMAN_PLATFORM_FLAGS) -t crew-backend:latest -f Containerfile.backend .
 
-container-build-frontend:
-	@echo "🏗️  Building frontend image$(if $(strip $(CONTAINER_PLATFORM)), for $(CONTAINER_PLATFORM),)..."
-	podman build $(PODMAN_PLATFORM_FLAGS) -t crew-frontend:latest -f Containerfile.frontend .
-
 container-build-validator:
-	@echo "🏗️  Building validator image$(if $(strip $(CONTAINER_PLATFORM)), for $(CONTAINER_PLATFORM),)..."
+	@echo "Building validator image$(if $(strip $(CONTAINER_PLATFORM)), for $(CONTAINER_PLATFORM),)..."
 	podman build $(PODMAN_PLATFORM_FLAGS) -t crew-validator:latest -f Containerfile $${VALIDATOR_DIR:-../crew-code-validator}
 
-container-build: container-build-backend container-build-frontend container-build-validator
-	@echo "✅ All images built"
+container-build: container-build-backend container-build-validator
+	@echo "All images built"
 
 container-build-linux:
 	@$(MAKE) container-build CONTAINER_PLATFORM=linux/amd64
 
 container-run:
-	@echo "🚀 Starting full stack..."
+	@echo "Starting services..."
 	podman compose up -d
-	@echo "✅ Frontend:  http://localhost:$${FRONTEND_PORT:-3000}"
-	@echo "✅ Backend:   http://localhost:$${BACKEND_PORT:-8080}"
-	@echo "✅ Validator: http://localhost:$${VALIDATOR_PORT:-8180}"
+	@echo "Backend:   http://localhost:$${BACKEND_PORT:-8080}"
+	@echo "Validator: http://localhost:$${VALIDATOR_PORT:-8180}"
 
 container-stop:
-	@echo "🛑 Stopping all services..."
+	@echo "Stopping all services..."
 	podman compose down
 
 # ── OpenShift / Helm ─────────────────────────────────────────────────────────
@@ -238,11 +211,9 @@ HELM_RELEASE := crew-studio
 HELM_NS      := crew-studio
 
 helm-build-push:
-	@echo "Building and pushing images to Quay.io ($(HELM_CONTAINER_PLATFORM))..."
+	@echo "Building and pushing backend image to Quay.io ($(HELM_CONTAINER_PLATFORM))..."
 	podman build --platform $(HELM_CONTAINER_PLATFORM) -t quay.io/$(USER)/crew-backend:latest -f Containerfile.backend .
 	podman push quay.io/$(USER)/crew-backend:latest
-	podman build --platform $(HELM_CONTAINER_PLATFORM) -t quay.io/$(USER)/crew-frontend:latest -f Containerfile.frontend .
-	podman push quay.io/$(USER)/crew-frontend:latest
 
 helm-deploy: helm-build-push
 	@echo "Deploying to OpenShift via Helm..."
@@ -251,10 +222,9 @@ helm-deploy: helm-build-push
 	helm upgrade --install $(HELM_RELEASE) $(HELM_CHART) \
 		--namespace $(HELM_NS) --create-namespace \
 		--set backend.image.repository=quay.io/$(USER)/crew-backend \
-		--set frontend.image.repository=quay.io/$(USER)/crew-frontend \
 		--set llm.apiKey=$(LLM_API_KEY) \
 		--set llm.apiBaseUrl=$(LLM_API_BASE_URL)
-	@echo "✅ Deployed to OpenShift"
+	@echo "Deployed to OpenShift"
 
 helm-deploy-dev: helm-build-push
 	@echo "Deploying (dev overlay) to OpenShift via Helm..."
@@ -264,10 +234,9 @@ helm-deploy-dev: helm-build-push
 		--namespace $(HELM_NS) --create-namespace \
 		-f $(HELM_CHART)/values-dev.yaml \
 		--set backend.image.repository=quay.io/$(USER)/crew-backend \
-		--set frontend.image.repository=quay.io/$(USER)/crew-frontend \
 		--set llm.apiKey=$(LLM_API_KEY) \
 		--set llm.apiBaseUrl=$(LLM_API_BASE_URL)
-	@echo "✅ Deployed to OpenShift (dev)"
+	@echo "Deployed to OpenShift (dev)"
 
 helm-status:
 	helm status $(HELM_RELEASE) --namespace $(HELM_NS)

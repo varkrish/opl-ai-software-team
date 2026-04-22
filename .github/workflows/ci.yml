@@ -213,4 +213,4 @@ jobs:
         uses: docker/setup-buildx-action@v3
       
       - name: Build Docker images
-        run: make container-build
+        run: make container-build-backend container-build-validator

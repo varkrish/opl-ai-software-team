@@ -140,34 +140,8 @@ services:
     networks:
       - crew-net
 
-  # ── Frontend: Vite dev server (HMR) ──────────────────────────────────────────
-  # Source is bind-mounted; node_modules lives in a named volume so native
-  # binaries (rollup, esbuild) match the container's linux arch.
-  # First start runs `npm install` (~15s); subsequent starts are instant.
-  frontend:
-    container_name: crew-dev-frontend
-    image: registry.access.redhat.com/ubi9/nodejs-20:latest
-    ports:
-      - "${FRONTEND_PORT:-3000}:3000"
-    volumes:
-      - ./studio-ui:/app:z
-      - frontend-node-modules:/app/node_modules
-    working_dir: /app
-    command: sh -c "npm install && npm run dev -- --host 0.0.0.0"
-    environment:
-      - VITE_DEV_PROXY_TARGET=http://backend:8080
-    depends_on:
-      backend:
-        condition: service_healthy
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:3000/ || exit 1"]
-      interval: 60s
-      timeout: 5s
-      start_period: 30s
-      retries: 3
-    networks:
-      - crew-net
+  # Frontend is in a separate repo (opl-studio-ui).
+  # Use the mono repo dev-compose.yml for full-stack development.
 
 volumes:
   crew-workspace:
@@ -178,9 +152,6 @@ volumes:
     driver: local
   skills-cache:
     driver: local
-  frontend-node-modules:
-    driver: local
-
 networks:
   crew-net:
     driver: bridge

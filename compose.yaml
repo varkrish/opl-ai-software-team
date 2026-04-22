@@ -1,5 +1,6 @@
 # ─────────────────────────────────────────────────────────────────────────────
-# AI Crew Studio — Full Stack Compose (Backend + Frontend + Validator)
+# AI Crew Studio — Backend + Validator Compose
+# Frontend is in a separate repo (opl-studio-ui); see mono repo dev-compose.yml.
 # Compatible with: podman-compose, docker compose
 #
 # Usage:
@@ -81,27 +82,6 @@ services:
       interval: 10s
       timeout: 5s
       start_period: 5s
-      retries: 3
-    networks:
-      - crew-net
-
-  # ── Frontend: React + PatternFly (Nginx) ─────────────────────────────────
-  frontend:
-    container_name: crew-frontend
-    build:
-      context: .
-      dockerfile: Containerfile.frontend
-    ports:
-      - "${FRONTEND_PORT:-3000}:8080"
-    depends_on:
-      backend:
-        condition: service_healthy
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "curl", "-sf", "http://localhost:8080/"]
-      interval: 30s
-      timeout: 5s
-      start_period: 10s
       retries: 3
     networks:
       - crew-net
