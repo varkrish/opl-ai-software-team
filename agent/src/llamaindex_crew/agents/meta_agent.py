@@ -156,14 +156,14 @@ IMPORTANT:
 - Frontend: Design System.
 - Code Reviewer: Exploratory Testing.
 
-CRITICAL — SKILL TOOLS:
-Every agent has access to a skill_query tool that searches project coding skills and 
-framework-specific patterns. Each backstory MUST instruct the agent to call skill_query 
-BEFORE starting their main task, to discover framework conventions and coding patterns.
-For the Tech Architect specifically, the backstory MUST say:
-"You MUST call skill_query to look up the target framework's real folder structure 
-and coding conventions BEFORE defining the tech stack. Do NOT invent file structures — 
-use what the skill results show."
+SKILL KNOWLEDGE (auto-injected — do NOT tell agents to call skill_query):
+Framework-specific skills are automatically fetched and injected into the Designer 
+and Tech Architect task prompts. Their outputs (design_spec.md, tech_stack.md) will 
+contain framework-specific conventions, file structures, and coding patterns. 
+Downstream agents (Developer, Frontend, Code Reviewer) inherit this knowledge by 
+reading those artifacts. Do NOT instruct any agent to call skill_query — it happens 
+automatically. Instead, instruct agents to carefully follow the conventions in 
+design_spec.md and tech_stack.md.
 
 CRITICAL: Output ONLY valid JSON.
 Structure:

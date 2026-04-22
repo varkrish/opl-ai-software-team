@@ -6,10 +6,8 @@ import logging
 from pathlib import Path
 from typing import Optional, Union
 
-import httpx
-
 from .base_agent import BaseLlamaIndexAgent
-from ..tools import FileWriterTool, FileReaderTool, create_workspace_file_tools
+from ..tools import FileWriterTool, FileReaderTool, create_workspace_file_tools, prefetch_skills
 from ..tools.tool_loader import load_tools
 from ..config import ConfigLoader
 from ..utils.prompt_loader import load_prompt
@@ -34,6 +32,8 @@ class TechArchitectAgent:
             budget_tracker: Optional budget tracker instance
             workspace_path: When set, file tools write to this path (avoids thread-local/env issues).
         """
+        self.workspace_path = Path(workspace_path) if workspace_path else None
+
         default_backstory = load_prompt(
             'tech_architect/tech_architect_backstory.txt',
             fallback="""You are a Technical Architect.
@@ -45,7 +45,7 @@ You consider the project vision and constraints when making decisions."""
         backstory = custom_backstory or default_backstory
 
         if workspace_path is not None:
-            ws_tools = create_workspace_file_tools(Path(workspace_path))
+            ws_tools = create_workspace_file_tools(self.workspace_path)
             tools = [ws_tools[0], ws_tools[1]]  # file_writer, file_reader
         else:
             tools = [FileWriterTool, FileReaderTool]
@@ -57,10 +57,10 @@ You consider the project vision and constraints when making decisions."""
             tools.extend(extra_tools)
             if extra_tools:
                 backstory += (
-                    "\n\nYou have access to a skill_query tool. ALWAYS use it before defining the "
-                    "tech stack to search for framework-specific skills and coding patterns "
-                    "(e.g. 'Frappe app architecture', 'Frappe DocType patterns', 'custom app development'). "
-                    "This ensures your tech stack decisions align with the target framework's conventions."
+                    "\n\nFramework-specific skills are automatically injected into your task "
+                    "prompt as FRAMEWORK REFERENCE. Your tech stack and file structure MUST "
+                    "follow the conventions described there. Do NOT invent folder structures "
+                    "or patterns — use what the skill reference shows."
                 )
             logger.info("TechArchitectAgent: loaded %d extra tool(s) from config", len(extra_tools))
         except Exception:
@@ -75,38 +75,6 @@ You consider the project vision and constraints when making decisions."""
             budget_tracker=budget_tracker,
             verbose=True
         )
-    
-    @staticmethod
-    def _prefetch_skills(vision: str) -> str:
-        """Pre-fetch framework-specific skills to inject as ground truth."""
-        try:
-            config = ConfigLoader.load()
-            url = getattr(config, 'skills', None)
-            service_url = getattr(url, 'service_url', None) if url else None
-            if not service_url:
-                return ""
-
-            queries = [
-                f"{vision} app folder structure scaffold conventions",
-                f"{vision} DocType patterns architecture",
-            ]
-            sections: list[str] = []
-            for q in queries:
-                resp = httpx.post(
-                    f"{service_url}/query",
-                    json={"query": q, "top_k": 3},
-                    timeout=15,
-                )
-                resp.raise_for_status()
-                for r in resp.json().get("results", []):
-                    sections.append(f"[Skill: {r['skill_name']}]\n{r['content']}")
-
-            if sections:
-                logger.info("TechArchitectAgent: pre-fetched %d skill sections", len(sections))
-                return "\n\n---\n\n".join(sections)
-        except Exception:
-            logger.warning("TechArchitectAgent: skill pre-fetch failed", exc_info=True)
-        return ""
 
     def define_tech_stack(
         self,
@@ -125,7 +93,11 @@ You consider the project vision and constraints when making decisions."""
         Returns:
             Result message
         """
-        skill_context = self._prefetch_skills(vision)
+        skill_context = prefetch_skills(
+            vision=vision,
+            role="tech_architect",
+            workspace_path=self.workspace_path,
+        )
 
         task_prompt = load_prompt(
             'tech_architect/define_tech_stack_task.txt',

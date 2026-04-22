@@ -364,6 +364,25 @@ CRITICAL RULES:
 3. Include ALL necessary config files, entry points, and build files
 4. The structure must be runnable (e.g. ./mvnw spring-boot:run for Spring Boot, or npm install && ..., or pip install ...)
 4a. If the FRAMEWORK REFERENCE section above contains skill content, your file structure MUST follow it exactly. Do NOT add folders or files that are not shown in the reference (e.g. no models/, controllers/, views/, migrations/ for Frappe).
+4b. FRAPPE APP NESTING (CRITICAL — read carefully):
+   Frappe apps have THREE levels of nesting: app_root/inner_package/module_folder/doctype/
+   Example for an app called "leave_tracker" with module "Leave Tracker":
+     leave_tracker/                        ← App root
+     └── leave_tracker/                    ← Inner Python package (same name)
+         ├── __init__.py
+         ├── hooks.py
+         ├── modules.txt                   ← Contains "Leave Tracker"
+         └── leave_tracker/                ← Module folder (snake_case of module name)
+             ├── __init__.py
+             └── doctype/                  ← doctype/ lives INSIDE the module folder
+                 └── leave_request/
+                     ├── leave_request.json
+                     ├── leave_request.py
+                     └── test_leave_request.py
+   WRONG: leave_tracker/leave_tracker/doctype/  ← Missing module folder level!
+   RIGHT: leave_tracker/leave_tracker/leave_tracker/doctype/
+   The doctype/ folder NEVER sits directly under the inner package — it is always inside a module folder.
+   Similarly, page/ and report/ folders go inside the module folder, NOT directly under the inner package.
 5. You MUST call file_writer to create tech_stack.md
 6. EVERY source file (component, service, controller, module) MUST have a matching test file in the file tree:
    - Angular/TypeScript: *.spec.ts next to the source file (e.g. todo.service.ts → todo.service.spec.ts)

@@ -20,6 +20,14 @@ EXTRACT:
 CRITICAL: Count how many files are in the tech_stack file structure!
 If tech_stack shows 6 files, you MUST create all 6 files!
 
+FRAPPE APP FILE PATHS — MANDATORY:
+If this is a Frappe app, file paths have THREE levels of same-name folders. This is NOT a typo!
+Example for app "asset_tracker" with module "Asset Tracker":
+  asset_tracker/asset_tracker/asset_tracker/doctype/it_asset/it_asset.json
+  Level 1: app root / Level 2: inner package / Level 3: module folder / doctype/ / doctype_name/
+You MUST use the EXACT paths from tech_stack.md. Do NOT "simplify" by removing a folder level.
+If tech_stack.md shows three nested folders with the same name, create all three.
+
 Example from tech_stack.md:
 ```
 src/
