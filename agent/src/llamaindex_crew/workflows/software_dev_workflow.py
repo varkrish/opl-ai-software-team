@@ -15,6 +15,7 @@ from ..agents import (
     MetaAgent, ProductOwnerAgent, DesignerAgent,
     TechArchitectAgent, DevAgent, FrontendAgent
 )
+from ..agents.meta_agent import ImportModeRecommendedError, user_vision_for_triage
 from ..orchestrator.state_machine import ProjectStateMachine, ProjectState, TransitionContext
 from ..orchestrator.task_manager import TaskManager, TaskStatus, TaskDefinition
 from ..orchestrator.error_recovery import WorkflowErrorRecoveryEngine
@@ -363,7 +364,6 @@ class SoftwareDevWorkflow:
         validator_url = os.getenv("VALIDATOR_URL")
         if validator_url:
             try:
-                import json as _json
                 payload = _json.dumps({
                     "workspace_path": str(self.workspace_path),
                     "checks": ["syntax", "imports", "package_structure", "entrypoint"],
@@ -1216,7 +1216,6 @@ class SoftwareDevWorkflow:
 
         # Write final report to workspace
         try:
-            import json as _json
             report_path = self.workspace_path / "validation_report.json"
             report_path.write_text(
                 _json.dumps(self._validation_report, indent=2, default=str) + "\n",
@@ -1253,7 +1252,6 @@ class SoftwareDevWorkflow:
         backstories_file = self.workspace_path / "agent_backstories.json"
         if backstories_file.exists():
             try:
-                import json as _json
                 self.agent_backstories = _json.loads(backstories_file.read_text(encoding="utf-8"))
                 logger.info("Resume: loaded agent_backstories.json")
             except Exception as e:
@@ -1274,13 +1272,51 @@ class SoftwareDevWorkflow:
             
             # Create meta agent
             self.meta_agent = MetaAgent(budget_tracker=self.budget_tracker)
+
+            # ── Delivery-mode triage: greenfield build vs import+iterate ─────────
+            skip_triage = os.getenv("SKIP_DELIVERY_MODE_TRIAGE", "").strip().lower() in (
+                "1", "true", "yes",
+            )
+            job_meta: Dict[str, Any] = {}
+            if self.job_db:
+                jrow = self.job_db.get_job(self.project_id)
+                if jrow:
+                    rawm = jrow.get("metadata")
+                    if isinstance(rawm, str):
+                        try:
+                            job_meta = _json.loads(rawm)
+                        except (_json.JSONDecodeError, TypeError):
+                            job_meta = {}
+                    elif isinstance(rawm, dict):
+                        job_meta = rawm
+            if job_meta.get("skip_delivery_mode_guard"):
+                skip_triage = True
+                logger.info("skip_delivery_mode_guard: skipping delivery-mode triage")
+
+            if not skip_triage:
+                uv = user_vision_for_triage(self.vision)
+                triage = self.meta_agent.triage_delivery_mode(uv, self.workspace_path)
+                try:
+                    (self.workspace_path / "delivery_mode_triage.json").write_text(
+                        _json.dumps(triage, indent=2),
+                        encoding="utf-8",
+                    )
+                except OSError as e:
+                    logger.warning("Could not save delivery_mode_triage.json: %s", e)
+                if (
+                    triage.get("delivery_mode") == "import_iterate"
+                    and triage.get("confidence") in ("high", "medium")
+                ):
+                    raise ImportModeRecommendedError(
+                        "Meta triage: use Import mode (analyze + Refine) instead of greenfield build.",
+                        triage,
+                    )
             
-            # Run meta agent
+            # Run meta agent (vision digest + backstories)
             backstories = self.meta_agent.run(self.vision)
             self.agent_backstories = backstories
             # Persist for resume-from-checkpoint
             try:
-                import json as _json
                 (self.workspace_path / "agent_backstories.json").write_text(
                     _json.dumps(backstories, indent=2), encoding="utf-8"
                 )
@@ -1298,6 +1334,8 @@ class SoftwareDevWorkflow:
             
             logger.info("✅ Meta phase completed")
             return backstories
+        except ImportModeRecommendedError:
+            raise
         except Exception as e:
             recovery = self.error_recovery.handle_workflow_error("meta", e, retry_count)
             if self.error_recovery.should_retry("meta", retry_count) and retry_count < 3:

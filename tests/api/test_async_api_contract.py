@@ -1,4 +1,4 @@
-n"""
+"""
 Phase 0 — TDD RED → GREEN: Async API contract tests.
 
 These tests verify the NON-BLOCKING behavior of the FastAPI ASGI app.

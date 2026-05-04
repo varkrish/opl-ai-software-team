@@ -8,7 +8,7 @@ from typing import Optional, List
 from .base_agent import BaseLlamaIndexAgent
 from ..tools import (
     FileWriterTool, FileReaderTool, FileListTool,
-    GitInitTool, GitCommitTool, GitStatusTool,
+    GitTool,
     PytestRunnerTool, CodeCoverageTool,
     create_workspace_file_tools,
 )
@@ -49,7 +49,7 @@ You verify and use the technology stack defined by the Technical Architect."""
         if workspace_path is not None:
             ws_tools = create_workspace_file_tools(Path(workspace_path))
             tools = list(ws_tools) + [
-                GitInitTool, GitCommitTool, GitStatusTool,
+                GitTool,
                 PytestRunnerTool, CodeCoverageTool,
             ]
         else:
@@ -57,9 +57,7 @@ You verify and use the technology stack defined by the Technical Architect."""
                 FileWriterTool,
                 FileReaderTool,
                 FileListTool,
-                GitInitTool,
-                GitCommitTool,
-                GitStatusTool,
+                GitTool,
                 PytestRunnerTool,
                 CodeCoverageTool,
             ]

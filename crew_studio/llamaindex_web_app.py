@@ -10,6 +10,8 @@ os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 import fnmatch
 import io
 import json
+import logging
+import re
 import uuid
 import zipfile
 import threading
@@ -21,6 +23,8 @@ from urllib.parse import unquote
 from flask import Flask, render_template, request, jsonify, send_from_directory, send_file
 from flask_cors import CORS
 from dotenv import load_dotenv
+
+logger = logging.getLogger(__name__)
 
 from src.llamaindex_crew.config import ConfigLoader, SecretConfig
 from crew_studio.job_database import JobDatabase
@@ -44,7 +48,14 @@ web_dir = current_dir
 app = Flask(__name__, 
             static_folder=str(web_dir / 'static') if (web_dir / 'static').exists() else None,
             template_folder=str(web_dir / 'templates') if (web_dir / 'templates').exists() else None)
-CORS(app)
+
+def _cors_origins() -> list:
+    raw = os.getenv("CORS_ALLOWED_ORIGINS", "").strip()
+    if raw:
+        return [o.strip() for o in raw.split(",") if o.strip()]
+    return ["http://localhost:3000", "http://127.0.0.1:3000", "http://localhost:5173"]
+
+CORS(app, origins=_cors_origins(), supports_credentials=False)
 
 # Centralized SQLite database for persistent job storage
 db_path = Path(os.getenv("JOB_DB_PATH", "./crew_jobs.db"))
@@ -58,18 +69,21 @@ base_workspace_path.mkdir(parents=True, exist_ok=True)
 # ── Register migration blueprint ─────────────────────────────────────────
 from crew_studio.migration.blueprint import migration_bp  # noqa: E402
 from crew_studio.refactor.blueprint import refactor_bp  # noqa: E402
+from crew_studio.import_flow.blueprint import import_bp  # noqa: E402
 app.config["JOB_DB"] = job_db
 app.config["WORKSPACE_PATH"] = str(base_workspace_path)
 app.register_blueprint(migration_bp)
 app.register_blueprint(refactor_bp)
+app.register_blueprint(import_bp)
 
 
 # ── Phases used by migration / refactor / refinement flows ────────────────
 # Used by resume_pending_jobs to classify interrupted jobs.
 _MIGRATION_PHASES = frozenset({'migrating'})
 _REFACTOR_PHASES = frozenset({'refactoring', 'analysis', 'design', 'planning', 'execution', 'devops'})
+_IMPORT_PHASES = frozenset({'import_analyzing'})
 _REFINEMENT_PHASES = frozenset({'refining'})
-_SKIP_PHASES = frozenset({'awaiting_migration', 'awaiting_refactor'})
+_SKIP_PHASES = frozenset({'awaiting_migration', 'awaiting_refactor', 'awaiting_import', 'awaiting_refinement'})
 
 
 def resume_pending_jobs(override_job_db=None):
@@ -118,19 +132,23 @@ def resume_pending_jobs(override_job_db=None):
         if phase in _SKIP_PHASES:
             continue
 
-        # Migration / refactor in progress → mark interrupted (no checkpoint resume)
-        if phase in _MIGRATION_PHASES | _REFACTOR_PHASES:
+        # Migration / refactor / import analysis in progress → mark interrupted (no checkpoint resume)
+        if phase in _MIGRATION_PHASES | _REFACTOR_PHASES | _IMPORT_PHASES:
+            extra = "Please trigger migration/refactor/import analysis again."
+            if phase in _IMPORT_PHASES:
+                extra = "Please start import analysis again (POST /api/jobs/<id>/analyze)."
             _job_db.update_job(j["id"], {
                 "status": "failed",
                 "current_phase": "error",
-                "error": "Interrupted by server restart. Please trigger migration/refactor again.",
+                "error": f"Interrupted by server restart. {extra}",
                 "completed_at": None,
             })
             # Also clear any stale migration_issues left in 'running' state
             if phase in _MIGRATION_PHASES:
                 _job_db.fail_stale_migrations(j["id"])
             interrupted += 1
-            logger.info("  Marked interrupted %s job %s (phase=%s).", "migration" if phase in _MIGRATION_PHASES else "refactor", j["id"][:8], phase)
+            kind = "migration" if phase in _MIGRATION_PHASES else ("import" if phase in _IMPORT_PHASES else "refactor")
+            logger.info("  Marked interrupted %s job %s (phase=%s).", kind, j["id"][:8], phase)
             continue
 
         # Resumable build job (queued or running, build phase)
@@ -186,6 +204,18 @@ def run_job_with_backend(job_id: str, vision: str, backend):
         job_db.mark_failed(job_id, error_msg)
 
 
+def _is_import_mode_recommended_error(exc: BaseException) -> bool:
+    """True if ``exc`` is MetaAgent's import-mode triage exception.
+
+    The workflow imports ``..agents.meta_agent`` (package ``llamaindex_crew``) while
+    this file used ``isinstance`` against ``src.llamaindex_crew`` — two distinct class
+    objects at runtime, so duck-typing is required.
+    """
+    if type(exc).__name__ != "ImportModeRecommendedError":
+        return False
+    return isinstance(getattr(exc, "triage", None), dict)
+
+
 def run_job_async(job_id: str, vision: str, job_config: SecretConfig = None, resume: bool = False):
     """Run workflow in a separate thread with job-specific workspace"""
     import traceback
@@ -223,7 +253,14 @@ def run_job_async(job_id: str, vision: str, job_config: SecretConfig = None, res
                 "skipping build pipeline. Use POST /api/jobs/{job_id}/refactor to start."
             )
             return
-        
+
+        if job.get("current_phase") == "awaiting_import":
+            logger.warning(
+                f"Job {job_id} is an import job (current_phase=awaiting_import) — "
+                "skipping build pipeline. Use POST /api/jobs/{job_id}/analyze to start import analysis."
+            )
+            return
+
         # Mark job as started (sets current_phase='initializing')
         job_db.mark_started(job_id)
         
@@ -345,6 +382,113 @@ def run_job_async(job_id: str, vision: str, job_config: SecretConfig = None, res
     except Exception as e:
         error_message = str(e)
         error_trace = traceback.format_exc()
+
+        # Meta-agent delivery triage: wrong mode (import vs greenfield)
+        # Auto-convert to import mode, clone source if a URL is in the vision,
+        # and auto-trigger analyze so the user doesn't need to do anything manually.
+        if _is_import_mode_recommended_error(e):
+            triage = getattr(e, 'triage', None) or {}
+            reason = str(triage.get('reason', '') or '').strip()
+            logger.info(
+                "Delivery triage: auto-converting job %s to import mode (reason: %s)",
+                job_id, reason,
+            )
+            job = job_db.get_job(job_id)
+            if job:
+                import json as _triage_json
+                raw_meta = job.get("metadata")
+                meta = raw_meta if isinstance(raw_meta, dict) else {}
+                meta["job_mode"] = "import"
+                meta["auto_converted_from_greenfield"] = True
+                meta["triage_reason"] = reason
+
+                ws = Path(job["workspace_path"])
+                ws.mkdir(parents=True, exist_ok=True)
+
+                # Extract GitHub URL from vision and clone into workspace
+                vision_text = job.get("vision", "")
+                github_urls = re.findall(
+                    r'https?://github\.com/[\w.\-]+/[\w.\-]+', vision_text
+                )
+                cloned = False
+                for url in github_urls:
+                    result = _clone_github_repo(url, ws, job_id)
+                    if result and result.get("files", 0) > 0:
+                        cloned = True
+                        meta["source_url"] = url
+                        break
+
+                job_db.update_job(job_id, {
+                    "status": "running" if cloned else "queued",
+                    "current_phase": "import_analyzing" if cloned else "awaiting_import",
+                    "progress": 5 if cloned else 0,
+                    "error": None,
+                    "metadata": _triage_json.dumps(meta),
+                })
+
+                # If we cloned successfully, auto-trigger analysis → refinement pipeline
+                if cloned:
+                    def _auto_analyze_and_refine():
+                        from crew_studio.import_flow.runner import run_import_analysis
+                        from crew_studio.refinement_runner import run_refinement
+
+                        def _progress(phase, pct, msg=None):
+                            job_db.update_progress(job_id, phase, pct, msg or "")
+                        try:
+                            run_import_analysis(
+                                job_id=job_id,
+                                workspace_path=ws,
+                                job_db=job_db,
+                                progress_callback=_progress,
+                                vision=vision_text,
+                            )
+                        except Exception as analyze_err:
+                            logger.exception("Auto-analyze failed for job %s", job_id)
+                            job_db.update_job(job_id, {
+                                "status": "failed",
+                                "current_phase": "error",
+                                "error": str(analyze_err),
+                            })
+                            return
+
+                        # Analysis succeeded — now auto-trigger refinement with the vision as prompt
+                        refinement_id = str(uuid.uuid4())
+                        refinement_prompt = vision_text
+                        # Strip the [import] prefix for the refinement prompt
+                        if refinement_prompt.lower().startswith("[import]"):
+                            refinement_prompt = refinement_prompt[len("[import]"):].strip()
+
+                        logger.info(
+                            "Auto-triggering refinement for job %s (refinement %s)",
+                            job_id, refinement_id,
+                        )
+                        job_db.create_refinement(refinement_id, job_id, refinement_prompt, None)
+                        job_db.update_job(job_id, {"status": "running"})
+                        job_db.update_progress(job_id, "refining", 0, "Auto-refinement started.")
+
+                        try:
+                            run_refinement(
+                                job_id=job_id,
+                                workspace_path=ws,
+                                prompt=refinement_prompt,
+                                refinement_id=refinement_id,
+                                job_db=job_db,
+                                progress_callback=_progress,
+                                file_path=None,
+                                previous_status="completed",
+                                enhanced=True,
+                            )
+                        except Exception as refine_err:
+                            logger.exception("Auto-refinement failed for job %s", job_id)
+                            job_db.update_job(job_id, {
+                                "status": "failed",
+                                "current_phase": "error",
+                                "error": str(refine_err),
+                            })
+
+                    thread = threading.Thread(target=_auto_analyze_and_refine, daemon=True)
+                    thread.start()
+            return
         
         # Log to error file (workspace may be missing; ensure dir exists and swallow log errors)
         try:
@@ -713,95 +857,28 @@ def _run_repomix(github_url: str, job_workspace: Path, job_id: str) -> Optional[
 def _clone_github_repo(github_url: str, target_dir: Path, job_id: str) -> Optional[Dict[str, Any]]:
     """
     Clone a GitHub repository directly into the target directory.
-    Used for migration mode where we need actual source files, not XML packs.
-    
-    If the clone creates a wrapper directory (common with GitHub), files are
-    moved up to target_dir root and the wrapper is removed.
-    
+    Delegates to the unified git tool's clone implementation.
+
     Returns dict with metadata or None on failure.
     """
-    import logging
-    import shutil
-    import tempfile
-    logger = logging.getLogger(__name__)
-    
-    # Normalise URL
+    from llamaindex_crew.tools.git_tools import clone_repository_into_directory
+
     clean_url = github_url.strip().rstrip('/')
-    
-    # Extract repo name for logging
-    parts = clean_url.rstrip('/').split('/')
+    parts = clean_url.split('/')
     repo_name = '/'.join(parts[-2:]) if len(parts) >= 2 else parts[-1]
-    
-    logger.info(f"Cloning GitHub repo for migration: {repo_name}")
-    
-    try:
-        # Clone to a temp directory first to handle wrapper directories
-        with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
-            clone_target = tmp_path / "clone"
-            
-            result = subprocess.run(
-                ['git', 'clone', '--depth=1', clean_url, str(clone_target)],
-                capture_output=True,
-                text=True,
-                timeout=300,  # 5 min max
-            )
-            
-            if result.returncode != 0:
-                logger.warning(f"Git clone failed (exit {result.returncode}): {result.stderr[:500]}")
-                return None
-            
-            if not clone_target.exists():
-                logger.warning("Git clone completed but directory not found")
-                return None
-            
-            # Check if there's a single top-level directory (common with GitHub archives)
-            contents = list(clone_target.iterdir())
-            # Filter out .git
-            non_git = [c for c in contents if c.name != '.git']
-            
-            source_dir = clone_target
-            wrapper_dir = None
-            
-            # If single directory (ignoring .git), treat it as wrapper
-            if len(non_git) == 1 and non_git[0].is_dir():
-                wrapper_dir = non_git[0].name
-                source_dir = non_git[0]
-                logger.info(f"Detected wrapper directory: {wrapper_dir}")
-            
-            # Copy files from source_dir to target_dir
-            file_count = 0
-            for item in source_dir.rglob('*'):
-                if item.is_file():
-                    # Skip .git internals
-                    if '.git' in item.parts:
-                        continue
-                    
-                    rel_path = item.relative_to(source_dir)
-                    dest = target_dir / rel_path
-                    dest.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.copy2(item, dest)
-                    file_count += 1
-            
-            logger.info(f"Cloned {file_count} files from {repo_name}")
-            
-            return {
-                'repo': repo_name,
-                'files': file_count,
-                'wrapper_dir': wrapper_dir,
-            }
-    
-    except subprocess.TimeoutExpired:
-        logger.error(f"Git clone timed out (300s) for {clean_url}")
-        return None
-    except FileNotFoundError:
-        logger.error("git command not found – Git must be installed")
-        return None
-    except Exception as e:
-        logger.error(f"Git clone error for {clean_url}: {e}")
-        import traceback
-        logger.error(traceback.format_exc())
-        return None
+
+    logger.info("Cloning GitHub repo: %s → %s", repo_name, target_dir)
+    result_msg = clone_repository_into_directory(clean_url, target_dir)
+
+    if "✅" in result_msg:
+        # Extract file count from message like "✅ Cloned ... — 42 files copied"
+        import re as _re
+        m = _re.search(r"(\d+) files", result_msg)
+        file_count = int(m.group(1)) if m else 0
+        return {"repo": repo_name, "files": file_count, "wrapper_dir": None}
+
+    logger.warning("Git clone failed for %s: %s", clean_url, result_msg)
+    return None
 
 
 ALLOWED_EXTENSIONS = {
@@ -993,12 +1070,20 @@ def create_job():
     job_id = str(uuid.uuid4())
     
     if not vision:
-        return jsonify({'error': 'Vision is required'}), 400
+        if mode == 'import':
+            vision = '[Import] Existing codebase'
+        else:
+            return jsonify({'error': 'Vision is required'}), 400
     
     # Create job-specific workspace folder
     job_workspace = base_workspace_path / f"job-{job_id}"
     job_workspace.mkdir(parents=True, exist_ok=True)
     
+    if mode == 'import':
+        merged = dict(metadata) if isinstance(metadata, dict) else {}
+        merged['job_mode'] = 'import'
+        metadata = merged
+
     # Create job record in database
     job_db.create_job(job_id, vision, str(job_workspace), metadata=metadata)
     
@@ -1010,10 +1095,10 @@ def create_job():
             files = files[:MAX_FILES_PER_JOB]
         uploaded_docs = _save_uploaded_files(job_id, job_workspace, files)
 
-    # ── Migration/Refactor mode: extract source ZIP to workspace root, skip build ──
+    # ── Migration/Refactor/Import mode: extract source ZIP to workspace root, skip build ──
     source_count = 0
-    if mode in ('migration', 'refactor'):
-        print(f"[Migration] mode=migration, request.files keys: {list(request.files.keys()) if request.files else 'NONE'}")
+    if mode in ('migration', 'refactor', 'import'):
+        print(f"[Migration] mode={mode}, request.files keys: {list(request.files.keys()) if request.files else 'NONE'}")
         if request.files:
             archive = request.files.get('source_archive')
             print(f"[Migration] source_archive present: {archive is not None}, filename: {archive.filename if archive else 'N/A'}")
@@ -1027,7 +1112,7 @@ def create_job():
 
     valid_urls = [u for u in github_urls if u and _is_github_url(u)]
 
-    if mode in ('migration', 'refactor'):
+    if mode in ('migration', 'refactor', 'import'):
         # Clone GitHub repos directly to workspace root (not packed as XML)
         github_file_count = 0
         for url in valid_urls:
@@ -1039,10 +1124,24 @@ def create_job():
                 print(f"Failed to clone {url}: {e}")
                 # Continue with other repos even if one fails
         
-        # For migration/refactor projects we only persist files — the build pipeline
-        # is NOT started. The frontend calls POST /api/jobs/<id>/{migrate|refactor}
+        if mode == 'import' and source_count + github_file_count == 0:
+            import shutil
+            job_db.delete_job(job_id)
+            shutil.rmtree(job_workspace, ignore_errors=True)
+            return jsonify({
+                'error': 'Import mode requires a source ZIP (source_archive) and/or at least one valid '
+                'GitHub URL that cloned successfully into the workspace.',
+            }), 400
+
+        # For migration/refactor/import projects we only persist files — the build pipeline
+        # is NOT started. The frontend calls POST /api/jobs/<id>/{migrate|refactor|analyze}
         # separately to kick off the runner.
-        phase = 'awaiting_migration' if mode == 'migration' else 'awaiting_refactor'
+        if mode == 'migration':
+            phase = 'awaiting_migration'
+        elif mode == 'refactor':
+            phase = 'awaiting_refactor'
+        else:
+            phase = 'awaiting_import'
         job_db.update_job(job_id, {'status': 'queued', 'current_phase': phase})
         return jsonify({
             'job_id': job_id,
@@ -1678,6 +1777,10 @@ def refine_job(job_id):
         return jsonify({'error': 'Job not found'}), 404
     if job['status'] == 'running':
         return jsonify({'error': 'Job is still running'}), 400
+    if job.get('current_phase') == 'awaiting_import':
+        return jsonify({
+            'error': 'Import analysis has not run yet. Call POST /api/jobs/<id>/analyze first.',
+        }), 400
     if job.get('current_phase') == 'refining':
         return jsonify({'error': 'Refinement already in progress'}), 409
     data = request.get_json() or {}
@@ -1700,6 +1803,13 @@ def refine_job(job_id):
 
     def run():
         from crew_studio.refinement_runner import run_refinement
+        meta = job.get('metadata') or {}
+        if isinstance(meta, str):
+            try:
+                meta = json.loads(meta)
+            except (json.JSONDecodeError, TypeError):
+                meta = {}
+        enhanced = meta.get('job_mode') == 'import'
         run_refinement(
             job_id=job_id,
             workspace_path=Path(job['workspace_path']),
@@ -1709,6 +1819,7 @@ def refine_job(job_id):
             progress_callback=progress_cb,
             file_path=file_path,
             previous_status=previous_status,
+            enhanced=enhanced,
         )
     thread = threading.Thread(target=run)
     thread.daemon = True
@@ -1724,6 +1835,51 @@ def get_job_refinements(job_id):
         return jsonify({'error': 'Job not found'}), 404
     refinements = job_db.get_refinement_history(job_id)
     return jsonify({'refinements': refinements})
+
+
+@app.route('/api/jobs/<job_id>/refinement/changes', methods=['GET'])
+def get_refinement_changes_route(job_id):
+    """Git diffstat from first pre-refinement snapshot to HEAD (MTA File Change Log compatible)."""
+    job = job_db.get_job(job_id)
+    if not job:
+        return jsonify({'error': 'Job not found'}), 404
+
+    workspace_path = job.get('workspace_path', '')
+    ws = Path(workspace_path)
+    if not ws.is_dir():
+        ws = base_workspace_path / f'job-{job_id}'
+
+    from crew_studio.refinement_git import compute_refinement_changes
+    payload = compute_refinement_changes(ws)
+    payload['job_id'] = job_id
+    err = payload.get('error')
+    if err:
+        return jsonify(payload), 500
+    return jsonify(payload)
+
+
+@app.route('/api/jobs/<job_id>/refinement/compare', methods=['GET'])
+def get_refinement_compare_route(job_id):
+    """Original (root snapshot) vs HEAD for one path — for Monaco diff UI."""
+    job = job_db.get_job(job_id)
+    if not job:
+        return jsonify({'error': 'Job not found'}), 404
+
+    rel = (request.args.get('path') or '').strip()
+    if not rel or not _is_safe_relative_path(rel):
+        return jsonify({'error': 'path query is required and must be a safe relative path'}), 400
+
+    workspace_path = job.get('workspace_path', '')
+    ws = Path(workspace_path)
+    if not ws.is_dir():
+        ws = base_workspace_path / f'job-{job_id}'
+
+    from crew_studio.refinement_git import compare_refinement_file
+    payload = compare_refinement_file(ws, rel)
+    if payload.get('error'):
+        return jsonify(payload), 400
+    payload['job_id'] = job_id
+    return jsonify(payload)
 
 
 @app.route('/api/jobs/<job_id>/preview/<path:file_path>', methods=['GET'])

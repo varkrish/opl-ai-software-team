@@ -13,6 +13,7 @@ import json
 import logging
 import os
 import uuid
+from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -20,7 +21,7 @@ from typing import Any, Dict, List, Optional
 import httpx
 from fastapi import FastAPI, HTTPException, Query, Request, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel
 
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
@@ -71,15 +72,44 @@ def _run_job_with_backend_sync(job_id: str, vision: str, backend):
 
 
 # ---------------------------------------------------------------------------
+# CORS — derive allowed origins from environment for split frontend deployment
+# ---------------------------------------------------------------------------
+
+def _cors_origins() -> list[str]:
+    """Build the allowed-origins list from CORS_ALLOWED_ORIGINS env var.
+
+    Comma-separated list. Defaults to common local dev origins when unset.
+    """
+    raw = os.getenv("CORS_ALLOWED_ORIGINS", "").strip()
+    if raw:
+        return [o.strip() for o in raw.split(",") if o.strip()]
+    return ["http://localhost:3000", "http://127.0.0.1:3000", "http://localhost:5173"]
+
+
+# ---------------------------------------------------------------------------
 # FastAPI app
 # ---------------------------------------------------------------------------
 
-app = FastAPI(title="AI Software Development Crew", version="2.0.0")
+@asynccontextmanager
+async def lifespan(fastapi_app: FastAPI):
+    """On startup: resume any jobs that were in-flight when the server last stopped."""
+    skip = os.getenv("SKIP_STARTUP_RESUME", "").strip().lower() in ("1", "true", "yes")
+    if not skip:
+        try:
+            from crew_studio.llamaindex_web_app import resume_pending_jobs
+            await asyncio.to_thread(resume_pending_jobs)
+            logger.info("Startup: resume_pending_jobs complete")
+        except Exception:
+            logger.exception("Startup: resume_pending_jobs failed (non-fatal)")
+    yield
+
+
+app = FastAPI(title="AI Software Development Crew", version="2.0.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=_cors_origins(),
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -140,9 +170,48 @@ def _dispatch_job(job_id: str, vision: str, backend_name: str):
     _run_job_sync(job_id, vision, config_obj)
 
 
-@app.post("/api/jobs", status_code=201)
-async def create_job(body: CreateJobRequest):
-    """Create a new build job. Returns 201 immediately; execution is async."""
+@app.post("/api/jobs")
+async def create_job(request: Request):
+    """Create a new job. JSON for greenfield; multipart is delegated to Flask (ZIP, import, migration, refactor)."""
+
+    content_type = request.headers.get("content-type", "")
+    if "multipart/form-data" in content_type:
+        body_bytes = await request.body()
+
+        def _forward_multipart():
+            from crew_studio.llamaindex_web_app import app as flask_app
+            with flask_app.test_client() as client:
+                return client.post(
+                    "/api/jobs",
+                    data=body_bytes,
+                    content_type=content_type,
+                )
+
+        try:
+            resp = await asyncio.to_thread(_forward_multipart)
+        except Exception:
+            logger.exception("Multipart POST /api/jobs forward to Flask failed")
+            raise HTTPException(
+                status_code=502,
+                detail="Multipart job create failed (see server logs).",
+            ) from None
+        out_ct = resp.headers.get("Content-Type") or "application/json"
+        media = out_ct.split(";")[0].strip()
+        payload = getattr(resp, "data", None) or resp.get_data()
+        return Response(
+            content=payload,
+            status_code=resp.status_code,
+            media_type=media,
+        )
+
+    try:
+        payload = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+    try:
+        body = CreateJobRequest.model_validate(payload)
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     if not body.vision:
         raise HTTPException(status_code=400, detail="Vision is required")
@@ -158,17 +227,42 @@ async def create_job(body: CreateJobRequest):
 
     job_db.create_job(job_id, body.vision, str(job_workspace), metadata=body.metadata)
 
-    if body.mode in ("migration", "refactor"):
-        phase = "awaiting_migration" if body.mode == "migration" else "awaiting_refactor"
+    if body.mode in ("migration", "refactor", "import"):
+        if body.mode == "import":
+            meta = dict(body.metadata) if body.metadata else {}
+            meta["job_mode"] = "import"
+            job_db.update_job(job_id, {"metadata": json.dumps(meta)})
+        phase = (
+            "awaiting_migration" if body.mode == "migration"
+            else "awaiting_refactor" if body.mode == "refactor"
+            else "awaiting_import"
+        )
         job_db.update_job(job_id, {"status": "queued", "current_phase": phase})
-        return {"job_id": job_id, "status": "queued", "documents": 0,
-                "source_files": 0, "github_repos": 0}
+        return JSONResponse(
+            status_code=201,
+            content={
+                "job_id": job_id,
+                "status": "queued",
+                "documents": 0,
+                "source_files": 0,
+                "github_repos": 0,
+            },
+        )
 
-    loop = asyncio.get_running_loop()
-    loop.run_in_executor(None, _dispatch_job, job_id, body.vision, body.backend)
+    # Tests / tooling: avoid spawning the full LLM pipeline from the request handler.
+    if os.getenv("CREW_TEST_NO_EXECUTOR", "").strip().lower() not in ("1", "true", "yes"):
+        loop = asyncio.get_running_loop()
+        loop.run_in_executor(None, _dispatch_job, job_id, body.vision, body.backend)
 
-    return {"job_id": job_id, "status": "queued",
-            "documents": 0, "github_repos": 0}
+    return JSONResponse(
+        status_code=201,
+        content={
+            "job_id": job_id,
+            "status": "queued",
+            "documents": 0,
+            "github_repos": 0,
+        },
+    )
 
 
 @app.get("/api/jobs")

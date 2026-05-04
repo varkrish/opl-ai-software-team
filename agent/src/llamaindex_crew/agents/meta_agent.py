@@ -7,13 +7,104 @@ import logging
 import os
 from pathlib import Path
 from typing import Dict, Optional
-from .base_agent import BaseLlamaIndexAgent
-from ..tools import FileWriterTool
+from ..tools import FileWriterTool, GitTool
 from ..tools.tool_loader import load_tools
 from ..config import ConfigLoader
 from ..utils.prompt_loader import load_prompt
+from .base_agent import BaseLlamaIndexAgent
 
 logger = logging.getLogger(__name__)
+
+
+class ImportModeRecommendedError(Exception):
+    """Triage decided import+iterate fits better than the greenfield build pipeline."""
+
+    def __init__(self, message: str, triage: Dict[str, str]):
+        super().__init__(message)
+        self.triage = triage
+
+
+def user_vision_for_triage(full_vision: str) -> str:
+    """Strip Repomix/reference packs — they are style guides, not 'existing product code' for routing."""
+    marker = "\n\n=== REFERENCE"
+    if marker in full_vision:
+        return full_vision.split(marker, 1)[0].strip()
+    return full_vision.strip()
+
+
+def workspace_source_hint(workspace_path: Path) -> str:
+    """Short hint when the job workspace already contains many source files (unusual for pure greenfield)."""
+    if not workspace_path or not workspace_path.is_dir():
+        return ""
+    exts = {
+        ".py", ".java", ".kt", ".go", ".rs", ".rb", ".php", ".cs", ".swift",
+        ".js", ".jsx", ".ts", ".tsx", ".vue", ".c", ".h", ".cpp", ".hpp",
+    }
+    skip_parts = (".git", "__pycache__", "node_modules", ".venv", "venv", "dist", "build")
+    n = 0
+    try:
+        for p in workspace_path.rglob("*"):
+            if not p.is_file():
+                continue
+            if any(part in skip_parts for part in p.parts):
+                continue
+            if p.suffix.lower() not in exts:
+                continue
+            rel = p.relative_to(workspace_path)
+            if str(rel).startswith("docs" + os.sep) or str(rel).startswith("docs/"):
+                continue
+            n += 1
+            if n >= 200:
+                break
+    except OSError:
+        return ""
+    if n < 5:
+        return ""
+    return (
+        f"\n\nWorkspace observation: There are at least {n} existing source files on disk "
+        f"before generation (excluding docs/ and common dependency dirs). "
+        f"This often indicates an imported or cloned project rather than an empty greenfield workspace."
+    )
+
+
+def _heuristic_delivery_mode(vision: str) -> Optional[str]:
+    """Fast path for obvious import-iterate language (no LLM). Returns 'import_iterate' or None."""
+    v = vision.lower().strip()
+    if vision.strip().lower().startswith("[import]"):
+        return "import_iterate"
+    signals = (
+        "existing codebase",
+        "existing code",
+        "current codebase",
+        "my codebase",
+        "this codebase",
+        "our codebase",
+        "the codebase",
+        "this repo",
+        "our repo",
+        "the repository",
+        "already have code",
+        "already has code",
+        "import my",
+        "import this",
+        "iterate on",
+        "iterating on",
+        "legacy application",
+        "legacy codebase",
+        "current application",
+        "deployed application",
+        "production code",
+        "in this project",
+        "in our project",
+        "modify the existing",
+        "update the existing",
+        "refactor the existing",
+        "bug in our",
+        "fix our app",
+    )
+    if any(s in v for s in signals):
+        return "import_iterate"
+    return None
 
 
 class MetaAgent:
@@ -34,6 +125,13 @@ class MetaAgent:
             config = ConfigLoader.load()
             entries = config.tools.global_tools + config.tools.agent_tools.get("meta", [])
             meta_tools = load_tools(entries)
+            has_git = any(
+                getattr(t, "metadata", None) is not None
+                and getattr(t.metadata, "name", None) == "git"
+                for t in meta_tools
+            )
+            if not has_git:
+                meta_tools = [GitTool, *meta_tools]
             logger.info("MetaAgent: loaded %d extra tool(s) from config", len(meta_tools))
         except Exception:
             logger.warning("MetaAgent: failed to load extra tools — continuing without", exc_info=True)
@@ -52,9 +150,9 @@ Output Format: A concise textual summary titled "Project Context Digest".""")
         vision_tool_hint = ""
         if meta_tools:
             vision_tool_hint = (
-                "\n\nYou have access to a skill_query tool. Use it to search for relevant "
-                "coding skills and framework patterns (e.g. Frappe, React, Python) to enrich "
-                "your analysis with concrete technical context."
+                "\n\nYou have access to tools including `git` (clone, init, status, …) and "
+                "`skill_query` when present. Use `git` to fetch or inspect repositories when "
+                "the vision references a URL; use skill_query for framework patterns."
             )
 
         self.vision_agent = BaseLlamaIndexAgent(
@@ -104,6 +202,86 @@ Structure:
             budget_tracker=budget_tracker,
             verbose=True
         )
+
+        triage_backstory = load_prompt(
+            'delivery_mode_triage_agent.txt',
+            fallback="""You are a delivery-mode router for an AI software studio.
+Decide if the user should use GREENFIELD mode (generate a brand-new project from description)
+or IMPORT_ITERATE mode (upload existing source, run analysis, then Refine/chat edits in place).
+
+Rules:
+- GREENFIELD: New app/service from scratch, PoC, "build me a", sample project, tutorial-style request.
+  Reference repos attached as *examples only* (Repomix) still mean GREENFIELD if they ask to "create" or "build" something new modeled on those patterns.
+- IMPORT_ITERATE: Work on *their* existing product/code: bugfixes, features on current app, "our codebase", "this repo",
+  "legacy system", "extend what we have", "clone X and modify the actual project files", migrations in-place.
+
+Output ONLY valid JSON (no markdown):
+{"delivery_mode":"greenfield"|"import_iterate","confidence":"high"|"medium"|"low","reason":"one sentence"}""",
+        )
+        self._triage_agent = BaseLlamaIndexAgent(
+            role='Delivery Mode Router',
+            goal='Classify greenfield vs import-and-iterate from the user request',
+            backstory=triage_backstory + "\n\nIMPORTANT: Do not use tools. Output only the JSON object.",
+            tools=[],
+            agent_type="manager",
+            budget_tracker=budget_tracker,
+            verbose=False,
+        )
+
+    def triage_delivery_mode(
+        self,
+        vision_for_triage: str,
+        workspace_path: Optional[Path] = None,
+    ) -> Dict[str, str]:
+        """
+        LLM + light heuristics: greenfield vs import_iterate.
+
+        vision_for_triage should exclude Repomix/reference blocks (see user_vision_for_triage).
+        """
+        hint = workspace_source_hint(workspace_path) if workspace_path else ""
+        heuristic = _heuristic_delivery_mode(vision_for_triage)
+        if heuristic == "import_iterate":
+            out = {
+                "delivery_mode": "import_iterate",
+                "confidence": "high",
+                "reason": "Strong import/iterate signals in the request wording.",
+            }
+            logger.info("Delivery triage (heuristic): %s", out)
+            return out
+
+        prompt = f"""Classify this user request.
+
+{vision_for_triage}{hint}
+
+Return only JSON: {{"delivery_mode":"greenfield"|"import_iterate","confidence":"high"|"medium"|"low","reason":"..."}}"""
+
+        response_str = str(self._triage_agent.chat(prompt)).strip()
+        try:
+            if "```json" in response_str:
+                json_start = response_str.find("```json") + 7
+                json_end = response_str.find("```", json_start)
+                json_str = response_str[json_start:json_end].strip()
+            elif "```" in response_str:
+                json_start = response_str.find("```") + 3
+                json_end = response_str.find("```", json_start)
+                json_str = response_str[json_start:json_end].strip()
+            else:
+                json_str = response_str
+            data = json.loads(json_str)
+        except (json.JSONDecodeError, ValueError, TypeError) as e:
+            logger.warning("Delivery triage JSON parse failed: %s — defaulting to greenfield", e)
+            return {"delivery_mode": "greenfield", "confidence": "low", "reason": "Triage parse failed; continuing as greenfield."}
+
+        mode = str(data.get("delivery_mode", "greenfield")).lower()
+        if mode not in ("greenfield", "import_iterate"):
+            mode = "greenfield"
+        conf = str(data.get("confidence", "low")).lower()
+        if conf not in ("high", "medium", "low"):
+            conf = "low"
+        reason = str(data.get("reason", "")).strip() or "No reason given."
+        out = {"delivery_mode": mode, "confidence": conf, "reason": reason}
+        logger.info("Delivery triage (LLM): %s", out)
+        return out
     
     def analyze_vision(self, vision: str) -> str:
         """
