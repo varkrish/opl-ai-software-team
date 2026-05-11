@@ -4,7 +4,6 @@ Runs in a thread; does not set WORKSPACE_PATH env (thread-safe).
 """
 import logging
 import os
-import uuid
 from pathlib import Path
 from typing import Callable, Optional, List, Dict, Any
 
