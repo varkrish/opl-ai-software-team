@@ -15,7 +15,6 @@ import re
 import uuid
 import zipfile
 import threading
-import time
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, Optional
@@ -35,7 +34,7 @@ load_dotenv()
 # Load secure configuration at startup
 try:
     config = ConfigLoader.load()
-    print(f"✅ Configuration loaded successfully for web app")
+    print("✅ Configuration loaded successfully for web app")
 except Exception as e:
     print(f"❌ Failed to load configuration: {e}")
     print("Please provide valid configuration via config file or environment variables")
@@ -563,7 +562,6 @@ def health_ready():
     Returns 200 if ready to serve requests, 503 if not ready
     """
     import logging
-    import traceback
     
     logger = logging.getLogger(__name__)
     health_status = {
@@ -621,7 +619,7 @@ def health_ready():
         
         # Only perform actual LLM check if config is healthy
         if health_status['checks']['config']['status'] == 'healthy':
-            llm = get_llm_for_agent("worker", config)
+            get_llm_for_agent("worker", config)
             
             health_status['checks']['llm'] = {
                 'status': 'healthy',
@@ -749,7 +747,6 @@ def health_llm():
 
 import subprocess
 import re
-import shutil
 
 # ── GitHub / Repomix integration ─────────────────────────────────────────────
 
@@ -949,7 +946,7 @@ def _extract_source_archive(job_workspace: Path, archive_file) -> int:
         zf_test = zipfile.ZipFile(zf_io)
         zf_test.close()
     except zipfile.BadZipFile:
-        print(f"[Migration] WARNING: Uploaded file is not a valid ZIP archive")
+        print("[Migration] WARNING: Uploaded file is not a valid ZIP archive")
         return 0
     except Exception as e:
         print(f"[Migration] WARNING: Failed to read archive: {e}")

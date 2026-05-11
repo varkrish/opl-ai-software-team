@@ -9,7 +9,6 @@ original workspace contents are never overwritten.
 """
 import logging
 import json
-import os
 import shutil
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Callable
@@ -288,7 +287,6 @@ def run_refactor_job(
                     logger.warning("  - %s: %s", inc["file"], inc["issues"])
 
         # 7b. DevOps phase: add Containerfile and Tekton pipeline (modernized system must have them)
-        devops_failed = False
         if DEVOPS_AGENT_AVAILABLE and DevOpsAgent is not None:
             update_progress("devops", 90, "Adding Containerfile and Tekton pipeline...")
             try:
@@ -301,7 +299,6 @@ def run_refactor_job(
                 logger.info(f"DevOps phase completed for job {job_id}")
             except Exception as devops_err:
                 logger.error(f"DevOps phase failed for job {job_id}: {devops_err}")
-                devops_failed = True
                 failed_tasks.append({
                     "task_id": "devops",
                     "file": "Containerfile / .tekton",
