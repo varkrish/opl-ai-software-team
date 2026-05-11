@@ -82,10 +82,10 @@ agent/src/ai_software_dev_crew/prompts/migration/
 ├── analyze_report.txt  # System prompt for analysis
 └── apply_changes.txt   # System prompt for execution (Tier 1)
 
-studio-ui/src/pages/
+opl-studio-ui/src/pages/          # (separate repo: github.com/varkrish/opl-studio-ui)
 └── Migration.tsx       # Frontend migration page
 
-studio-ui/src/api/
+opl-studio-ui/src/api/
 └── client.ts           # startMigration, getMigrationStatus, getMigrationPlan
 ```
 
@@ -101,6 +101,6 @@ cd agent && python -m pytest tests/unit/test_migration_agent.py -v
 # API endpoint tests
 cd agent && python -m pytest tests/api/test_migration_endpoint.py -v
 
-# Frontend component tests (requires Cypress)
-cd studio-ui && npx cypress run --component --spec cypress/component/Migration.cy.tsx
+# Frontend component tests (requires Cypress — run from opl-studio-ui repo)
+cd ../opl-studio-ui && npx cypress run --component --spec cypress/component/Migration.cy.tsx
 ```

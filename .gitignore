@@ -87,3 +87,6 @@ test_job_*.txt
 # Lock files
 agent/uv.lock
 node_modules/
+
+# Frontend lives in its own repo (opl-studio-ui)
+studio-ui/

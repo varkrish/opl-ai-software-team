@@ -33,6 +33,6 @@ After a job completes (or fails), you can refine the generated code using natura
 
 ## UI testing (Cypress)
 
-- **Component tests** (`studio-ui/cypress/component/`): Files (including project dropdown file reload), AppLayout (logo, avatar, masthead), Dashboard, Tasks, Agents.
+- **Component tests** (`opl-studio-ui/cypress/component/`): Files (including project dropdown file reload), AppLayout (logo, avatar, masthead), Dashboard, Tasks, Agents.
 - **Fixtures:** `files.json` (job-001), `files-job-002.json` (job-002) for project-switch test.
-- Run: `cd studio-ui && npm run cy:component`. See `studio-ui/cypress/README.md` for coverage.
+- Run: `cd ../opl-studio-ui && npm run cy:component`. See `opl-studio-ui/cypress/README.md` for coverage.

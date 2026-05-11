@@ -142,8 +142,8 @@ The Crew Studio UI provides:
 # Terminal 1: start backend (Flask API on port 8081)
 make studio-run
 
-# Terminal 2: start frontend (Vite on port 3000)
-make studio-dev
+# Terminal 2: start frontend from opl-studio-ui repo (Vite on port 3000)
+cd ../opl-studio-ui && npm install && VITE_DEV_PROXY_TARGET=http://localhost:8081 npm run dev
 ```
 Then open **http://localhost:3000** in your browser.
 
@@ -257,7 +257,7 @@ See `deploy/helm/crew-studio/values.yaml` for all configurable values.
 │   │   └── blueprint.py        # /api/migration/* endpoints
 │   ├── refinement_runner.py    # Prompt-based refinement engine
 │   └── build_runner.py         # Build/compile runner
-├── studio-ui/                  # Frontend: React + PatternFly (Vite)
+├── (opl-studio-ui)             # Frontend: separate repo (github.com/varkrish/opl-studio-ui)
 │   └── src/                    # Pages, components, API client
 ├── deploy/
 │   └── helm/crew-studio/       # Helm chart for OpenShift/K8s
@@ -267,7 +267,7 @@ See `deploy/helm/crew-studio/values.yaml` for all configurable values.
 │       └── templates/          # K8s manifests
 ├── compose.yaml                # Full stack (Podman / Docker)
 ├── Containerfile.backend       # Backend container (UBI9 + Python 3.11)
-├── Containerfile.frontend      # Frontend container (UBI9 + Nginx)
+├── Containerfile.frontend      # (deprecated — frontend built from opl-studio-ui repo)
 ├── .env.example                # Environment template
 ├── Makefile                    # Build, run, test, deploy targets
 └── config.yaml                 # LLM config (not committed — see config.example.yaml)
@@ -305,10 +305,10 @@ make backend-test-all
 make refine-test
 ```
 
-**UI (Cypress):**
+**UI (Cypress):** (run from the [opl-studio-ui](https://github.com/varkrish/opl-studio-ui) repo)
 
 ```bash
-cd studio-ui
+cd ../opl-studio-ui   # or wherever you cloned it
 npm run cy:component   # Component tests
 npm run cy:e2e         # E2E tests (requires dev server + backend)
 ```

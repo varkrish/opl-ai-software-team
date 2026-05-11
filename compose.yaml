@@ -44,6 +44,7 @@ services:
       - JOB_DB_PATH=/app/data/crew_jobs.db
       - CONFIG_FILE_PATH=/app/config.yaml
       - FLASK_ENV=${FLASK_ENV:-production}
+      - CORS_ALLOWED_ORIGINS=${CORS_ALLOWED_ORIGINS:-http://localhost:3000}
       - PYTHONUNBUFFERED=1
       # Validator sidecar — backend can call this after code generation
       - VALIDATOR_URL=http://validator:8080
@@ -82,6 +83,29 @@ services:
       interval: 10s
       timeout: 5s
       start_period: 5s
+      retries: 3
+    networks:
+      - crew-net
+
+  # ── Frontend (optional profile): Pre-built UI image ──────────────────────
+  # Activate with: podman compose --profile with-frontend up -d
+  # The frontend image must be built with VITE_API_URL pointing at this
+  # backend's public URL (e.g. http://localhost:8080).
+  frontend:
+    container_name: crew-frontend
+    image: ${FRONTEND_IMAGE:-quay.io/varkrish/crew-frontend:latest}
+    profiles: ["with-frontend"]
+    ports:
+      - "${FRONTEND_PORT:-3000}:8080"
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8080/"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
       retries: 3
     networks:
       - crew-net

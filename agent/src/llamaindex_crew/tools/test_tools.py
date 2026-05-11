@@ -7,14 +7,16 @@ import subprocess
 import time
 from abc import ABC, abstractmethod
 from pathlib import Path
+from typing import Optional
+
 from llama_index.core.tools import FunctionTool
-import os
-from .file_tools import _resolve_workspace
-
-logger = logging.getLogger(__name__)
 
 
-def pytest_runner(test_path: str = "tests/", verbose: bool = True) -> str:
+def pytest_runner(
+    test_path: str = "tests/",
+    verbose: bool = True,
+    workspace_path: Optional[str] = None,
+) -> str:
     """Run pytest tests in the workspace. Returns test results and coverage.
     
     Args:
@@ -25,7 +27,7 @@ def pytest_runner(test_path: str = "tests/", verbose: bool = True) -> str:
         Test results or error message
     """
     try:
-        workspace = _resolve_workspace()
+        workspace = Path(workspace_path).resolve() if workspace_path else _resolve_workspace()
         full_path = workspace / test_path
         
         if not full_path.exists():
@@ -59,7 +61,10 @@ def pytest_runner(test_path: str = "tests/", verbose: bool = True) -> str:
         return f"❌ Error running tests: {str(e)}"
 
 
-def code_coverage(source_path: str = "src/") -> str:
+def code_coverage(
+    source_path: str = "src/",
+    workspace_path: Optional[str] = None,
+) -> str:
     """Run pytest with coverage analysis. Returns coverage percentage and report.
     
     Args:
@@ -69,7 +74,7 @@ def code_coverage(source_path: str = "src/") -> str:
         Coverage report or error message
     """
     try:
-        workspace = _resolve_workspace()
+        workspace = Path(workspace_path).resolve() if workspace_path else _resolve_workspace()
         
         # Build pytest command with coverage
         cmd = [
@@ -445,7 +450,10 @@ _BACKENDS = {
 }
 
 
-def smoke_test_runner(project_type: str = "auto") -> "SmokeTestResult":
+def smoke_test_runner(
+    project_type: str = "auto",
+    workspace_path: Optional[str] = None,
+) -> "SmokeTestResult":
     """Run a smoke test on the generated project to verify it compiles/loads.
 
     The execution backend is selected via the ``SMOKE_TEST_BACKEND``
@@ -462,7 +470,7 @@ def smoke_test_runner(project_type: str = "auto") -> "SmokeTestResult":
         SmokeTestResult with message and optional container log
     """
     try:
-        workspace = _resolve_workspace()
+        workspace = Path(workspace_path).resolve() if workspace_path else _resolve_workspace()
 
         if project_type == "auto":
             project_type = _detect_project_type(workspace)
@@ -501,3 +509,27 @@ SmokeTestTool = FunctionTool.from_defaults(
     name="smoke_test_runner",
     description="Run a smoke test on the generated project to verify it compiles and loads correctly."
 )
+
+
+def create_workspace_test_tools(workspace_path: Path):
+    """Pytest, coverage, and smoke-test tools bound to a specific workspace (thread-safe)."""
+    from functools import partial
+
+    ws = str(workspace_path)
+    return [
+        FunctionTool.from_defaults(
+            fn=partial(pytest_runner, workspace_path=ws),
+            name="pytest_runner",
+            description="Run pytest tests in the workspace. Returns test results.",
+        ),
+        FunctionTool.from_defaults(
+            fn=partial(code_coverage, workspace_path=ws),
+            name="code_coverage",
+            description="Run pytest with coverage analysis for a source directory (default src/).",
+        ),
+        FunctionTool.from_defaults(
+            fn=partial(smoke_test_runner, workspace_path=ws),
+            name="smoke_test_runner",
+            description="Run a smoke / syntax validation pass on the project (backend from SMOKE_TEST_BACKEND env).",
+        ),
+    ]

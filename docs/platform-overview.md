@@ -20,7 +20,7 @@ AI Software Development Crew (Crew Studio) is a multi-agent platform that turns 
 ## Architecture at a Glance
 
 - **Backend:** Flask API (`crew_studio/llamaindex_web_app.py`) on port 8081; job and task data in SQLite (`crew_jobs.db`).
-- **Frontend:** React + PatternFly + Vite (`studio-ui/`), dev server on port 3000; proxies `/api` and `/health` to the backend.
+- **Frontend:** React + PatternFly + Vite ([opl-studio-ui](https://github.com/varkrish/opl-studio-ui) repo), dev server on port 3000; proxies `/api` and `/health` to the backend.
 - **Agent framework:** LlamaIndex-based workflows and agents under `agent/src/llamaindex_crew/` (and legacy `ai_software_dev_crew`); granular tasks and code validation in `orchestrator/`.
 
 ## Workflow Phases

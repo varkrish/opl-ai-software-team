@@ -1,8 +1,11 @@
 # ─────────────────────────────────────────────────────────────────────────────
 # AI Crew Studio — Dev Container Compose (two services, no image build here)
-# Backend: uses pre-built image + mount agent only. Frontend: Node image + mount studio-ui.
+# Backend: uses pre-built image + mount agent only.
+# Frontend: Node image + mount opl-studio-ui (sibling repo).
 #
-# Build backend image first (once): podman compose build backend
+# Pre-requisites:
+#   1. Clone opl-studio-ui as a sibling: git clone https://github.com/varkrish/opl-studio-ui ../opl-studio-ui
+#   2. Build backend image first (once): podman compose build backend
 # Then: podman compose -f .devcontainer/compose-dev.yaml up -d
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -22,6 +25,7 @@ services:
       - PYTHONUNBUFFERED=1
       - WORKSPACE_PATH=/app/workspace
       - JOB_DB_PATH=/app/data/crew_jobs.db
+      - CORS_ALLOWED_ORIGINS=http://localhost:3000
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
       - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
@@ -35,11 +39,13 @@ services:
   frontend:
     image: node:20
     container_name: crew-frontend-dev
-    working_dir: /app/studio-ui
+    working_dir: /app/opl-studio-ui
     command: sh -c "npm install && npm run dev -- --host 0.0.0.0"
     volumes:
-      - ../studio-ui:/app/studio-ui:cached
-      - crew-node-modules:/app/studio-ui/node_modules
+      - ../../opl-studio-ui:/app/opl-studio-ui:cached
+      - crew-node-modules:/app/opl-studio-ui/node_modules
+    environment:
+      - VITE_DEV_PROXY_TARGET=http://backend:8080
     ports:
       - "3000:3000"
     networks:
