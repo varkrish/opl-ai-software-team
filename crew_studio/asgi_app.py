@@ -142,21 +142,22 @@ async def authenticate_request(request: Request, call_next):
             token = auth_header.split(" ")[1]
             try:
                 user = decode_and_verify_token(token)
-            except ExpiredSignatureError:
-                return JSONResponse(status_code=401, content={"detail": "Token has expired"})
-            except InvalidTokenError as e:
-                return JSONResponse(status_code=401, content={"detail": f"Invalid token: {str(e)}"})
             except Exception as e:
-                logger.error("Authentication error in middleware: %s", e)
-                return JSONResponse(status_code=401, content={"detail": "Authentication failed"})
+                print(f"DEBUG: Token validation failed: {type(e).__name__}: {str(e)}")
+                logger.error(f"Token validation failed: {e}")
+                return JSONResponse(
+                    status_code=401,
+                    content={"detail": f"Invalid authentication token: {str(e)}"},
+                    headers={"WWW-Authenticate": "Bearer"},
+                )
 
         # Store user in request state for FastAPI path handlers
         request.state.user = user
 
         # Inject headers into ASGI scope for WSGI/Flask fallback
         headers = list(request.scope["headers"])
-        headers.append((b"x-user-id", user.user_id.encode("utf-8")))
-        headers.append((b"x-user-email", user.email.encode("utf-8")))
+        headers.append((b"x-user-id", str(user.user_id or "unknown").encode("utf-8")))
+        headers.append((b"x-user-email", str(user.email or "unknown@example.com").encode("utf-8")))
         headers.append((b"x-user-roles", ",".join(user.roles).encode("utf-8")))
         headers.append((b"x-user-teams", ",".join(user.teams).encode("utf-8")))
         headers.append((b"x-user-admin", str(user.is_admin).lower().encode("utf-8")))
