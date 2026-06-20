@@ -4,8 +4,7 @@ Preserved from original implementation
 """
 import re
 import logging
-from typing import List, Dict, Optional
-from pathlib import Path
+from typing import Dict
 
 logger = logging.getLogger(__name__)
 
@@ -19,12 +18,12 @@ class CodeSafetyChecker:
             'python': [
                 (r'os\.system\s*\(', 'Direct system command execution'),
                 (r'subprocess\.(call|run|Popen)', 'Subprocess execution'),
-                (r'eval\s*\(', 'Code evaluation'),
-                (r'exec\s*\(', 'Code execution'),
+                (r'\beval\s*\(', 'Code evaluation'),    # \b prevents matching "Retrieval ("
+                (r'\bexec\s*\(', 'Code execution'),     # \b prevents matching "executable ("
                 (r'__import__\s*\(', 'Dynamic import'),
             ],
             'javascript': [
-                (r'eval\s*\(', 'Code evaluation'),
+                (r'\beval\s*\(', 'Code evaluation'),    # \b prevents matching "Retrieval ("
                 (r'Function\s*\(', 'Dynamic function creation'),
                 (r'child_process', 'Child process execution'),
                 (r'fs\.(rmSync|unlinkSync)', 'File deletion'),
@@ -34,7 +33,9 @@ class CodeSafetyChecker:
                 (r'rm\s+-rf', 'Recursive deletion'),
                 (r'curl\s+.*\|.*sh', 'Remote script execution'),
                 (r'wget\s+.*\|.*sh', 'Remote script execution'),
-            ]
+            ],
+            # 'none' = non-code files (markdown, yaml, json, etc.) — no patterns
+            'none': [],
         }
         
         # Maximum file size (1MB)

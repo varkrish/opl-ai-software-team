@@ -6,6 +6,7 @@ import json as _json
 import logging
 import os
 import re
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -17,12 +18,30 @@ from ..agents import (
 )
 from ..agents.meta_agent import ImportModeRecommendedError, user_vision_for_triage
 from ..orchestrator.state_machine import ProjectStateMachine, ProjectState, TransitionContext
-from ..orchestrator.task_manager import TaskManager, TaskStatus, TaskDefinition
+from ..orchestrator.task_manager import TaskManager, TaskStatus
 from ..orchestrator.error_recovery import WorkflowErrorRecoveryEngine
 from ..budget.tracker import EnhancedBudgetTracker
 from ..utils.feature_parser import parse_features_from_files
 from ..utils.document_indexer import DocumentIndexer
+from ..utils.rag_context import get_phase_rag_context
 from ..utils.llm_config import get_embedding_model
+from .epic_story_loop import (
+    StoryAssessment,
+    assess_epic_stories,
+    commit_message_for_story,
+    decompose_epic_to_stories,
+    format_jira_stories_as_markdown,
+    has_jira_connection,
+    is_epic_job,
+    judge_stories,
+    parse_jira_stories,
+    project_key_from_epic,
+    resume_story_index,
+    should_auto_approve,
+    stories_are_provisioned,
+    stories_to_process,
+    story_vision,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -322,7 +341,13 @@ class SoftwareDevWorkflow:
             project_id
         )
         self.budget_tracker = EnhancedBudgetTracker()
-        self.document_indexer = DocumentIndexer(workspace_path, project_id)
+        pl = getattr(config, "prompt_limits", None) if config else None
+        self.document_indexer = DocumentIndexer(
+            workspace_path,
+            project_id,
+            chunk_size=int(getattr(pl, "rag_chunk_size", 1024)) if pl else 1024,
+            chunk_overlap=int(getattr(pl, "rag_chunk_overlap", 128)) if pl else 128,
+        )
         self.error_recovery = WorkflowErrorRecoveryEngine(self.state_machine)
         
         # Initialize agents (will be created with custom backstories after meta phase)
@@ -349,6 +374,365 @@ class SoftwareDevWorkflow:
                 self.progress_callback(phase, progress, message)
             except Exception as e:
                 logger.warning(f"Progress callback failed: {e}")
+
+    def _load_job_metadata(self) -> dict:
+        if not self.job_db:
+            return {}
+        try:
+            job = self.job_db.get_job(self.project_id)
+            if not job:
+                return {}
+            meta = job.get("metadata") or {}
+            if isinstance(meta, str):
+                return _json.loads(meta) if meta else {}
+            return meta if isinstance(meta, dict) else {}
+        except Exception:
+            return {}
+
+    def _update_job_metadata(self, metadata: dict) -> None:
+        if not self.job_db:
+            return
+        self.job_db.update_job(self.project_id, {"metadata": _json.dumps(metadata)})
+
+    def _append_job_event(self, event: dict) -> None:
+        if not self.job_db:
+            return
+        job = self.job_db.get_job(self.project_id)
+        if not job:
+            return
+        messages = job.get("last_message") or []
+        if isinstance(messages, str):
+            try:
+                messages = _json.loads(messages)
+            except _json.JSONDecodeError:
+                messages = []
+        messages.append({
+            **event,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        })
+        self.job_db.update_job(self.project_id, {"last_message": _json.dumps(messages[-50:])})
+
+    def _get_manager_llm(self):
+        from ..utils.llm_config import get_llm_for_agent
+        return get_llm_for_agent("manager", self.config)
+
+    def _auto_approve_no_jira(self) -> bool:
+        epic_cfg = getattr(self.config, "epic", None) if self.config else None
+        return bool(getattr(epic_cfg, "auto_approve_no_jira", True))
+
+    def _plan_review_enabled(self) -> bool:
+        """Return True when the review gate should activate for this job.
+
+        Disabled when:
+        - plan_review.enabled is False in config (default), OR
+        - the job metadata carries auto_approve_plan=True (per-job override set
+          by the UI when the user has auto-approve turned on).
+        """
+        metadata = self._load_job_metadata()
+        if metadata.get("auto_approve_plan"):
+            return False
+        pr_cfg = getattr(self.config, "plan_review", None) if self.config else None
+        return bool(getattr(pr_cfg, "enabled", False))
+
+    def _load_plan_artifacts(self) -> dict[str, str]:
+        """Read planning artifacts from workspace for plan review."""
+        artifacts: dict[str, str] = {}
+        for name in ("user_stories.md", "design_spec.md", "tech_stack.md", "requirements.md"):
+            p = self.workspace_path / name
+            if p.exists():
+                try:
+                    artifacts[name] = p.read_text(encoding="utf-8", errors="replace")
+                except OSError:
+                    pass
+        return artifacts
+
+    def _pause_for_plan_review(self, feedback_history: list | None = None) -> dict:
+        """Set job to pending_review and return a pending_review result dict."""
+        metadata = self._load_job_metadata()
+        metadata["pending_review"] = True
+        metadata["plan_feedback_history"] = feedback_history or []
+        self._update_job_metadata(metadata)
+        if self.job_db:
+            self.job_db.update_job(self.project_id, {
+                "status": "pending_review",
+                "current_phase": "pending_review",
+                "progress": 55,
+            })
+        self._append_job_event({
+            "type": "plan_pending_review",
+            "message": "Plan complete — awaiting human review before coding",
+        })
+        self._report_progress("pending_review", 55, "Plan ready — awaiting review")
+        return {
+            "status": "pending_review",
+            "project_id": self.project_id,
+            "budget_report": self.budget_tracker.get_report(self.project_id),
+            "state": self.state_machine.get_current_state().value,
+        }
+
+    def refine_plan(self, feedback: str) -> dict:
+        """Re-run planning phases with user feedback injected into the vision context.
+
+        Called by the /refine-plan API endpoint while the job is pending_review.
+        Returns a dict with updated artifact content.
+        """
+        logger.info("Plan refinement requested for job %s: %r", self.project_id, feedback[:120])
+        self._report_progress("pending_review", 30, "Refining plan with your feedback…")
+
+        # Append feedback to vision context so agents pick it up
+        original_vision = self.vision
+        self.vision = (
+            f"{original_vision}\n\n"
+            f"--- HUMAN FEEDBACK (apply to the plan) ---\n{feedback}\n"
+        )
+
+        try:
+            self._run_phase_with_retry("product_owner", self.run_product_owner_phase)
+            self._run_phase_with_retry("designer", self.run_designer_phase)
+            self._run_phase_with_retry("tech_architect", self.run_tech_architect_phase)
+        finally:
+            self.vision = original_vision
+
+        # Record feedback round
+        metadata = self._load_job_metadata()
+        history = metadata.get("plan_feedback_history") or []
+        history.append({"feedback": feedback, "at": _json.dumps(datetime.now(timezone.utc).isoformat())})
+        metadata["plan_feedback_history"] = history
+        metadata["pending_review"] = True
+        self._update_job_metadata(metadata)
+        if self.job_db:
+            self.job_db.update_job(self.project_id, {
+                "status": "pending_review",
+                "current_phase": "pending_review",
+                "progress": 55,
+            })
+
+        self._report_progress("pending_review", 55, "Plan updated — awaiting review")
+        return {
+            "status": "pending_review",
+            "artifacts": self._load_plan_artifacts(),
+            "feedback_rounds": len(history),
+        }
+
+    def _pause_for_approval(self, metadata: dict, stories: list[dict], reasoning: str) -> None:
+        metadata["epic_judge_completed"] = True
+        metadata["epic_judge_reasoning"] = reasoning
+        metadata["jira_stories"] = stories
+        self._update_job_metadata(metadata)
+        if self.job_db:
+            self.job_db.update_job(self.project_id, {
+                "status": "pending_approval",
+                "current_phase": "pending_approval",
+                "progress": 45,
+            })
+        self._append_job_event({
+            "type": "epic_pending_approval",
+            "story_count": len(stories),
+            "message": reasoning or "Epic stories decomposed — awaiting approval",
+        })
+        self._report_progress(
+            "pending_approval",
+            45,
+            f"Awaiting approval for {len(stories)} decomposed stories",
+        )
+
+    def _create_stories_in_jira(self, metadata: dict, stories: list[dict]) -> list[dict]:
+        from ..utils.epic_jira import build_jira_backend, create_stories_in_jira
+
+        epic_key = metadata.get("jira_epic_key") or ""
+        project_key = metadata.get("jira_project_key") or project_key_from_epic(epic_key)
+        backend = build_jira_backend()
+        if not backend:
+            logger.warning("JIRA backend unavailable — stories kept in job metadata only")
+            return stories
+        return create_stories_in_jira(backend, epic_key, project_key, stories)
+
+    def _seed_user_stories_from_jira(self, stories: list[dict]) -> None:
+        """Materialize user_stories.md from provisioned JIRA stories without running the PO agent.
+
+        Used when the AI judge decides existing stories are sufficient. The document
+        is written deterministically so Designer and TA agents receive the same
+        structured input they would get from a PO run.
+        """
+        logger.info(
+            "⏩ Seeding user_stories.md from %d provisioned JIRA stories (PO skipped)", len(stories)
+        )
+        self._report_progress("product_owner", 30, "Seeding user stories from JIRA (PO skipped)…")
+
+        # Transition through product_owner state for audit trail
+        if self.state_machine.get_current_state() != ProjectState.PRODUCT_OWNER:
+            self.state_machine.transition(
+                ProjectState.PRODUCT_OWNER,
+                TransitionContext(phase="product_owner", data={"seeded_from_jira": True}),
+            )
+
+        markdown = format_jira_stories_as_markdown(stories, epic_vision=self.vision)
+        _persist_phase_artifact(self.workspace_path, "user_stories.md", markdown)
+        _persist_phase_artifact(self.workspace_path, "requirements.md", markdown)
+
+        user_stories_file = self.workspace_path / "user_stories.md"
+        if user_stories_file.exists():
+            self.user_stories = user_stories_file.read_text(encoding="utf-8", errors="replace")
+        else:
+            self.user_stories = markdown
+
+        # Index so Designer / TA can query the stories via RAG
+        if self.document_indexer and self.user_stories:
+            try:
+                self.document_indexer.index_document("user_stories.md", self.user_stories)
+            except Exception as exc:
+                logger.warning("Failed to index seeded user_stories.md: %s", exc)
+
+        logger.info("✅ user_stories.md seeded from JIRA stories (%d chars)", len(self.user_stories or ""))
+
+    def _run_epic_judge_gate(self, metadata: dict, stories: list[dict]) -> tuple[list[dict], bool]:
+        """Evaluate stories; decompose and optionally pause for approval.
+
+        If `epic_judge_completed` is already set in metadata (set by the pre-TA
+        assess_epic_stories path), the gate is a no-op — just return the stories.
+        Otherwise run the judge to decide whether to decompose (empty-epic path).
+        """
+        if metadata.get("epic_judge_completed"):
+            # Stories were already assessed (skip-PO path) or previously decomposed.
+            return parse_jira_stories(metadata) or stories, False
+
+        llm = self._get_manager_llm()
+        verdict = judge_stories(stories, self.vision, llm)
+        if verdict.sufficient and stories:
+            metadata["epic_judge_completed"] = True
+            metadata["epic_judge_reasoning"] = verdict.reasoning
+            self._update_job_metadata(metadata)
+            return stories, False
+
+        new_stories = decompose_epic_to_stories(
+            self.vision,
+            self.tech_stack or "",
+            llm,
+            suggested_stories=verdict.suggested_stories or None,
+        )
+        if not new_stories:
+            logger.warning("Epic decomposition returned no stories — proceeding with existing set")
+            return stories, False
+
+        epic_key = metadata.get("jira_epic_key") or ""
+        if epic_key and has_jira_connection(metadata):
+            new_stories = self._create_stories_in_jira(metadata, new_stories)
+
+        metadata["jira_stories"] = new_stories
+        metadata["epic_judge_completed"] = True
+        metadata["epic_judge_reasoning"] = verdict.reasoning
+        self._update_job_metadata(metadata)
+
+        if should_auto_approve(metadata, self._auto_approve_no_jira()):
+            logger.info("Auto-approving decomposed epic stories (no JIRA connection)")
+            return new_stories, False
+
+        self._pause_for_approval(metadata, new_stories, verdict.reasoning)
+        return new_stories, True
+
+    def _run_epic_workflow(self, metadata: dict, resume: bool = False) -> Dict[str, Any]:
+        """Sequential Epic: plan once, judge stories, then Dev per story with commit."""
+        from ..tools.git_tools import git_commit
+        from ..utils.epic_memory import index_story_memory
+
+        epic_vision = self.vision
+        stories = parse_jira_stories(metadata)
+        start_index = resume_story_index(metadata) if resume else 0
+
+        if start_index == 0 and not resume:
+            self.run_meta_phase()
+
+            # Assess existing stories to decide whether to skip PO
+            assessment = assess_epic_stories(
+                stories, self.vision, self._get_manager_llm()
+            )
+            metadata["epic_judge_reasoning"] = assessment.reasoning
+            metadata["epic_po_skipped"] = assessment.skip_po
+            if assessment.skip_po:
+                logger.info("Epic PO skipped — seeding user_stories.md from JIRA stories")
+                self._seed_user_stories_from_jira(assessment.stories)
+                metadata["epic_judge_completed"] = True
+            else:
+                self._run_phase_with_retry("product_owner", self.run_product_owner_phase)
+            self._update_job_metadata(metadata)
+
+            self._run_phase_with_retry("designer", self.run_designer_phase)
+            self._run_phase_with_retry("tech_architect", self.run_tech_architect_phase)
+            # Universal plan review gate (before epic judge)
+            if self._plan_review_enabled() and not metadata.get("pending_review_approved"):
+                return self._pause_for_plan_review()
+            stories, paused = self._run_epic_judge_gate(metadata, stories)
+            if paused:
+                return {
+                    "status": "pending_approval",
+                    "project_id": self.project_id,
+                    "budget_report": self.budget_tracker.get_report(self.project_id),
+                    "state": self.state_machine.get_current_state().value,
+                    "epic_stories_planned": len(stories),
+                    "message": metadata.get("epic_judge_reasoning", ""),
+                }
+        else:
+            self._load_phase_artifacts()
+            metadata = self._load_job_metadata()
+            stories = parse_jira_stories(metadata)
+
+        remaining = stories_to_process(stories, start_index)
+        total = len(stories)
+        stories_completed = 0
+
+        for offset, story in enumerate(remaining):
+            index = start_index + offset
+            story_key = story.get("key", f"story-{index}")
+            self._report_progress(
+                "development",
+                65 + int(25 * (index + 1) / max(total, 1)),
+                f"Story {story_key} ({index + 1}/{total})",
+            )
+            scoped = story_vision(story, epic_vision)
+            self.user_stories = scoped
+            self._run_phase_with_retry("development", self.run_development_phase)
+
+            commit_msg = commit_message_for_story(story)
+            commit_result = git_commit(commit_msg)
+            commit_sha = ""
+            if "Committed:" in commit_result:
+                part = commit_result.split("Committed:", 1)[1].strip()
+                commit_sha = part.split()[0].strip()
+
+            index_story_memory(
+                self.workspace_path,
+                self.document_indexer,
+                story_key=story_key,
+                story_index=index,
+                story_summary=scoped,
+            )
+
+            metadata["last_completed_story_index"] = index
+            self._update_job_metadata(metadata)
+            stories_completed += 1
+            self._append_job_event({
+                "type": "story_completed",
+                "story_key": story_key,
+                "commit_sha": commit_sha,
+                "index": index,
+                "total": total,
+                "phase": "development",
+                "message": f"Story {story_key} committed",
+            })
+
+        self._run_post_build_fix_iteration()
+        self.state_machine.transition(
+            ProjectState.COMPLETED,
+            TransitionContext(phase="completed", data={"epic": True}),
+        )
+        return {
+            "status": "completed",
+            "project_id": self.project_id,
+            "budget_report": self.budget_tracker.get_report(self.project_id),
+            "state": self.state_machine.get_current_state().value,
+            "epic_stories_completed": stories_completed,
+            "epic_stories_planned": total,
+        }
 
     # ── Validation & Remediation helpers ────────────────────────────────────
 
@@ -1324,7 +1708,12 @@ class SoftwareDevWorkflow:
                 logger.warning("Could not save agent_backstories.json: %s", e)
             
             # Extract project context from meta agent analysis
-            self.project_context = self.meta_agent.analyze_vision(self.vision)
+            meta_rag = get_phase_rag_context(
+                self.document_indexer, "meta", self.config, extra_query=self.vision[:1000],
+            )
+            self.project_context = self.meta_agent.analyze_vision(
+                self.vision, reference_context=meta_rag,
+            )
             
             # Transition to next phase only after successful completion
             self.state_machine.transition(
@@ -1337,7 +1726,7 @@ class SoftwareDevWorkflow:
         except ImportModeRecommendedError:
             raise
         except Exception as e:
-            recovery = self.error_recovery.handle_workflow_error("meta", e, retry_count)
+            self.error_recovery.handle_workflow_error("meta", e, retry_count)
             if self.error_recovery.should_retry("meta", retry_count) and retry_count < 3:
                 logger.warning(f"⚠️  Meta phase failed, retrying... ({retry_count + 1}/3)")
                 # Rollback to META state for retry
@@ -1380,6 +1769,7 @@ class SoftwareDevWorkflow:
                 budget_tracker=self.budget_tracker,
                 document_indexer=self.document_indexer,
                 workspace_path=self.workspace_path,
+                config=self.config,
             )
             return self.product_owner_agent.run(self.vision, self.project_context)
 
@@ -1407,6 +1797,7 @@ class SoftwareDevWorkflow:
                 budget_tracker=self.budget_tracker,
                 document_indexer=self.document_indexer,
                 workspace_path=self.workspace_path,
+                config=self.config,
             )
             retry_prompt = self._PO_FEATURE_RETRY_PROMPT.format(
                 vision=self.vision,
@@ -1447,6 +1838,7 @@ class SoftwareDevWorkflow:
                 budget_tracker=self.budget_tracker,
                 document_indexer=self.document_indexer,
                 workspace_path=self.workspace_path,
+                config=self.config,
             )
             feature_prompt = (
                 "You MUST create Gherkin .feature files using the file_writer tool.\n\n"
@@ -1494,10 +1886,15 @@ class SoftwareDevWorkflow:
         )
         
         # Run designer agent with vision for grounding
+        designer_rag = get_phase_rag_context(
+            self.document_indexer, "designer", self.config,
+            extra_query=(self.user_stories or "")[:1500],
+        )
         result = self.designer_agent.run(
             self.user_stories or "",
             self.project_context,
             vision=self.vision,
+            reference_context=designer_rag,
         )
         
         # Fallback: if agent returned content but didn't call file_writer
@@ -1521,6 +1918,7 @@ class SoftwareDevWorkflow:
                     self.user_stories or "",
                     self.project_context,
                     vision=self.vision,
+                    reference_context=designer_rag,
                 )
                 if design_spec_file.exists():
                     self.design_spec = design_spec_file.read_text(encoding="utf-8", errors="replace")
@@ -1552,10 +1950,15 @@ class SoftwareDevWorkflow:
         )
         
         # Run tech architect agent
+        ta_rag = get_phase_rag_context(
+            self.document_indexer, "tech_architect", self.config,
+            extra_query=(self.design_spec or "")[:1500],
+        )
         result = self.tech_architect_agent.run(
             self.design_spec or "",
             self.vision,
-            self.project_context
+            self.project_context,
+            reference_context=ta_rag,
         )
         
         # Fallback: if agent returned content but didn't call file_writer
@@ -1716,7 +2119,6 @@ class SoftwareDevWorkflow:
         Returns the number of tasks processed. ``completed_files`` and
         ``export_registry`` are shared dicts protected by ``lock``.
         """
-        import threading as _threading
         from ..orchestrator.code_validator import CodeCompletenessValidator
         from ..tools.file_tools import set_thread_workspace, set_allowed_file_paths
 
@@ -1734,7 +2136,7 @@ class SoftwareDevWorkflow:
             if task is None:
                 if stall_counter > 3:
                     break
-                import time as _t; _t.sleep(1)
+                time.sleep(1)
                 stall_counter += 1
                 continue
             stall_counter = 0
@@ -1780,20 +2182,33 @@ class SoftwareDevWorkflow:
                 agent.agent.reset_chat()
 
                 with lock:
-                    snap_files = dict(completed_files)
                     snap_exports = dict(export_registry)
 
                 pl = getattr(self.config, "prompt_limits", None) if self.config else None
                 max_pvc = getattr(pl, "max_project_vision_chars", None) if pl else None
+                max_dep_chars = int(getattr(pl, "max_completed_file_chars", 8192)) if pl else 8192
+                with lock:
+                    related_files = self.task_manager.get_related_existing_files(
+                        task, completed_files, max_chars_per_file=max_dep_chars,
+                    )
+                file_rag = ""
+                if file_path:
+                    file_rag = get_phase_rag_context(
+                        self.document_indexer,
+                        "development",
+                        self.config,
+                        extra_query=f"Implement file {file_path}. {(task.description or '')[:500]}",
+                    )
                 prompt = self.task_manager.build_file_prompt(
                     task,
                     tech_stack=self.tech_stack or "",
                     user_stories=self.user_stories or "",
-                    existing_files=snap_files,
+                    existing_files=related_files,
                     project_vision=self.vision or "",
                     max_project_vision_chars=max_pvc,
                     interface_contract=snap_exports if snap_exports else None,
                     api_contract=self.api_contract,
+                    rag_context=file_rag,
                 )
 
                 if attempt > 0 and retry_prompt:
@@ -1835,12 +2250,14 @@ class SoftwareDevWorkflow:
                     self.task_manager.update_task_status(task.task_id, "completed", f"File created: {file_path}")
                     try:
                         content = full_path.read_text(encoding="utf-8", errors="replace")
-                        if len(content) <= 5120:
+                        pl = getattr(self.config, "prompt_limits", None) if self.config else None
+                        max_dep = int(getattr(pl, "max_completed_file_chars", 8192)) if pl else 8192
+                        if len(content) <= max_dep:
                             with lock:
                                 completed_files[file_path] = content
                         else:
                             with lock:
-                                completed_files[file_path] = content[:5120] + "\n# ... truncated ..."
+                                completed_files[file_path] = content[:max_dep] + "\n# ... truncated ..."
                     except Exception:
                         pass
                     try:
@@ -1875,8 +2292,6 @@ class SoftwareDevWorkflow:
         logger.info("🚀 Starting Development phase...")
         self._report_progress('development', 65, "Implementing application logic...")
 
-        from ..orchestrator.code_validator import CodeCompletenessValidator
-        from ..orchestrator.language_strategies import StrategyRegistry
 
         if self.state_machine.get_current_state() != ProjectState.DEVELOPMENT:
             self.state_machine.transition(
@@ -2120,7 +2535,6 @@ class SoftwareDevWorkflow:
             remaining_files.append(t)
         
         if remaining_files:
-            from ..orchestrator.code_validator import CodeCompletenessValidator as _FEValidator
             logger.info("Frontend phase: %d remaining file tasks from dev phase", len(remaining_files))
 
             # Collect existing file content so the frontend agent sees what
@@ -2151,15 +2565,28 @@ class SoftwareDevWorkflow:
 
                 pl = getattr(self.config, "prompt_limits", None) if self.config else None
                 max_pvc = getattr(pl, "max_project_vision_chars", None) if pl else None
+                max_dep_chars = int(getattr(pl, "max_completed_file_chars", 8192)) if pl else 8192
+                related_files = self.task_manager.get_related_existing_files(
+                    task, existing_files, max_chars_per_file=max_dep_chars,
+                )
+                file_rag = ""
+                if file_path:
+                    file_rag = get_phase_rag_context(
+                        self.document_indexer,
+                        "development",
+                        self.config,
+                        extra_query=f"Frontend file {file_path}. {(task.description or '')[:500]}",
+                    )
                 prompt = self.task_manager.build_file_prompt(
                     task,
                     tech_stack=self.tech_stack or "",
                     user_stories=self.user_stories or "",
-                    existing_files=existing_files,
+                    existing_files=related_files,
                     project_vision=self.vision or "",
                     max_project_vision_chars=max_pvc,
                     interface_contract=self._export_registry if self._export_registry else None,
                     api_contract=self.api_contract,
+                    rag_context=file_rag,
                 )
                 try:
                     self.frontend_agent.agent.reset_chat()
@@ -2246,7 +2673,7 @@ class SoftwareDevWorkflow:
                     pipeline_type=pipeline_type,
                     project_context=project_context,
                 )
-                result = future.result(timeout=_DEVOPS_TIMEOUT_SECS)
+                future.result(timeout=_DEVOPS_TIMEOUT_SECS)
             logger.info("✅ DevOps phase completed")
             self._report_progress('devops', 95, "Containerfiles and pipelines created")
         except concurrent.futures.TimeoutError:
@@ -2295,6 +2722,10 @@ class SoftwareDevWorkflow:
             logger.warning("Could not set thread workspace in workflow: %s", e)
 
         try:
+            job_metadata = self._load_job_metadata()
+            if is_epic_job(job_metadata):
+                return self._run_epic_workflow(job_metadata, resume=resume)
+
             if resume:
                 self._load_phase_artifacts()
                 current = self.state_machine.get_current_state()
@@ -2337,10 +2768,14 @@ class SoftwareDevWorkflow:
             if not resume:
                 # Phase 1: Meta (has its own retry logic)
                 self.run_meta_phase()
-                # Phases 2–7: run with retry on transient LLM/network errors
+                # Phases 2–4: planning — can be paused for human review
                 self._run_phase_with_retry("product_owner", self.run_product_owner_phase)
                 self._run_phase_with_retry("designer", self.run_designer_phase)
                 self._run_phase_with_retry("tech_architect", self.run_tech_architect_phase)
+                # Universal plan review gate (config-gated)
+                metadata = self._load_job_metadata()
+                if self._plan_review_enabled() and not metadata.get("pending_review_approved"):
+                    return self._pause_for_plan_review()
                 # Dev, Frontend, and DevOps run in parallel — DevOps only
                 # needs tech_stack (no dependency on generated code).
                 import concurrent.futures as _cf

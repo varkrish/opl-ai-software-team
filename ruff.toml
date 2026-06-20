@@ -1,0 +1,8 @@
+# Repo-root Ruff config (CI runs: ruff check agent/src/ crew_studio/ --ignore E501)
+# E402: intentional late imports after load_dotenv() / optional dependency try/except blocks.
+
+[lint.per-file-ignores]
+"agent/src/llamaindex_crew/agents/base_agent.py" = ["E402"]
+"agent/src/llamaindex_crew/backends/__init__.py" = ["E402"]
+"agent/src/llamaindex_crew/main.py" = ["E402"]
+"crew_studio/llamaindex_web_app.py" = ["E402"]

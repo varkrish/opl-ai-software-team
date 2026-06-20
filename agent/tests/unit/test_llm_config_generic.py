@@ -82,5 +82,124 @@ class TestGenericLlamaLLM(unittest.TestCase):
             self.assertEqual(response.message.content, "Success")
             self.assertEqual(mock_post.call_count, 3)
 
+    # ------------------------------------------------------------------
+    # socket.timeout — OS-level SSL stall (the hard-to-catch case)
+    # ------------------------------------------------------------------
+
+    @patch('time.sleep', return_value=None)
+    def test_socket_timeout_retried(self, mock_sleep):
+        """
+        socket.timeout is raised when the OS-level TCP/SSL socket read stalls.
+        This is distinct from httpx.ReadTimeout and was previously NOT in the
+        retryable exceptions list, causing the entire process to hang until
+        the pytest session timeout killed it.
+        """
+        import socket
+        messages = [ChatMessage(role=MessageRole.USER, content="Hi")]
+
+        with patch('httpx.Client.post') as mock_post:
+            mock_post.side_effect = [
+                socket.timeout("SSL read timed out"),  # OS-level stall
+                MagicMock(
+                    status_code=200,
+                    json=lambda: {"choices": [{"message": {"content": "recovered"}}]},
+                ),
+            ]
+            response = self.llm.chat(messages)
+            self.assertEqual(response.message.content, "recovered")
+            self.assertEqual(mock_post.call_count, 2)
+
+    @patch('time.sleep', return_value=None)
+    def test_socket_timeout_exhausted_raises(self, mock_sleep):
+        """When every attempt gets a socket.timeout, the error must propagate."""
+        import socket
+        messages = [ChatMessage(role=MessageRole.USER, content="Hi")]
+
+        with patch('httpx.Client.post') as mock_post:
+            mock_post.side_effect = socket.timeout("SSL read timed out")
+            with self.assertRaises(socket.timeout):
+                self.llm.chat(messages)
+            self.assertEqual(mock_post.call_count, 5)  # 5 attempts
+
+    @patch('time.sleep', return_value=None)
+    def test_oserror_stall_retried(self, mock_sleep):
+        """OSError (base of socket.timeout) from a stalled connection is retried."""
+        messages = [ChatMessage(role=MessageRole.USER, content="Hi")]
+
+        with patch('httpx.Client.post') as mock_post:
+            mock_post.side_effect = [
+                OSError("Connection reset by peer"),
+                MagicMock(
+                    status_code=200,
+                    json=lambda: {"choices": [{"message": {"content": "ok"}}]},
+                ),
+            ]
+            response = self.llm.chat(messages)
+            self.assertEqual(response.message.content, "ok")
+
+    # ------------------------------------------------------------------
+    # 400 context-length errors must NOT be retried (fail fast)
+    # ------------------------------------------------------------------
+
+    @patch('time.sleep', return_value=None)
+    def test_400_context_too_large_not_retried(self, mock_sleep):
+        """
+        A 400 response for context-length exceeded must fail immediately —
+        retrying is pointless and wastes tokens/money.
+        """
+        messages = [ChatMessage(role=MessageRole.USER, content="Hi")]
+        bad_response = MagicMock(
+            status_code=400,
+            text='{"error": {"message": "input tokens 8193 exceeds context 8192"}}',
+        )
+        bad_response.raise_for_status.side_effect = Exception("400 Bad Request")
+
+        with patch('httpx.Client.post') as mock_post:
+            mock_post.return_value = bad_response
+            with self.assertRaises(Exception):
+                self.llm.chat(messages)
+            # Must NOT retry on 400
+            self.assertEqual(mock_post.call_count, 1)
+
+    # ------------------------------------------------------------------
+    # httpx.Timeout object must be used (not a bare float)
+    # ------------------------------------------------------------------
+
+    def test_httpx_timeout_object_used(self):
+        """
+        The chat() method must pass an httpx.Timeout object (not a bare float)
+        so that read, connect, and write timeouts are independently bounded.
+        A bare float sets ONLY the total timeout and cannot bound a stalled SSL read.
+        """
+        messages = [ChatMessage(role=MessageRole.USER, content="Hi")]
+        captured = {}
+
+        original_init = httpx.Client.__init__
+
+        def capturing_init(self_client, **kwargs):
+            captured['timeout'] = kwargs.get('timeout')
+            original_init(self_client, **kwargs)
+
+        with patch.object(httpx.Client, '__init__', capturing_init):
+            with patch('httpx.Client.post') as mock_post:
+                mock_post.return_value = MagicMock(
+                    status_code=200,
+                    json=lambda: {"choices": [{"message": {"content": "ok"}}]},
+                )
+                self.llm.chat(messages)
+
+        timeout = captured.get('timeout')
+        self.assertIsNotNone(timeout, "httpx.Client must receive a timeout argument")
+        self.assertIsInstance(
+            timeout, httpx.Timeout,
+            f"timeout must be httpx.Timeout, got {type(timeout)}. "
+            "A bare float cannot bound individual SSL read stalls.",
+        )
+        # Each dimension must be individually bounded
+        self.assertIsNotNone(timeout.read, "read timeout must be set")
+        self.assertIsNotNone(timeout.connect, "connect timeout must be set")
+        self.assertLessEqual(timeout.read, 300, "read timeout must be ≤ 300s")
+
+
 if __name__ == '__main__':
     unittest.main()

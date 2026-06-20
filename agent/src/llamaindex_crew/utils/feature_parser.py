@@ -48,7 +48,7 @@ def parse_features_from_files(workspace_path: str = None) -> List[Dict[str, str]
                     'file': str(feature_file),
                     'scenarios': scenarios
                 })
-            except Exception as e:
+            except Exception:
                 # If can't read, use filename as feature name
                 features.append({
                     'name': feature_name,
@@ -78,7 +78,7 @@ def parse_features_from_files(workspace_path: str = None) -> List[Dict[str, str]
                         'file': str(requirements_file),
                         'scenarios': []
                     })
-            except Exception as e:
+            except Exception:
                 pass
     
     return features

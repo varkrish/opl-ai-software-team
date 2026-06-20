@@ -11,6 +11,7 @@ from .git_tools import (
 )
 from .test_tools import PytestRunnerTool, CodeCoverageTool
 from .skill_tools import SkillQueryTool, prefetch_skills
+from .tldr_tools import create_tldr_tools, detect_tldr_lang
 from .tool_loader import load_tools
 
 __all__ = [
@@ -28,5 +29,7 @@ __all__ = [
     "CodeCoverageTool",
     "SkillQueryTool",
     "prefetch_skills",
+    "create_tldr_tools",
+    "detect_tldr_lang",
     "load_tools",
 ]

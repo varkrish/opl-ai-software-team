@@ -17,6 +17,7 @@ import git as gitmodule
 from llama_index.core.tools import FunctionTool
 
 from .file_tools import _resolve_workspace
+from ..utils.git_remote_auth import is_auto_push_enabled, maybe_auto_push_after_commit
 
 
 def _is_git_enabled() -> bool:
@@ -191,7 +192,8 @@ def _git_commit(args: str, workspace: Path) -> str:
             stats = f"{len(list(repo.tree().traverse()))} files (initial commit)"
     except Exception:
         stats = "Changes committed"
-    return f"✅ Committed: {commit.hexsha[:7]} - {message}\n\n{stats}"
+    push_msg = maybe_auto_push_after_commit(workspace) if is_auto_push_enabled() else ""
+    return f"✅ Committed: {commit.hexsha[:7]} - {message}\n\n{stats}{push_msg}"
 
 
 def _git_log(args: str, workspace: Path) -> str:

@@ -213,14 +213,26 @@ def file_writer(file_path: str, content: str, workspace_path: Optional[str] = No
         # Safety checks
         safety_checker = CodeSafetyChecker()
         
-        # Detect language from file extension
-        language = 'python'  # default
-        if file_path.endswith('.js') or file_path.endswith('.jsx'):
+        # Detect language from file extension.
+        # Non-code files (docs, config, data) use 'none' so they are never
+        # run through Python/JS pattern matching — avoiding false positives
+        # like "Retrieval (" matching the eval\s*\( pattern.
+        _NON_CODE_EXTS = {
+            '.md', '.txt', '.rst', '.yaml', '.yml', '.toml', '.ini', '.cfg',
+            '.json', '.jsonl', '.xml', '.html', '.htm', '.feature', '.gherkin',
+            '.env', '.env.example', '.gitignore', '.dockerignore', '.csv',
+        }
+        ext = ('.' + file_path.rsplit('.', 1)[-1].lower()) if '.' in file_path else ''
+        if ext in _NON_CODE_EXTS:
+            language = 'none'
+        elif file_path.endswith('.js') or file_path.endswith('.jsx'):
+            language = 'javascript'
+        elif file_path.endswith('.ts') or file_path.endswith('.tsx'):
             language = 'javascript'
         elif file_path.endswith('.sh') or file_path.endswith('.bash'):
             language = 'bash'
-        elif file_path.endswith('.py'):
-            language = 'python'
+        else:
+            language = 'python'  # .py and any unknown code-like extension
         
         # Validate file write
         safety_result = safety_checker.check_file_write(file_path, content, language)
