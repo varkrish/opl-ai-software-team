@@ -113,9 +113,10 @@ class GenericLlamaLLM(LLM):
         
         url = self._completions_url()
         headers = {
-            "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json"
         }
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
         
         # Filter out any kwargs that shouldn't go to the API
         api_kwargs = {k: v for k, v in kwargs.items() if k not in ["num_beams"]}
@@ -284,9 +285,10 @@ class GenericLlamaLLM(LLM):
         
         url = self._completions_url()
         headers = {
-            "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json"
         }
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
         formatted_messages = self._format_messages_for_api(messages)
         api_kwargs = {k: v for k, v in kwargs.items() if k not in ["num_beams"]}
         payload = {
@@ -321,9 +323,10 @@ class GenericLlamaLLM(LLM):
         
         url = f"{self.api_base.rstrip('/')}/completions"
         headers = {
-            "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json"
         }
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
         
         payload = {
             "model": self.model,
@@ -376,9 +379,10 @@ class GenericLlamaLLM(LLM):
         
         url = f"{self.api_base.rstrip('/')}/completions"
         headers = {
-            "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json"
         }
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
         
         payload = {
             "model": self.model,
