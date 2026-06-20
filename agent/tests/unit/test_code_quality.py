@@ -1178,10 +1178,11 @@ class TestDependencyManifestValidation:
 
         (workspace / "requirements.txt").write_text("flask>=2.0\n")
         f = workspace / "app.py"
-        f.write_text("from flask import Flask\nimport sqlalchemy\n")
+        # Use a package not in _KNOWN_FRAMEWORKS and not in requirements.txt
+        f.write_text("from flask import Flask\nimport my_custom_private_lib\n")
         result = CodeCompletenessValidator.validate_dependency_manifest(workspace)
         missing_pkgs = [m["package"] for m in result["missing"]]
-        assert "sqlalchemy" in missing_pkgs
+        assert "my_custom_private_lib" in missing_pkgs
 
     def test_java_undeclared_dependency(self, workspace):
         from llamaindex_crew.orchestrator.code_validator import CodeCompletenessValidator

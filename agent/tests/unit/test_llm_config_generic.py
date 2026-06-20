@@ -138,16 +138,18 @@ class TestGenericLlamaLLM(unittest.TestCase):
             self.assertEqual(response.message.content, "ok")
 
     # ------------------------------------------------------------------
-    # 400 context-length errors must NOT be retried (fail fast)
+    # 400 context-length errors: trim-and-retry up to max_retries, then raise
     # ------------------------------------------------------------------
 
     @patch('time.sleep', return_value=None)
-    def test_400_context_too_large_not_retried(self, mock_sleep):
+    def test_400_context_too_large_retries_then_raises(self, mock_sleep):
         """
-        A 400 response for context-length exceeded must fail immediately —
-        retrying is pointless and wastes tokens/money.
+        A 400 response for context-length exceeded is retried with a trimmed
+        prompt (up to max_retries times) and then raises if it never succeeds.
+        This avoids wasting money on non-context errors while still recovering
+        from context overflows when possible.
         """
-        messages = [ChatMessage(role=MessageRole.USER, content="Hi")]
+        messages = [ChatMessage(role=MessageRole.USER, content="Hi " * 500)]
         bad_response = MagicMock(
             status_code=400,
             text='{"error": {"message": "input tokens 8193 exceeds context 8192"}}',
@@ -158,8 +160,8 @@ class TestGenericLlamaLLM(unittest.TestCase):
             mock_post.return_value = bad_response
             with self.assertRaises(Exception):
                 self.llm.chat(messages)
-            # Must NOT retry on 400
-            self.assertEqual(mock_post.call_count, 1)
+            # Must retry (trim-and-retry until max_retries exhausted)
+            self.assertGreater(mock_post.call_count, 1)
 
     # ------------------------------------------------------------------
     # httpx.Timeout object must be used (not a bare float)
