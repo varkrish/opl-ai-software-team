@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import httpx
-from fastapi import FastAPI, HTTPException, Query, Request, UploadFile, File, Form, Depends
+from fastapi import FastAPI, HTTPException, Query, Request, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel
@@ -62,10 +62,10 @@ def _get_config():
 # Job runner — imported lazily to avoid heavy imports at module level
 # ---------------------------------------------------------------------------
 
-def _run_job_sync(job_id: str, vision: str, config_obj):
+def _run_job_sync(job_id: str, vision: str, config_obj, resume: bool = False):
     """Synchronous wrapper that runs in a thread via asyncio.to_thread."""
     from crew_studio.llamaindex_web_app import run_job_async
-    run_job_async(job_id, vision, config_obj)
+    run_job_async(job_id, vision, config_obj, resume=resume)
 
 
 def _run_job_with_backend_sync(job_id: str, vision: str, backend):
@@ -124,11 +124,11 @@ app.add_middleware(
 @app.middleware("http")
 async def authenticate_request(request: Request, call_next):
     path = request.url.path
-    
+
     # Secure all /api/* endpoints
     if path.startswith("/api/"):
         from crew_studio.auth import AUTH_ENABLED, MOCK_USER
-        
+
         if not AUTH_ENABLED:
             user = MOCK_USER
         else:
@@ -138,7 +138,7 @@ async def authenticate_request(request: Request, call_next):
                     status_code=401,
                     content={"detail": "Missing or invalid authorization credentials"}
                 )
-            
+
             token = auth_header.split(" ")[1]
             try:
                 user = decode_and_verify_token(token)
@@ -149,10 +149,10 @@ async def authenticate_request(request: Request, call_next):
             except Exception as e:
                 logger.error("Authentication error in middleware: %s", e)
                 return JSONResponse(status_code=401, content={"detail": "Authentication failed"})
-        
+
         # Store user in request state for FastAPI path handlers
         request.state.user = user
-        
+
         # Inject headers into ASGI scope for WSGI/Flask fallback
         headers = list(request.scope["headers"])
         headers.append((b"x-user-id", user.user_id.encode("utf-8")))
@@ -192,6 +192,7 @@ class CreateJobRequest(BaseModel):
     github_urls: List[str] = []
     mode: str = "build"
     metadata: Dict[str, Any] = {}
+    auto_approve_plan: bool = False  # when True, skip the plan review gate for this job
 
 
 def _resolve_backend(name: str):
@@ -211,7 +212,7 @@ def _resolve_backend(name: str):
         return None, None if name == "opl-ai-team" else f"Backend not available: {name}"
 
 
-def _dispatch_job(job_id: str, vision: str, backend_name: str):
+def _dispatch_job(job_id: str, vision: str, backend_name: str, resume: bool = False):
     """Runs in executor thread — safe to do slow imports/work here."""
     config_obj = _get_config()
     if backend_name != "opl-ai-team":
@@ -219,7 +220,22 @@ def _dispatch_job(job_id: str, vision: str, backend_name: str):
         if backend:
             _run_job_with_backend_sync(job_id, vision, backend)
             return
-    _run_job_sync(job_id, vision, config_obj)
+    _run_job_sync(job_id, vision, config_obj, resume=resume)
+
+
+def _build_forward_headers(request: Request) -> dict:
+    """Build headers dict for Flask forwarding, including injected auth headers."""
+    forward_headers = {}
+    for k, v in request.headers.items():
+        forward_headers[k] = v
+    if hasattr(request.state, "user"):
+        u = request.state.user
+        forward_headers["x-user-id"] = u.user_id
+        forward_headers["x-user-email"] = u.email
+        forward_headers["x-user-roles"] = ",".join(u.roles)
+        forward_headers["x-user-teams"] = ",".join(u.teams)
+        forward_headers["x-user-admin"] = str(u.is_admin).lower()
+    return forward_headers
 
 
 @app.post("/api/jobs")
@@ -227,20 +243,10 @@ async def create_job(request: Request, user: CurrentUser = Depends(get_current_u
     """Create a new job. JSON for greenfield; multipart is delegated to Flask (ZIP, import, migration, refactor)."""
 
     content_type = request.headers.get("content-type", "")
+    forward_headers = _build_forward_headers(request)
+
     if "multipart/form-data" in content_type:
         body_bytes = await request.body()
-        
-        # Forward user authentication headers to test client
-        forward_headers = {}
-        for k, v in request.headers.items():
-            forward_headers[k] = v
-        if hasattr(request.state, "user"):
-            u = request.state.user
-            forward_headers["x-user-id"] = u.user_id
-            forward_headers["x-user-email"] = u.email
-            forward_headers["x-user-roles"] = ",".join(u.roles)
-            forward_headers["x-user-teams"] = ",".join(u.teams)
-            forward_headers["x-user-admin"] = str(u.is_admin).lower()
 
         def _forward_multipart():
             from crew_studio.llamaindex_web_app import app as flask_app
@@ -278,8 +284,40 @@ async def create_job(request: Request, user: CurrentUser = Depends(get_current_u
     except Exception as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
+    # Import/fix with GitHub URLs need Flask handler (clone into workspace)
+    if body.mode in ("import", "fix") and body.github_urls:
+        def _forward_json():
+            from crew_studio.llamaindex_web_app import app as flask_app
+            with flask_app.test_client() as client:
+                return client.post(
+                    "/api/jobs",
+                    json=payload,
+                    content_type="application/json",
+                    headers=forward_headers,
+                )
+
+        try:
+            resp = await asyncio.to_thread(_forward_json)
+        except Exception:
+            logger.exception("JSON POST /api/jobs forward to Flask failed")
+            raise HTTPException(
+                status_code=502,
+                detail="Job create failed (see server logs).",
+            ) from None
+        out_ct = resp.headers.get("Content-Type") or "application/json"
+        media = out_ct.split(";")[0].strip()
+        data = getattr(resp, "data", None) or resp.get_data()
+        return Response(
+            content=data,
+            status_code=resp.status_code,
+            media_type=media,
+        )
+
     if not body.vision:
-        raise HTTPException(status_code=400, detail="Vision is required")
+        if body.mode in ("import", "fix"):
+            pass  # default vision applied below
+        else:
+            raise HTTPException(status_code=400, detail="Vision is required")
 
     if body.backend != "opl-ai-team":
         _, err = _resolve_backend(body.backend)
@@ -298,24 +336,35 @@ async def create_job(request: Request, user: CurrentUser = Depends(get_current_u
     job_workspace = base_workspace_path / f"job-{job_id}"
     job_workspace.mkdir(parents=True, exist_ok=True)
 
+    meta = dict(body.metadata) if body.metadata else {}
+    if body.auto_approve_plan:
+        meta["auto_approve_plan"] = True
+
+    effective_mode = body.mode
+    if body.mode == "fix":
+        from crew_studio.work_intent import apply_fix_mode_metadata
+        auto_fix = meta.get("auto_fix_after_analyze", True)
+        meta = apply_fix_mode_metadata(meta, auto_fix=bool(auto_fix))
+        effective_mode = "import"
+
+    vision = body.vision or "[Import] Existing codebase"
     job_db.create_job(
         job_id,
-        body.vision,
+        vision,
         str(job_workspace),
-        metadata=body.metadata,
+        metadata=meta,
         owner_id=user.user_id,
         owner_email=user.email,
-        team_id=body.team_id
+        team_id=body.team_id,
     )
 
-    if body.mode in ("migration", "refactor", "import"):
-        if body.mode == "import":
-            meta = dict(body.metadata) if body.metadata else {}
+    if effective_mode in ("migration", "refactor", "import"):
+        if effective_mode == "import":
             meta["job_mode"] = "import"
             job_db.update_job(job_id, {"metadata": json.dumps(meta)})
         phase = (
-            "awaiting_migration" if body.mode == "migration"
-            else "awaiting_refactor" if body.mode == "refactor"
+            "awaiting_migration" if effective_mode == "migration"
+            else "awaiting_refactor" if effective_mode == "refactor"
             else "awaiting_import"
         )
         job_db.update_job(job_id, {"status": "queued", "current_phase": phase})
@@ -327,13 +376,14 @@ async def create_job(request: Request, user: CurrentUser = Depends(get_current_u
                 "documents": 0,
                 "source_files": 0,
                 "github_repos": 0,
+                "mode": body.mode,
             },
         )
 
     # Tests / tooling: avoid spawning the full LLM pipeline from the request handler.
     if os.getenv("CREW_TEST_NO_EXECUTOR", "").strip().lower() not in ("1", "true", "yes"):
         loop = asyncio.get_running_loop()
-        loop.run_in_executor(None, _dispatch_job, job_id, body.vision, body.backend)
+        loop.run_in_executor(None, _dispatch_job, job_id, vision, body.backend)
 
     return JSONResponse(
         status_code=201,
@@ -399,16 +449,15 @@ async def get_job(job_id: str, user: CurrentUser = Depends(get_current_user)):
     job = job_db.get_job(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
-    
-    # Enforce access control
+
     if not user.is_admin:
         has_access = (
-            (job.get("owner_id") == user.user_id) or 
+            (job.get("owner_id") == user.user_id) or
             (job.get("team_id") and job.get("team_id").lstrip("/") in user.teams)
         )
         if not has_access:
             raise HTTPException(status_code=404, detail="Job not found")
-            
+
     return job
 
 
@@ -417,11 +466,10 @@ async def get_job_progress(job_id: str, user: CurrentUser = Depends(get_current_
     job = job_db.get_job(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
-        
-    # Enforce access control
+
     if not user.is_admin:
         has_access = (
-            (job.get("owner_id") == user.user_id) or 
+            (job.get("owner_id") == user.user_id) or
             (job.get("team_id") and job.get("team_id").lstrip("/") in user.teams)
         )
         if not has_access:
@@ -439,6 +487,145 @@ async def get_job_progress(job_id: str, user: CurrentUser = Depends(get_current_
         "current_phase": job["current_phase"],
         "last_message": last_messages[-10:],
     }
+
+
+@app.post("/api/jobs/{job_id}/approve")
+async def approve_job(job_id: str, user: CurrentUser = Depends(get_current_user)):
+    """Resume a pending_approval or pending_review job."""
+    job = job_db.get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    if not user.is_admin:
+        has_access = (
+            (job.get("owner_id") == user.user_id) or
+            (job.get("team_id") and job.get("team_id").lstrip("/") in user.teams)
+        )
+        if not has_access:
+            raise HTTPException(status_code=404, detail="Job not found")
+
+    if job.get("status") not in ("pending_approval", "pending_review"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Job is not pending approval/review (status={job.get('status')})",
+        )
+    raw_meta = job.get("metadata") or {}
+    meta = raw_meta if isinstance(raw_meta, dict) else {}
+    meta["pending_review_approved"] = True
+    job_db.update_job(job_id, {
+        "status": "queued",
+        "current_phase": "development",
+        "metadata": json.dumps(meta),
+    })
+    if os.getenv("CREW_TEST_NO_EXECUTOR", "").strip().lower() not in ("1", "true", "yes"):
+        loop = asyncio.get_running_loop()
+        loop.run_in_executor(
+            None,
+            _dispatch_job,
+            job_id,
+            job.get("vision", ""),
+            "opl-ai-team",
+            True,
+        )
+    return {"job_id": job_id, "status": "resumed"}
+
+
+class RefinePlanRequest(BaseModel):
+    feedback: str
+
+
+@app.post("/api/jobs/{job_id}/refine-plan")
+async def refine_plan(job_id: str, body: RefinePlanRequest, user: CurrentUser = Depends(get_current_user)):
+    """Re-run planning phases with user feedback while job is pending_review/pending_approval."""
+    job = job_db.get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    if not user.is_admin:
+        has_access = (
+            (job.get("owner_id") == user.user_id) or
+            (job.get("team_id") and job.get("team_id").lstrip("/") in user.teams)
+        )
+        if not has_access:
+            raise HTTPException(status_code=404, detail="Job not found")
+
+    if job.get("status") not in ("pending_review", "pending_approval"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Job is not in a reviewable state (status={job.get('status')})",
+        )
+    if not body.feedback or not body.feedback.strip():
+        raise HTTPException(status_code=400, detail="feedback is required")
+
+    if os.getenv("CREW_TEST_NO_EXECUTOR", "").strip().lower() in ("1", "true", "yes"):
+        return {"job_id": job_id, "status": "pending_review", "artifacts": {}, "feedback_rounds": 0}
+
+    def _run_refine():
+        from pathlib import Path as _Path
+        from src.llamaindex_crew.workflows.software_dev_workflow import SoftwareDevWorkflow
+        from src.llamaindex_crew.tools.file_tools import set_thread_workspace
+
+        workspace = _Path(job["workspace_path"])
+        set_thread_workspace(str(workspace))
+        cfg = _get_config()
+        workflow = SoftwareDevWorkflow(
+            project_id=job_id,
+            workspace_path=workspace,
+            vision=job.get("vision", ""),
+            config=cfg,
+            progress_callback=lambda phase, prog, msg=None: job_db.update_progress(job_id, phase, prog, msg),
+            job_db=job_db,
+        )
+        return workflow.refine_plan(body.feedback.strip())
+
+    loop = asyncio.get_running_loop()
+    result = await loop.run_in_executor(None, _run_refine)
+    return {**result, "job_id": job_id}
+
+
+@app.get("/api/jobs/{job_id}/plan")
+async def get_job_plan(job_id: str, user: CurrentUser = Depends(get_current_user)):
+    """Return planning artifacts for a job (user_stories, design_spec, tech_stack)."""
+    job = job_db.get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    if not user.is_admin:
+        has_access = (
+            (job.get("owner_id") == user.user_id) or
+            (job.get("team_id") and job.get("team_id").lstrip("/") in user.teams)
+        )
+        if not has_access:
+            raise HTTPException(status_code=404, detail="Job not found")
+
+    from pathlib import Path as _Path
+    workspace = _Path(job["workspace_path"])
+    artifacts = {}
+    for name in ("user_stories.md", "design_spec.md", "tech_stack.md", "requirements.md"):
+        p = workspace / name
+        if p.exists():
+            try:
+                artifacts[name] = p.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                pass
+    meta = job.get("metadata") or {}
+    if isinstance(meta, str):
+        try:
+            meta = json.loads(meta)
+        except Exception:
+            meta = {}
+    return {
+        "artifacts": artifacts,
+        "jira_stories": meta.get("jira_stories", []),
+        "epic_judge_reasoning": meta.get("epic_judge_reasoning"),
+        "plan_feedback_history": meta.get("plan_feedback_history", []),
+    }
+
+
+@app.post("/api/jobs/{job_id}/refine-epic-stories")
+async def refine_epic_stories(job_id: str, body: RefinePlanRequest, user: CurrentUser = Depends(get_current_user)):
+    """Alias for /refine-plan — kept for backward compatibility with epic workflows."""
+    return await refine_plan(job_id, body, user)
 
 
 @app.get("/api/backends")

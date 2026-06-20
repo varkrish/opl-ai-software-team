@@ -3,6 +3,7 @@ Test execution tools for AI agents
 Migrated from CrewAI BaseTool to LlamaIndex FunctionTool
 """
 import logging
+import os
 import subprocess
 import time
 from abc import ABC, abstractmethod
@@ -10,6 +11,10 @@ from pathlib import Path
 from typing import Optional
 
 from llama_index.core.tools import FunctionTool
+
+from .file_tools import _resolve_workspace
+
+logger = logging.getLogger(__name__)
 
 
 def pytest_runner(

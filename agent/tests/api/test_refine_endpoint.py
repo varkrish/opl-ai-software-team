@@ -136,6 +136,37 @@ def test_is_safe_relative_path_accepts_valid_paths():
     assert _is_safe_relative_path("") is False
 
 
+def test_refine_with_scope_impact_returns_202():
+    """scope=impact is accepted when file_path is set."""
+    job_id = _create_completed_job()
+    with app.test_client() as client:
+        with patch("crew_studio.llamaindex_web_app.threading.Thread"):
+            response = client.post(
+                f"/api/jobs/{job_id}/refine",
+                json={
+                    "prompt": "Fix handler",
+                    "file_path": "src/app.py",
+                    "scope": "impact",
+                    "refinement_kind": "fix",
+                },
+                content_type="application/json",
+            )
+        assert response.status_code == 202
+        data = json.loads(response.data)
+        assert data.get("status") == "refining"
+
+
+def test_refine_invalid_scope_returns_400():
+    job_id = _create_completed_job()
+    with app.test_client() as client:
+        response = client.post(
+            f"/api/jobs/{job_id}/refine",
+            json={"prompt": "Fix", "scope": "invalid"},
+            content_type="application/json",
+        )
+        assert response.status_code == 400
+
+
 def test_refine_concurrent_409():
     """409 when refinement already in progress"""
     job_id = _create_completed_job()

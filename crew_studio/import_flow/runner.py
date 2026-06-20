@@ -346,7 +346,7 @@ def run_import_analysis(
     hints = _collect_stack_hints(workspace_path)
     heuristic_md = "\n".join(
         [f"- {m}" for m in hints.get("markers", [])]
-        + [f"- language: {l}" for l in hints.get("languages", [])]
+        + [f"- language: {lang}" for lang in hints.get("languages", [])]
     )
 
     from src.llamaindex_crew.tools.file_tools import file_lister  # noqa: WPS433
@@ -416,3 +416,20 @@ def run_import_analysis(
         "metadata": _runner_json.dumps(existing_meta),
     })
     logger.info("Import analysis completed for job %s — awaiting refinement", job_id)
+
+    if existing_meta.get("auto_fix_after_analyze"):
+        try:
+            from crew_studio.refinement_runner import trigger_auto_fix_after_analyze
+            trigger_auto_fix_after_analyze(
+                job_id=job_id,
+                workspace_path=workspace_path,
+                job_db=job_db,
+                progress_callback=progress_callback,
+            )
+        except Exception as exc:
+            logger.exception("Auto fix after analyze failed for job %s: %s", job_id, exc)
+            job_db.update_job(job_id, {
+                "status": "failed",
+                "current_phase": "refinement_failed",
+                "error": f"Auto fix failed: {exc}",
+            })

@@ -206,6 +206,42 @@ class TestGitCommit:
 
 
 # ---------------------------------------------------------------------------
+# Tests: auto-push after commit
+# ---------------------------------------------------------------------------
+
+class TestGitAutoPush:
+    def test_commit_does_not_push_when_disabled(self, git_repo, git_fn, workspace):
+        (workspace / "auto.py").write_text("x=1\n")
+        with patch.dict(os.environ, {"ENABLE_AUTO_PUSH": "false"}):
+            result = git_fn("commit add auto file")
+        assert "✅" in result or "committed" in result.lower()
+        assert "Pushed" not in result
+        assert "Push" not in result
+
+    def test_commit_triggers_push_when_enabled(self, git_repo, git_fn, workspace):
+        (workspace / "auto2.py").write_text("y=2\n")
+        with patch.dict(os.environ, {"ENABLE_AUTO_PUSH": "true"}):
+            with patch(
+                "llamaindex_crew.tools.git_tools.maybe_auto_push_after_commit",
+                return_value="\n✅ Pushed to origin",
+            ) as mock_push:
+                result = git_fn("commit add auto2")
+        mock_push.assert_called_once()
+        assert "Pushed" in result
+
+    def test_commit_succeeds_when_push_fails(self, git_repo, git_fn, workspace):
+        (workspace / "auto3.py").write_text("z=3\n")
+        with patch.dict(os.environ, {"ENABLE_AUTO_PUSH": "true"}):
+            with patch(
+                "llamaindex_crew.tools.git_tools.maybe_auto_push_after_commit",
+                return_value="\n⚠️ Push failed: auth error",
+            ):
+                result = git_fn("commit add auto3")
+        assert "✅" in result or "committed" in result.lower()
+        assert "Push failed" in result or "auth" in result.lower()
+
+
+# ---------------------------------------------------------------------------
 # Tests: git log
 # ---------------------------------------------------------------------------
 
