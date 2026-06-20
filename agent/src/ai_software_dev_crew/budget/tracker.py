@@ -46,6 +46,16 @@ class BudgetTracker:
         self.alert_threshold = float(os.getenv("BUDGET_ALERT_THRESHOLD", 0.8))
         self.project_id = os.getenv("PROJECT_ID", "default-project")
 
+        self.job_db = None
+        db_path = os.getenv("JOB_DB_PATH")
+        if db_path:
+            try:
+                from pathlib import Path
+                from crew_studio.job_database import JobDatabase
+                self.job_db = JobDatabase(Path(db_path))
+            except Exception as e:
+                logger.warning(f"Failed to connect to JobDatabase for token tracking: {e}")
+
     def calculate_cost(
         self,
         model: str,
@@ -105,6 +115,19 @@ class BudgetTracker:
             f"Project total: ${project_total:.4f} | "
             f"Hour total: ${hour_total:.4f}"
         )
+
+        if self.job_db and project_id and project_id != "default-project":
+            try:
+                self.job_db.record_llm_usage(
+                    job_id=project_id,
+                    agent_name=agent_name,
+                    model=model,
+                    input_tokens=input_tokens,
+                    output_tokens=output_tokens,
+                    cost=cost
+                )
+            except Exception as e:
+                logger.warning(f"Failed to record LLM usage to JobDatabase: {e}")
 
         return {
             "cost": cost,

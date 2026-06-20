@@ -18,14 +18,26 @@ from pathlib import Path
 from typing import List, Optional
 
 import httpx
+import os
 from llama_index.core.tools import FunctionTool
 
 logger = logging.getLogger(__name__)
+
+def _record_skills_used(job_id: str, skill_names: List[str]):
+    try:
+        from crew_studio.job_database import JobDatabase
+        db_path = os.getenv("JOB_DB_PATH")
+        if db_path and job_id:
+            db = JobDatabase(Path(db_path))
+            db.add_skills_used(job_id, skill_names)
+    except Exception as e:
+        logger.warning("Failed to record skills used: %s", e)
 
 
 def SkillQueryTool(
     service_url: str,
     default_tags: Optional[List[str]] = None,
+    job_id: Optional[str] = None,
 ) -> FunctionTool:
     """Create a FunctionTool that queries the skills service over HTTP."""
 
@@ -49,6 +61,8 @@ def SkillQueryTool(
                 return "No matching skills found."
             parts = [f"[{r['skill_name']}] {r['content']}" for r in results]
             logger.info("Skills query returned %d results", len(results))
+            if job_id:
+                _record_skills_used(job_id, [r['skill_name'] for r in results])
             return "\n---\n".join(parts)
         except Exception:
             logger.warning("Skills service unavailable", exc_info=True)
@@ -168,6 +182,9 @@ def prefetch_skills(
             "prefetch_skills [%s]: injected %d skill sections (%s)",
             role, len(sections), ", ".join(sorted(seen_skills)),
         )
+        if workspace_path and "job-" in workspace_path.name:
+            job_id = workspace_path.name.split("job-")[-1]
+            _record_skills_used(job_id, list(seen_skills))
     else:
         logger.info("prefetch_skills [%s]: no matching skills found", role)
 

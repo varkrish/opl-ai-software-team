@@ -69,11 +69,66 @@ base_workspace_path.mkdir(parents=True, exist_ok=True)
 from crew_studio.migration.blueprint import migration_bp  # noqa: E402
 from crew_studio.refactor.blueprint import refactor_bp  # noqa: E402
 from crew_studio.import_flow.blueprint import import_bp  # noqa: E402
+
 app.config["JOB_DB"] = job_db
 app.config["WORKSPACE_PATH"] = str(base_workspace_path)
 app.register_blueprint(migration_bp)
 app.register_blueprint(refactor_bp)
 app.register_blueprint(import_bp)
+
+
+# ---------------------------------------------------------------------------
+# Authentication & Job Ownership Check (Flask Fallback Routing)
+# ---------------------------------------------------------------------------
+
+@app.before_request
+def enforce_job_ownership():
+    # Only enforce auth on API paths
+    if not request.path.startswith("/api/"):
+        return
+
+    # Check if AUTH_ENABLED is active
+    from crew_studio.auth import AUTH_ENABLED
+    if not AUTH_ENABLED:
+        return
+
+    # Extract user identity headers injected by FastAPI middleware
+    user_id = request.headers.get("X-User-Id")
+    is_admin = request.headers.get("X-User-Admin", "false").lower() == "true"
+    
+    if not user_id:
+        return jsonify({"detail": "Unauthorized: Missing authentication headers"}), 401
+
+    if is_admin:
+        return  # Admins bypass ownership checks
+
+    # Extract job_id from URL view parameters or query arguments
+    job_id = None
+    if request.view_args and "job_id" in request.view_args:
+        job_id = request.view_args["job_id"]
+    elif request.args and "job_id" in request.args:
+        job_id = request.args.get("job_id")
+        
+    if job_id:
+        job = job_db.get_job(job_id)
+        if not job:
+            return jsonify({"detail": "Job not found"}), 404
+
+        # Extract user teams
+        raw_teams = request.headers.get("X-User-Teams", "")
+        user_teams = [t.strip() for t in raw_teams.split(",") if t.strip()]
+
+        has_access = (
+            (job.get("owner_id") == user_id) or 
+            (job.get("team_id") and job.get("team_id").lstrip("/") in user_teams)
+        )
+        if not has_access:
+            return jsonify({"detail": "Job not found"}), 404
+    else:
+        # If accessing workspace files globally without a specific job, reject
+        if request.path.startswith("/api/workspace/"):
+            return jsonify({"detail": "Job not found"}), 404
+
 
 
 # ── Phases used by migration / refactor / refinement flows ────────────────
@@ -1028,6 +1083,7 @@ def create_job():
     github_urls = []
     backend_name = 'opl-ai-team'  # default
     mode = 'build'
+    team_id = None
     
     metadata = {}
     if request.content_type and 'multipart/form-data' in request.content_type:
@@ -1036,6 +1092,7 @@ def create_job():
         # GitHub URLs can come as repeated form fields
         github_urls = request.form.getlist('github_urls')
         mode = request.form.get('mode', 'build')
+        team_id = request.form.get('team_id') or None
         raw_meta = request.form.get('metadata', '{}')
         try:
             metadata = json.loads(raw_meta) if raw_meta else {}
@@ -1047,7 +1104,9 @@ def create_job():
         backend_name = data.get('backend', 'opl-ai-team')
         github_urls = data.get('github_urls', [])
         mode = data.get('mode', 'build')
+        team_id = data.get('team_id') or None
         metadata = data.get('metadata', {})
+
     
     # Validate backend
     try:
@@ -1081,8 +1140,22 @@ def create_job():
         merged['job_mode'] = 'import'
         metadata = merged
 
+    owner_id = request.headers.get("X-User-Id")
+    owner_email = request.headers.get("X-User-Email")
+    
+    from crew_studio.auth import AUTH_ENABLED
+    if AUTH_ENABLED and team_id:
+        is_admin = request.headers.get("X-User-Admin", "false").lower() == "true"
+        if not is_admin:
+            raw_teams = request.headers.get("X-User-Teams", "")
+            user_teams = [t.strip() for t in raw_teams.split(",") if t.strip()]
+            team_to_check = team_id.lstrip("/")
+            if team_to_check not in user_teams:
+                return jsonify({'error': f"User is not a member of team '{team_id}'"}), 403
+
     # Create job record in database
-    job_db.create_job(job_id, vision, str(job_workspace), metadata=metadata)
+    job_db.create_job(job_id, vision, str(job_workspace), metadata=metadata,
+                      owner_id=owner_id, owner_email=owner_email, team_id=team_id)
     
     # Save any uploaded documents (MTA reports end up here)
     uploaded_docs = []

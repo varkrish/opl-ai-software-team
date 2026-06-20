@@ -19,14 +19,16 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import httpx
-from fastapi import FastAPI, HTTPException, Query, Request, UploadFile, File, Form
+from fastapi import FastAPI, HTTPException, Query, Request, UploadFile, File, Form, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel
+from jwt.exceptions import ExpiredSignatureError, InvalidTokenError
 
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
 from crew_studio.job_database import JobDatabase
+from crew_studio.auth import get_current_user, CurrentUser, decode_and_verify_token
 
 logger = logging.getLogger(__name__)
 
@@ -116,6 +118,55 @@ app.add_middleware(
 
 
 # ---------------------------------------------------------------------------
+# Authentication Middleware
+# ---------------------------------------------------------------------------
+
+@app.middleware("http")
+async def authenticate_request(request: Request, call_next):
+    path = request.url.path
+    
+    # Secure all /api/* endpoints
+    if path.startswith("/api/"):
+        from crew_studio.auth import AUTH_ENABLED, MOCK_USER
+        
+        if not AUTH_ENABLED:
+            user = MOCK_USER
+        else:
+            auth_header = request.headers.get("Authorization")
+            if not auth_header or not auth_header.startswith("Bearer "):
+                return JSONResponse(
+                    status_code=401,
+                    content={"detail": "Missing or invalid authorization credentials"}
+                )
+            
+            token = auth_header.split(" ")[1]
+            try:
+                user = decode_and_verify_token(token)
+            except ExpiredSignatureError:
+                return JSONResponse(status_code=401, content={"detail": "Token has expired"})
+            except InvalidTokenError as e:
+                return JSONResponse(status_code=401, content={"detail": f"Invalid token: {str(e)}"})
+            except Exception as e:
+                logger.error("Authentication error in middleware: %s", e)
+                return JSONResponse(status_code=401, content={"detail": "Authentication failed"})
+        
+        # Store user in request state for FastAPI path handlers
+        request.state.user = user
+        
+        # Inject headers into ASGI scope for WSGI/Flask fallback
+        headers = list(request.scope["headers"])
+        headers.append((b"x-user-id", user.user_id.encode("utf-8")))
+        headers.append((b"x-user-email", user.email.encode("utf-8")))
+        headers.append((b"x-user-roles", ",".join(user.roles).encode("utf-8")))
+        headers.append((b"x-user-teams", ",".join(user.teams).encode("utf-8")))
+        headers.append((b"x-user-admin", str(user.is_admin).lower().encode("utf-8")))
+        request.scope["headers"] = headers
+
+    response = await call_next(request)
+    return response
+
+
+# ---------------------------------------------------------------------------
 # Health endpoints — native async, zero blocking
 # ---------------------------------------------------------------------------
 
@@ -137,6 +188,7 @@ async def health_live():
 class CreateJobRequest(BaseModel):
     vision: str
     backend: str = "opl-ai-team"
+    team_id: Optional[str] = None
     github_urls: List[str] = []
     mode: str = "build"
     metadata: Dict[str, Any] = {}
@@ -171,12 +223,24 @@ def _dispatch_job(job_id: str, vision: str, backend_name: str):
 
 
 @app.post("/api/jobs")
-async def create_job(request: Request):
+async def create_job(request: Request, user: CurrentUser = Depends(get_current_user)):
     """Create a new job. JSON for greenfield; multipart is delegated to Flask (ZIP, import, migration, refactor)."""
 
     content_type = request.headers.get("content-type", "")
     if "multipart/form-data" in content_type:
         body_bytes = await request.body()
+        
+        # Forward user authentication headers to test client
+        forward_headers = {}
+        for k, v in request.headers.items():
+            forward_headers[k] = v
+        if hasattr(request.state, "user"):
+            u = request.state.user
+            forward_headers["x-user-id"] = u.user_id
+            forward_headers["x-user-email"] = u.email
+            forward_headers["x-user-roles"] = ",".join(u.roles)
+            forward_headers["x-user-teams"] = ",".join(u.teams)
+            forward_headers["x-user-admin"] = str(u.is_admin).lower()
 
         def _forward_multipart():
             from crew_studio.llamaindex_web_app import app as flask_app
@@ -185,6 +249,7 @@ async def create_job(request: Request):
                     "/api/jobs",
                     data=body_bytes,
                     content_type=content_type,
+                    headers=forward_headers,
                 )
 
         try:
@@ -221,11 +286,27 @@ async def create_job(request: Request):
         if err:
             raise HTTPException(status_code=400, detail=err)
 
+    if body.team_id:
+        team_to_check = body.team_id.lstrip("/")
+        if not user.is_admin and team_to_check not in user.teams:
+            raise HTTPException(
+                status_code=403,
+                detail=f"User is not a member of team '{body.team_id}'"
+            )
+
     job_id = str(uuid.uuid4())
     job_workspace = base_workspace_path / f"job-{job_id}"
     job_workspace.mkdir(parents=True, exist_ok=True)
 
-    job_db.create_job(job_id, body.vision, str(job_workspace), metadata=body.metadata)
+    job_db.create_job(
+        job_id,
+        body.vision,
+        str(job_workspace),
+        metadata=body.metadata,
+        owner_id=user.user_id,
+        owner_email=user.email,
+        team_id=body.team_id
+    )
 
     if body.mode in ("migration", "refactor", "import"):
         if body.mode == "import":
@@ -273,14 +354,21 @@ async def list_jobs(
     status: Optional[str] = None,
     sort_by: Optional[str] = None,
     sort_order: Optional[str] = None,
+    team_id: Optional[str] = None,
+    user: CurrentUser = Depends(get_current_user),
 ):
     offset = (page - 1) * page_size
     total = job_db.get_jobs_count(
-        vision_filter=vision_contains, status_filter=status)
+        vision_filter=vision_contains, status_filter=status,
+        owner_id=user.user_id, team_ids=user.teams, is_admin=user.is_admin,
+        team_id=team_id
+    )
     jobs = job_db.get_jobs_paginated(
         limit=page_size, offset=offset,
         vision_filter=vision_contains, status_filter=status,
         sort_by=sort_by, sort_order=sort_order,
+        owner_id=user.user_id, team_ids=user.teams, is_admin=user.is_admin,
+        team_id=team_id
     )
 
     def _summary(job):
@@ -290,9 +378,16 @@ async def list_jobs(
             "current_phase": job["current_phase"],
             "created_at": job["created_at"],
             "completed_at": job.get("completed_at"),
+            "owner_id": job.get("owner_id"),
+            "owner_email": job.get("owner_email"),
+            "team_id": job.get("team_id"),
         }
         if job.get("metadata"):
             summary["metadata"] = job["metadata"]
+        if "cost" in job:
+            summary["cost"] = job["cost"]
+        if "tokens" in job:
+            summary["tokens"] = job["tokens"]
         return summary
 
     return {"jobs": [_summary(j) for j in jobs],
@@ -300,18 +395,38 @@ async def list_jobs(
 
 
 @app.get("/api/jobs/{job_id}")
-async def get_job(job_id: str):
+async def get_job(job_id: str, user: CurrentUser = Depends(get_current_user)):
     job = job_db.get_job(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
+    
+    # Enforce access control
+    if not user.is_admin:
+        has_access = (
+            (job.get("owner_id") == user.user_id) or 
+            (job.get("team_id") and job.get("team_id").lstrip("/") in user.teams)
+        )
+        if not has_access:
+            raise HTTPException(status_code=404, detail="Job not found")
+            
     return job
 
 
 @app.get("/api/jobs/{job_id}/progress")
-async def get_job_progress(job_id: str):
+async def get_job_progress(job_id: str, user: CurrentUser = Depends(get_current_user)):
     job = job_db.get_job(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
+        
+    # Enforce access control
+    if not user.is_admin:
+        has_access = (
+            (job.get("owner_id") == user.user_id) or 
+            (job.get("team_id") and job.get("team_id").lstrip("/") in user.teams)
+        )
+        if not has_access:
+            raise HTTPException(status_code=404, detail="Job not found")
+
     last_messages = job.get("last_message", [])
     if isinstance(last_messages, str):
         try:
@@ -327,7 +442,7 @@ async def get_job_progress(job_id: str):
 
 
 @app.get("/api/backends")
-async def list_backends():
+async def list_backends(user: CurrentUser = Depends(get_current_user)):
     try:
         from src.llamaindex_crew.backends import registry
         backends = registry.list_backends()
@@ -339,13 +454,8 @@ async def list_backends():
 
 
 @app.get("/api/stats")
-async def stats():
-    total = job_db.get_jobs_count()
-    running = job_db.get_jobs_count(status_filter="running")
-    completed = job_db.get_jobs_count(status_filter="completed")
-    failed = job_db.get_jobs_count(status_filter="failed")
-    return {"total": total, "running": running,
-            "completed": completed, "failed": failed}
+async def stats(user: CurrentUser = Depends(get_current_user)):
+    return job_db.get_stats(owner_id=user.user_id, team_ids=user.teams, is_admin=user.is_admin)
 
 
 # ---------------------------------------------------------------------------
@@ -362,7 +472,7 @@ class SkillQueryRequest(BaseModel):
 
 
 @app.get("/api/skills")
-async def list_skills():
+async def list_skills(user: CurrentUser = Depends(get_current_user)):
     """List all available skills. Returns empty list if skills service is down."""
     if not SKILLS_SERVICE_URL:
         return {"skills": [], "available": False}
@@ -378,7 +488,7 @@ async def list_skills():
 
 
 @app.post("/api/skills/query")
-async def query_skills(body: SkillQueryRequest):
+async def query_skills(body: SkillQueryRequest, user: CurrentUser = Depends(get_current_user)):
     """Semantic search over skills. Returns empty results if service is down."""
     if not SKILLS_SERVICE_URL:
         return {"results": [], "available": False}
@@ -399,7 +509,7 @@ async def query_skills(body: SkillQueryRequest):
 
 
 @app.post("/api/skills/reload", status_code=202)
-async def reload_skills():
+async def reload_skills(user: CurrentUser = Depends(get_current_user)):
     """Trigger a skills index rebuild. 503 if service is unreachable."""
     if not SKILLS_SERVICE_URL:
         raise HTTPException(status_code=503, detail="Skills service not configured")
