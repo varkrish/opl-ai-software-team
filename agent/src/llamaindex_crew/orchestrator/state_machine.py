@@ -90,6 +90,7 @@ class ProjectStateMachine:
             ],
             ProjectState.DEVELOPMENT: [
                 ProjectState.FRONTEND,
+                ProjectState.COMPLETED,       # Backend-only / epic workflows skip frontend
                 ProjectState.TECH_ARCHITECT,  # Rollback
                 ProjectState.FAILED
             ],
@@ -116,29 +117,34 @@ class ProjectStateMachine:
             ProjectState.COMPLETED: [ProjectState.FAILED]  # Terminal state (can be marked failed post-completion)
         }
         
-        # Load current state
-        self.current_state = self._load_state()
-        self.state_history: List[Dict] = []
+        # Load current state and history from disk
+        self.current_state, self.state_history = self._load_state()
     
-    def _load_state(self) -> ProjectState:
-        """Load current state from file"""
+    def _load_state(self):
+        """Load current state and transition history from file.
+
+        Returns (ProjectState, list[dict]).
+        """
         if self.state_file.exists():
             try:
                 with open(self.state_file, 'r') as f:
                     state_data = json.load(f)
-                    return ProjectState(state_data.get('current_state', ProjectState.META.value))
+                state = ProjectState(state_data.get('current_state', ProjectState.META.value))
+                history = state_data.get('state_history', [])
+                return state, history
             except Exception as e:
                 logger.warning(f"Could not load state: {e}")
         
-        return ProjectState.META
+        return ProjectState.META, []
     
     def _save_state(self):
-        """Save current state to file"""
+        """Save current state and transition history to file."""
         try:
             state_data = {
                 'current_state': self.current_state.value,
                 'project_id': self.project_id,
-                'timestamp': time.time()
+                'timestamp': time.time(),
+                'state_history': self.state_history,
             }
             with open(self.state_file, 'w') as f:
                 json.dump(state_data, f, indent=2)

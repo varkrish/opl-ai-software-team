@@ -13,6 +13,7 @@ from pathlib import Path
 from datetime import datetime
 import re
 from ..tools.file_tools import _sanitize_java_package_path
+from ..utils.prompt_budget import PromptBudget, estimate_tokens, trim_text
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +37,51 @@ VALID_FILE_EXTENSIONS = frozenset({
     'tf', 'hcl',
     'crt', 'pem', 'key', 'cer',
 })
+
+
+def _trim_existing_files(
+    files: Dict[str, str],
+    context_window: Optional[int],
+    max_tokens: Optional[int],
+    static_overhead_chars: int = 0,
+) -> Dict[str, str]:
+    """
+    Trim per-file content in *files* so the combined total fits within the
+    available input-token budget.
+
+    The budget is computed from *context_window* and *max_tokens* (if given);
+    when both are None a generous 8 000-token file-block budget is used so
+    callers that don't pass LLM info still benefit from a safety cap.
+
+    Files are trimmed proportionally — larger files contribute more of their
+    content and are trimmed first to give smaller files their full content.
+    """
+    if not files:
+        return files
+
+    if context_window and max_tokens:
+        budget = PromptBudget.from_context(context_window, max_tokens)
+        file_block_budget = budget.input_token_budget - int(static_overhead_chars / 4)
+        file_block_budget = max(file_block_budget, 2_000)
+    else:
+        file_block_budget = 8_000  # conservative default (~32 000 chars)
+
+    total_tokens = sum(estimate_tokens(v) for v in files.values())
+    if total_tokens <= file_block_budget:
+        return files
+
+    logger.info(
+        "_trim_existing_files: %d files, %d tokens > budget %d. Trimming.",
+        len(files), total_tokens, file_block_budget,
+    )
+
+    per_file_budget = max(200, file_block_budget // len(files))
+    result = {}
+    for fp, content in files.items():
+        if estimate_tokens(content) > per_file_budget:
+            content = trim_text(content, per_file_budget)
+        result[fp] = content
+    return result
 
 
 def _is_valid_file_path(name: str) -> bool:
@@ -1345,9 +1391,16 @@ class TaskManager:
             )
 
         meta = task.metadata or {}
-        file_path = meta.get("file_path", "unknown")
+        file_path = (meta.get("file_path") or "").strip()
+        # Guard: treat "unknown" as absent — it is never a real target filename.
+        if file_path.lower() == "unknown":
+            file_path = ""
         domain_ctx = meta.get("domain_context", "")
         file_desc = meta.get("file_description", "")
+
+        # For BDD feature tasks (no target file_path), emit a behaviour-driven
+        # implementation directive instead of "Create the file `unknown`...".
+        is_feature_task = not file_path
 
         parts = []
 
@@ -1355,10 +1408,24 @@ class TaskManager:
             parts.append(f"PROJECT VISION: {project_vision}")
             parts.append("")
 
-        parts.append(
-            f"Create the file `{file_path}` with a COMPLETE, production-quality implementation."
-        )
-        parts.append("")
+        if is_feature_task:
+            feature_name = task.description or meta.get("name", "the feature")
+            scenarios = meta.get("scenarios", [])
+            parts.append(
+                f"Implement the feature: **{feature_name}**\n"
+                "Write ALL production-quality files required to make this feature work."
+            )
+            parts.append("")
+            if scenarios:
+                parts.append("Acceptance scenarios (BDD):")
+                for s in scenarios:
+                    parts.append(f"  - {s}")
+                parts.append("")
+        else:
+            parts.append(
+                f"Create the file `{file_path}` with a COMPLETE, production-quality implementation."
+            )
+            parts.append("")
 
         if file_desc:
             parts.append(f"File purpose: {file_desc}")
@@ -1447,18 +1514,30 @@ class TaskManager:
                 parts.append(f"  {hint}")
             parts.append("")
 
-        parts.extend([
+        req = [
             "REQUIREMENTS:",
             "- Write COMPLETE implementation code, not stubs or placeholders.",
             "- Include all necessary imports.",
             "- Implement ALL methods with real logic (no `pass`, no TODO, no console.log stubs).",
             "- Follow the patterns and conventions of the tech stack.",
-            f"- You MUST call file_writer(file_path='{file_path}', content='...') to create the file.",
-            "- Do NOT just show code in your response; you must use the file_writer tool.",
-            f"- ONLY create the file `{file_path}`. Do NOT output or create any other files.",
-            "- Do NOT include test code or other file content in your response text.",
-            "  Test files will be created in a separate task.",
-            "",
+        ]
+        if file_path:
+            req += [
+                f"- You MUST call file_writer(file_path='{file_path}', content='...') to create the file.",
+                "- Do NOT just show code in your response; you must use the file_writer tool.",
+                f"- ONLY create the file `{file_path}`. Do NOT output or create any other files.",
+                "- Do NOT include test code or other file content in your response text.",
+                "  Test files will be created in a separate task.",
+            ]
+        else:
+            req += [
+                "- Call file_writer(file_path='<path>', content='...') for EACH file you create.",
+                "- Do NOT just show code in your response; you must use the file_writer tool.",
+                "- Create ALL source files AND their corresponding test files.",
+            ]
+        req.append("")
+        parts.extend(req)
+        parts.extend([
             "CRITICAL — DO NOT HALLUCINATE APIs:",
             "- Only use APIs that actually exist in the libraries you import.",
             "- Do NOT invent methods, props, or classes. If unsure, use the simplest documented API.",
@@ -1474,7 +1553,11 @@ class TaskManager:
             "- Every npm/pip import MUST correspond to a real, published package.",
             "  Do NOT import packages from other ecosystems (e.g., no `flask` in a Node.js project).",
             "",
-            f"Create `{file_path}` now.",
         ])
+        if file_path:
+            parts.append(f"Create `{file_path}` now.")
+        else:
+            feature_name = task.description or "the feature"
+            parts.append(f"Implement `{feature_name}` now. Create every required file.")
 
         return "\n".join(parts)
