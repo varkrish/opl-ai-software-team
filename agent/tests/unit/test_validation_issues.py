@@ -451,7 +451,7 @@ class TestPartiallyCompletedStatus:
         """In aggregate stats, partially_completed jobs count toward
         'completed', not 'failed'."""
         db.mark_partially_completed("job-val-1", warning="issues")
-        stats = db.get_stats()
+        stats = db.get_stats(is_admin=True)
         assert stats["completed"] >= 1
         assert stats.get("failed", 0) == 0
 
@@ -464,10 +464,13 @@ class TestValidationAPIEndpoint:
     """Test the GET /api/jobs/{id}/validation REST endpoint."""
 
     @pytest.fixture
-    def client(self):
+    def client(self, monkeypatch):
         """Flask test client with a fresh DB."""
+        monkeypatch.setenv("AUTH_ENABLED", "false")
         sys.path.insert(0, str(root))
         import crew_studio.llamaindex_web_app as web_app
+        import crew_studio.auth as auth_mod
+        monkeypatch.setattr(auth_mod, "AUTH_ENABLED", False)
 
         with tempfile.TemporaryDirectory() as tmp:
             db_path = Path(tmp) / "test_api.db"

@@ -57,7 +57,7 @@ class TestDevAgentToolWiring:
 
         tool_names = {t.metadata.name for t in agent.agent.tools}
         assert "file_writer" in tool_names
-        assert "git_init" in tool_names
+        assert "git" in tool_names  # unified git tool (was git_init before consolidation)
 
     @patch("llamaindex_crew.agents.base_agent.get_llm_for_agent")
     def test_dev_agent_includes_extra_tools_from_config(self, mock_llm):

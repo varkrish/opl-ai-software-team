@@ -240,19 +240,36 @@ class GenericLlamaLLM(LLM):
                     raise
 
     def _format_messages_for_api(self, messages: list) -> list:
-        """Apply same role alternation and system→user rules as chat() so MaaS accepts the payload."""
+        """Apply role alternation and system→user rules so MaaS endpoints accept the payload.
+
+        Rules:
+        - Consecutive messages with the *same original* role are merged.
+        - A system message that immediately follows another system message is merged
+          into the existing system block (stays as system).
+        - A system message that appears after any non-system message is converted
+          to 'user' but kept as a separate entry (not merged with an adjacent user
+          message, since it carries different semantic content).
+        - An 'assistant' message is never the first or last message (guards added).
+        """
         formatted_messages = []
-        last_role = None
+        last_original_role = None
         for m in messages:
-            role = m.role.value
+            original_role = m.role.value
             content = m.content
-            if role == "system" and last_role is not None:
-                role = "user"
-            if role == last_role and formatted_messages:
+
+            # System after non-system → convert to user for MaaS compatibility
+            if original_role == "system" and last_original_role is not None and last_original_role != "system":
+                api_role = "user"
+            else:
+                api_role = original_role
+
+            # Merge only when the *original* role matches the previous original role
+            if original_role == last_original_role and formatted_messages:
                 formatted_messages[-1]["content"] += f"\n\n{content}"
             else:
-                formatted_messages.append({"role": role, "content": content})
-                last_role = role
+                formatted_messages.append({"role": api_role, "content": content})
+                last_original_role = original_role
+
         if formatted_messages and formatted_messages[0]["role"] == "assistant":
             formatted_messages.insert(0, {"role": "user", "content": "Continue."})
         if formatted_messages and formatted_messages[-1]["role"] == "assistant":
