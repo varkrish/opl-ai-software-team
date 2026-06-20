@@ -5,14 +5,56 @@ Uses secure configuration from config files instead of environment variables.
 Supports multiple OpenAI-compatible providers.
 """
 import logging
-from typing import Optional, Callable, Any
+import socket
+from typing import Optional, Callable
 from llama_index.core.llms import LLM, LLMMetadata, ChatMessage, ChatResponse, CompletionResponse
 from llama_index.llms.ollama import Ollama
 from llama_index.embeddings.huggingface import HuggingFaceEmbedding
 
 from ..config import SecretConfig
+from .prompt_budget import trim_text, estimate_tokens
 
 logger = logging.getLogger(__name__)
+
+# Global safety net: cap every OS-level socket read at 300 s.
+# httpx.Timeout handles the httpx layer, but if TLS session state resets the
+# per-socket timeout after the handshake, Python's ssl._SSLObject.read() can
+# block indefinitely.  socket.setdefaulttimeout() is applied to all new sockets
+# created in this process, ensuring a hard ceiling even when httpx can't act.
+socket.setdefaulttimeout(300)
+
+
+def _trim_payload_for_context(payload: dict, trim_fraction: float = 0.25) -> dict:
+    """
+    Return a copy of *payload* with the last user message trimmed by *trim_fraction*.
+
+    Called when the API returns a 400 context-length error so we can retry
+    without rebuilding the entire call stack.  Only trims the final user message
+    because that is where dynamic content (prompts, file listings) lives.
+    Returns the original payload unchanged if there is nothing to trim.
+    """
+    import copy
+    messages = payload.get("messages", [])
+    if not messages:
+        return payload
+
+    # Find the last user message (index from end)
+    for i in range(len(messages) - 1, -1, -1):
+        if messages[i].get("role") == "user":
+            original = messages[i]["content"]
+            if not original:
+                break
+            keep_chars = int(len(original) * (1.0 - trim_fraction))
+            trimmed = original[:keep_chars] + "\n[... trimmed to fit context window ...]"
+            new_payload = copy.deepcopy(payload)
+            new_payload["messages"][i]["content"] = trimmed
+            logger.info(
+                "_trim_payload_for_context: trimmed last user message %d → %d chars (%.0f%%)",
+                len(original), len(trimmed), trim_fraction * 100,
+            )
+            return new_payload
+
+    return payload  # nothing to trim
 
 
 class GenericLlamaLLM(LLM):
@@ -90,12 +132,28 @@ class GenericLlamaLLM(LLM):
         max_retries = 5
         base_delay = 5
         max_delay = 120
-        # Long timeout for migration/large responses (MaaS can take 2–3 min for 8k tokens)
-        request_timeout = 300.0
+        # Granular timeouts:  connect quickly, allow MaaS up to 5 min for 8k-token responses,
+        # but cap any individual read() syscall at 120 s so a stalled SSL socket doesn't hang
+        # the entire pytest session past the overall test timeout.
+        request_timeout = httpx.Timeout(
+            connect=30.0,   # DNS + TCP handshake
+            write=60.0,     # sending the request body
+            read=240.0,     # waiting for the first byte + streaming the full response
+            pool=10.0,      # acquiring a connection from the pool
+        )
         import random
         
-        # Transient errors: connection/transport and timeouts (catch all timeout variants)
-        retryable_exceptions = (httpx.RemoteProtocolError, httpx.ConnectError, httpx.ReadTimeout)
+        # Transient errors: connection/transport and timeouts.
+        # socket.timeout (= TimeoutError = OSError with ETIMEDOUT) is raised when the
+        # OS-level SSL socket read stalls — it is distinct from httpx.ReadTimeout and
+        # was previously unhandled, causing the process to hang until pytest killed it.
+        retryable_exceptions = (
+            httpx.RemoteProtocolError,
+            httpx.ConnectError,
+            httpx.ReadTimeout,
+            socket.timeout,    # OS-level SSL/TCP stall (Python 3.3+ alias: TimeoutError)
+            TimeoutError,      # same as socket.timeout on Python 3.3+, explicit for clarity
+        )
         if getattr(httpx, "TimeoutException", None) is not None:
             retryable_exceptions = retryable_exceptions + (httpx.TimeoutException,)
         
@@ -114,6 +172,27 @@ class GenericLlamaLLM(LLM):
                             )
                             time.sleep(delay)
                             continue
+                        # 400: check for context-length overflow and retry with trimmed input.
+                        # Error pattern: "input tokens ... output tokens ... context length is only N"
+                        if response.status_code == 400 and attempt < max_retries - 1:
+                            body = response.text
+                            _ctx_overflow = (
+                                "input tokens" in body
+                                or "context length" in body
+                                or "context_length" in body
+                                or "maximum context" in body
+                                or "reduce the length" in body
+                            )
+                            if _ctx_overflow:
+                                # Trim the last user message in the payload to free up tokens
+                                _trimmed = _trim_payload_for_context(payload, trim_fraction=0.25)
+                                if _trimmed is not payload:
+                                    payload = _trimmed
+                                    logger.warning(
+                                        "⚠️ Context-length 400: trimmed prompt by ~25%%. Retrying... "
+                                        "(attempt %d/%d)", attempt + 1, max_retries,
+                                    )
+                                    continue
                         logger.error(f"LLM API Error: {response.status_code} - {response.text[:500]}")
                     
                     response.raise_for_status()
@@ -141,9 +220,17 @@ class GenericLlamaLLM(LLM):
                     logger.error(f"❌ LLM API failed after {max_retries} attempts: {e}")
                     raise
             except Exception as e:
-                # Retry on "Server disconnected" / connection closed without response (e.g. MaaS timeout)
+                # Catch-all for transient transport errors not covered by retryable_exceptions
+                # (e.g. "Server disconnected", "without sending a response", stalled connections).
                 msg = str(e).lower()
-                if ("disconnect" in msg or "without sending" in msg or "connection" in msg) and attempt < max_retries - 1:
+                _transient = (
+                    "disconnect" in msg
+                    or "without sending" in msg
+                    or "connection" in msg
+                    or "timeout" in msg      # catches "timed out", "ssl read timed out", etc.
+                    or "reset" in msg        # "connection reset by peer"
+                )
+                if _transient and attempt < max_retries - 1:
                     delay = min(base_delay * (2 ** attempt) + random.uniform(0, 3), max_delay)
                     logger.warning(
                         f"⚠️ LLM API error ({type(e).__name__}): {e}. Retrying in {delay:.1f}s... (attempt {attempt + 1}/{max_retries})"
@@ -193,8 +280,9 @@ class GenericLlamaLLM(LLM):
             **api_kwargs
         }
         
-        # Long timeout for migration/large responses
-        async with httpx.AsyncClient(timeout=300.0) as client:
+        # Granular timeouts to prevent SSL read stalls
+        _async_timeout = httpx.Timeout(connect=30.0, write=60.0, read=240.0, pool=10.0)
+        async with httpx.AsyncClient(timeout=_async_timeout) as client:
             response = await client.post(url, headers=headers, json=payload)
             response.raise_for_status()
             data = response.json()
@@ -231,13 +319,20 @@ class GenericLlamaLLM(LLM):
         max_retries = 5
         base_delay = 5
         max_delay = 120
-        retryable = (httpx.RemoteProtocolError, httpx.ConnectError, httpx.ReadTimeout)
+        retryable = (
+            httpx.RemoteProtocolError,
+            httpx.ConnectError,
+            httpx.ReadTimeout,
+            socket.timeout,
+            TimeoutError,
+        )
         if getattr(httpx, "TimeoutException", None) is not None:
             retryable = retryable + (httpx.TimeoutException,)
         
+        _complete_timeout = httpx.Timeout(connect=30.0, write=60.0, read=180.0, pool=10.0)
         for attempt in range(max_retries):
             try:
-                with httpx.Client(timeout=120.0) as client:
+                with httpx.Client(timeout=_complete_timeout) as client:
                     response = client.post(url, headers=headers, json=payload)
                     if response.status_code in (429, 502, 503, 504) and attempt < max_retries - 1:
                         delay = min(base_delay * (2 ** attempt) + random.uniform(0, 3), max_delay)
@@ -276,7 +371,8 @@ class GenericLlamaLLM(LLM):
             **kwargs
         }
         
-        async with httpx.AsyncClient(timeout=120.0) as client:
+        _acomplete_timeout = httpx.Timeout(connect=30.0, write=60.0, read=180.0, pool=10.0)
+        async with httpx.AsyncClient(timeout=_acomplete_timeout) as client:
             response = await client.post(url, headers=headers, json=payload)
             response.raise_for_status()
             data = response.json()
@@ -373,19 +469,46 @@ def _get_production_llm(agent_type: str, config: SecretConfig, budget_callback: 
     # Use our truly generic Llama-based LLM wrapper
     if config.llm.api_base_url:
         llm_kwargs["api_base"] = config.llm.api_base_url
-        # MaaS LiteLLM proxy often rejects requests with high max_tokens (400 Bad Request)
-        if "maas" in config.llm.api_base_url.lower() or "redhatworkshops" in config.llm.api_base_url.lower():
-            llm_kwargs["max_tokens"] = min(llm_kwargs["max_tokens"], 8192)
-            logger.info("   MaaS endpoint detected: capping max_tokens to %s", llm_kwargs["max_tokens"])
-        
-        # Set context window based on model info
-        if "codellama" in model.lower() or "phi-4" in model.lower():
-            llm_kwargs["context_window"] = 4000
-        elif "qwen3" in model.lower() or "llama-scout" in model.lower():
-            llm_kwargs["context_window"] = 400000
+        # MaaS LiteLLM proxy — detect model context window and cap max_tokens accordingly.
+        # Rule: max_tokens ≤ (context_window / 2) - 1024  so the input prompt always has room.
+        # deepseek-r1-distill-* models on MaaS have a 16 384-token context.
+        # Setting max_tokens=8192 on a 16384-context model leaves only 8192 for input —
+        # the TA prompt regularly exceeds this by a few tokens → immediate 400 Bad Request.
+        is_maas = (
+            "maas" in config.llm.api_base_url.lower()
+            or "redhatworkshops" in config.llm.api_base_url.lower()
+        )
+        if is_maas:
+            m = model.lower()
+            if "deepseek-r1-distill" in m or "deepseek-r1" in m:
+                # 16 384-token context — cap output to 6 144 so input can use up to 10 240
+                model_ctx = 16_384
+                maas_max_tokens = 6_144
+            elif "codellama" in m or "phi-4" in m:
+                model_ctx = 4_000
+                maas_max_tokens = 1_024
+            elif "qwen3" in m:
+                model_ctx = 32_768
+                maas_max_tokens = 8_192
+            else:
+                # Conservative default for unknown MaaS models
+                model_ctx = 16_384
+                maas_max_tokens = 6_144
+            llm_kwargs["max_tokens"] = min(llm_kwargs["max_tokens"], maas_max_tokens)
+            llm_kwargs["context_window"] = model_ctx
+            logger.info(
+                "   MaaS endpoint detected: context_window=%d, capping max_tokens to %d",
+                model_ctx, llm_kwargs["max_tokens"],
+            )
         else:
-            # Default for granite, deepseek-r1, llama-guard which have 4M context
-            llm_kwargs["context_window"] = 4000000
+            # Non-MaaS: set context window based on model info
+            m = model.lower()
+            if "codellama" in m or "phi-4" in m:
+                llm_kwargs["context_window"] = 4_000
+            elif "qwen3" in m or "llama-scout" in m:
+                llm_kwargs["context_window"] = 400_000
+            else:
+                llm_kwargs["context_window"] = 4_000_000
             
         return GenericLlamaLLM(**llm_kwargs)
     
@@ -393,8 +516,6 @@ def _get_production_llm(agent_type: str, config: SecretConfig, budget_callback: 
     llm_kwargs["api_base"] = "https://api.openai.com/v1"
     llm_kwargs["context_window"] = 128000 # Default for GPT-4
     return GenericLlamaLLM(**llm_kwargs)
-    
-    return OpenAI(**llm_kwargs)
 
 
 def _get_provider_name(api_base: Optional[str] = None) -> str:

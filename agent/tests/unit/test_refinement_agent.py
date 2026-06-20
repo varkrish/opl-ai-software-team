@@ -67,11 +67,31 @@ def test_refinement_agent_build_prompt_file_scope_only_targets_one_file():
         user_prompt="Add comments",
         file_path="src/app.js",
         initial_file_content="const x = 1;",
+        scope="file",
     )
     assert "src/app.js" in prompt
     assert "ONLY modify" in prompt
     assert "const x = 1;" in prompt
     assert "file_writer" in prompt
+
+
+def test_refinement_agent_build_prompt_impact_includes_project_context():
+    """Impact scope includes project context and does not restrict to single file."""
+    from src.llamaindex_crew.agents.refinement_agent import RefinementAgent
+    with patch.object(RefinementAgent, "__init__", lambda self, workspace_path, project_id, budget_tracker=None: None):
+        agent = RefinementAgent(Path("/tmp/ws"), "job-1")
+        agent.workspace_path = Path("/tmp/ws")
+        agent.project_id = "job-1"
+    prompt = agent.build_prompt(
+        user_prompt="Fix bug",
+        file_path="src/a.py",
+        scope="impact",
+        allowed_files=["src/a.py", "src/b.py"],
+        project_context="## Project vision\nOriginal goal",
+    )
+    assert "Original goal" in prompt
+    assert "src/b.py" in prompt
+    assert "ONLY modify" not in prompt
 
 
 def test_refinement_agent_build_prompt_project_wide_fallback():

@@ -9,7 +9,7 @@ import logging
 import os
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, create_model
+from pydantic import create_model
 from llama_index.core.tools import FunctionTool
 
 from ..config.secure_config import McpToolEntry

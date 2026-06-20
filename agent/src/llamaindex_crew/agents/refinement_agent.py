@@ -8,6 +8,7 @@ from typing import Optional, List, Dict, Any
 
 from .base_agent import BaseLlamaIndexAgent
 from ..tools.file_tools import create_workspace_file_tools
+from ..tools.tldr_tools import create_tldr_tools, detect_tldr_lang
 from ..budget.tracker import EnhancedBudgetTracker
 
 logger = logging.getLogger(__name__)
@@ -21,6 +22,14 @@ Available tools:
 - file_reader: Read the current content of a file before modifying it.
 - file_writer: Write the modified content back to a file. You MUST call this for EVERY file you want to change (create or update).
 - file_deleter: Delete a file from the workspace. Use this when the user asks to remove, delete, or get rid of a file. The file will be removed from the filesystem.
+- code_search: Search the codebase for a regex pattern. Returns matching lines with context.
+  Use BEFORE editing to find all usages of a function, class, or variable you plan to change.
+- code_structure: Show classes, functions, and exports across the entire project.
+  Use when making cross-cutting changes to understand the full project layout.
+- code_context: Get the call-chain context for a function or method (e.g. "MyClass.my_method").
+  Use to understand what a function calls before modifying it.
+- code_impact: Find all callers of a function (reverse call graph).
+  Use BEFORE renaming, deleting, or changing a function signature to locate every call site.
 
 CRITICAL RULES:
 - You MUST call file_writer for every file you modify (create or update). Without file_writer, NO changes are saved.
@@ -29,6 +38,7 @@ CRITICAL RULES:
 - Make minimal, targeted changes that satisfy the user's request.
 - Do not invent new features or refactor beyond what was asked.
 - Respect the technology stack and patterns already in the project.
+- BEFORE modifying or deleting any function or class, call code_search or code_impact to find all usages. Update every call site, not just the definition.
 - NEVER say "I have made the changes" without actually calling file_writer or file_deleter first.
 """
 
@@ -53,6 +63,9 @@ class RefinementAgent:
         self.workspace_path = Path(workspace_path)
         self.project_id = project_id
         tools = create_workspace_file_tools(self.workspace_path)
+        lang = detect_tldr_lang(self.workspace_path)
+        tools += create_tldr_tools(self.workspace_path, lang=lang)
+        logger.debug("RefinementAgent: tldr lang=%r for workspace %s", lang, self.workspace_path)
         tracker = budget_tracker or EnhancedBudgetTracker()
         tracker.project_id = project_id
         self.agent = BaseLlamaIndexAgent(
@@ -114,15 +127,21 @@ class RefinementAgent:
         file_listing: Optional[str] = None,
         refinement_history: Optional[List[Dict[str, Any]]] = None,
         initial_file_content: Optional[str] = None,
+        *,
+        scope: str = "project",
+        allowed_files: Optional[List[str]] = None,
+        project_context: Optional[str] = None,
     ) -> str:
         """Build a focused prompt for the agent.
 
-        The runner always provides a single file_path (even for project-wide scope,
-        it iterates and calls once per file). This keeps the LLM context small and fast.
+        scope: ``project`` | ``impact`` | ``file`` (primary file only).
         """
         import re as _re
         sections: List[str] = []
         sections.append("## User request\n" + user_prompt)
+
+        if project_context:
+            sections.append("\n## Project context\n" + project_context)
 
         # Detect EXPLICIT whole-file delete intent only — phrases like "delete this file",
         # "remove this file". Words like "remove", "delete" alone (e.g. "remove ff_* tools")
@@ -132,11 +151,21 @@ class RefinementAgent:
             "delete this file", "delete the file", "remove this file", "remove the file",
             "delete file", "remove file", "get rid of this file", "erase this file",
         )
-        is_delete_request = file_path and any(p in prompt_lower for p in _explicit_file_delete_phrases)
+        file_path and any(p in prompt_lower for p in _explicit_file_delete_phrases)
 
         # ── Target file ────────────────────────────────────────────────
         if file_path:
-            sections.append(f"\n## Target file\nYou must ONLY modify: **{file_path}**")
+            if scope == "impact" and allowed_files and len(allowed_files) > 1:
+                others = [f for f in allowed_files if f != file_path]
+                sections.append(
+                    f"\n## Primary target\n**{file_path}**"
+                    f"\nYou may also edit these related files for call-site consistency: "
+                    + ", ".join(f"**{f}**" for f in others)
+                )
+            elif scope == "file":
+                sections.append(f"\n## Target file\nYou must ONLY modify: **{file_path}**")
+            else:
+                sections.append(f"\n## Primary focus\nStart with: **{file_path}**")
             if initial_file_content is not None:
                 # For large files, extract only the relevant sections to fit context window.
                 # The LLM sees a trimmed view; the instructions direct it to use file_reader
@@ -166,14 +195,12 @@ class RefinementAgent:
                         + "\n```"
                     )
 
-        if tech_stack_content:
-            # Truncate tech stack to avoid bloating single-file prompts
+        if tech_stack_content and not project_context:
             tc = tech_stack_content[:1500] + "..." if len(tech_stack_content) > 1500 else tech_stack_content
             sections.append("\n## Project tech stack (respect this)\n" + tc)
 
-        # file_listing is only useful in project-wide (no file_path) mode
-        if file_listing and not file_path:
-            sections.append("\n## Other files in the workspace (for reference only)\n" + file_listing)
+        if file_listing and (not file_path or scope == "project"):
+            sections.append("\n## Files in the workspace (for reference)\n" + file_listing)
 
         if refinement_history:
             history_text = "\n".join(
@@ -190,39 +217,43 @@ class RefinementAgent:
 
         # ── Instructions ───────────────────────────────────────────────
         if file_path:
+            allowed_note = ""
+            if scope == "impact" and allowed_files and len(allowed_files) > 1:
+                allowed_note = (
+                    f"\n- You MAY modify: {', '.join(allowed_files)}. "
+                    "Do NOT edit files outside this set unless necessary for imports."
+                )
+            elif scope == "file":
+                allowed_note = f"\n- ONLY modify **{file_path}**. Do NOT touch other files."
+
             if large_file:
                 sections.append(f"""
 ## Instructions
 The file **{file_path}** is large. Only the relevant sections are shown above.
 Follow these steps exactly:
+0. Use code_impact / code_search BEFORE renaming or deleting functions to find call sites.
 1. Call file_reader with file_path="{file_path}" to load the COMPLETE current content.
-2. If the user explicitly asks to DELETE THE ENTIRE FILE (e.g. "delete this file", "remove this file entirely"): call file_deleter with file_path="{file_path}". Then provide a Final Answer.
-3. Otherwise — apply the user's changes to the COMPLETE content you read and call file_writer with file_path="{file_path}" and the FULL updated file (not a diff, not just the changed parts).
+2. If the user explicitly asks to DELETE THE ENTIRE FILE: call file_deleter with file_path="{file_path}".
+3. Otherwise apply changes and call file_writer with the FULL updated file.
 4. Provide a Final Answer summarizing what you changed.
 
-CRITICAL RULES:
-- ONLY modify **{file_path}**. Do NOT touch other files.
-- "Remove lines / delete code / remove functions" means EDIT the file — do NOT delete it.
+CRITICAL RULES:{allowed_note}
 - You MUST call file_writer with the COMPLETE file — without it, nothing is saved.""")
             else:
                 sections.append(f"""
 ## Instructions
-Follow these steps exactly:
-1. The content of **{file_path}** is provided above. Read it carefully.
-2. If the user explicitly asks to DELETE THE ENTIRE FILE (e.g. "delete this file", "remove this file entirely"): call file_deleter with file_path="{file_path}". Then provide a Final Answer.
-3. Otherwise — even if the request says "remove lines", "delete code", "remove functions" — apply the changes to the file content and call file_writer with file_path="{file_path}" and the COMPLETE updated file content (entire file, not a diff). NEVER call file_deleter just because the user wants to remove lines or code within the file.
-4. Provide a Final Answer summarizing what you changed.
+0. Use code_impact / code_search BEFORE renaming or deleting functions to find call sites.
+1. Read the content of **{file_path}** above (or via file_reader if needed).
+2. Apply the user's changes; call file_writer with COMPLETE updated content for each file you change.
+3. Provide a Final Answer summarizing what you changed.
 
-CRITICAL RULES:
-- ONLY modify **{file_path}**. Do NOT touch other files.
-- "Remove lines / delete code / remove functions" means EDIT the file with file_writer — NOT delete the file with file_deleter.
-- file_deleter is ONLY for when the user explicitly wants the entire file gone.
-- You MUST call file_writer — without it, nothing is saved.
-- Write the COMPLETE file content when using file_writer (not just the changed parts).
-- If the user's request does not apply to this file, call file_writer anyway with the original content unchanged and explain in your Final Answer.""")
+CRITICAL RULES:{allowed_note}
+- You MUST call file_writer — without it, nothing is saved.""")
         else:
             sections.append("""
 ## Instructions
+0. (Optional) Use code_structure to get a project map before diving into files.
+   Use code_search or code_impact BEFORE renaming/deleting functions to find all call sites.
 1. Call file_lister(".") to discover all files in the project.
 2. Use file_reader to read each relevant source file.
 3. Requests to "remove lines", "delete code", "remove functions/tools" mean EDIT the file with file_writer — keep the file, just remove the specified content.
@@ -243,6 +274,9 @@ CRITICAL: "Remove code/lines/functions" = file_writer with edited content. file_
         refinement_history: Optional[List[Dict[str, Any]]] = None,
         initial_file_content: Optional[str] = None,
         candidate_files: Optional[Dict[str, str]] = None,
+        scope: str = "project",
+        allowed_files: Optional[List[str]] = None,
+        project_context: Optional[str] = None,
     ) -> str:
         """
         Run refinement: build context-rich prompt and execute agent.
@@ -265,6 +299,7 @@ CRITICAL: "Remove code/lines/functions" = file_writer with edited content. file_
                 candidate_files=candidate_files,
                 tech_stack_content=tech_stack_content,
                 refinement_history=refinement_history,
+                project_context=project_context,
             )
         else:
             prompt = self.build_prompt(
@@ -274,6 +309,9 @@ CRITICAL: "Remove code/lines/functions" = file_writer with edited content. file_
                 file_listing=file_listing,
                 refinement_history=refinement_history,
                 initial_file_content=initial_file_content,
+                scope=scope,
+                allowed_files=allowed_files,
+                project_context=project_context,
             )
         return str(self.agent.chat(prompt))
 
@@ -283,11 +321,14 @@ CRITICAL: "Remove code/lines/functions" = file_writer with edited content. file_
         candidate_files: Dict[str, str],
         tech_stack_content: Optional[str] = None,
         refinement_history: Optional[List[Dict[str, Any]]] = None,
+        project_context: Optional[str] = None,
     ) -> str:
         """Build a single prompt that includes ALL candidate files for one-shot editing."""
         sections: List[str] = ["## User request\n" + user_prompt]
 
-        if tech_stack_content:
+        if project_context:
+            sections.append("\n## Project context\n" + project_context)
+        elif tech_stack_content:
             sections.append("\n## Project tech stack\n" + tech_stack_content)
 
         if refinement_history:

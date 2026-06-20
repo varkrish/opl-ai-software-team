@@ -165,6 +165,8 @@ def run_refinement(
     file_path: Optional[str] = None,
     previous_status: str = "completed",
     enhanced: bool = False,
+    scope: Optional[str] = None,
+    refinement_kind: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Run refinement: snapshot, build context, run RefinementAgent, update DB.
@@ -182,6 +184,8 @@ def run_refinement(
         previous_status: Job status to restore when refinement completes or fails.
         enhanced: True for import-mode jobs (`job_mode=import`); uses richer project-wide
             refinement when EnhancedRefinementAgent is available; otherwise same as project-wide.
+        scope: ``impact`` | ``file`` | ``project``. Default: impact when file_path set, else project.
+        refinement_kind: ``fix`` | ``feature`` | ``edit`` — affects post-fix gates and commit message.
 
     Returns:
         {"status": "success"} or {"status": "error", "error": "..."}.
@@ -200,6 +204,31 @@ def run_refinement(
     # Exclude current (running) refinement from history context
     refinement_history = [r for r in refinement_history if r.get("id") != refinement_id]
 
+    project_context = _load_project_context(workspace_path, job_db, job_id, prompt)
+
+    meta = _job_metadata(job_db, job_id)
+    if refinement_kind is None:
+        refinement_kind = meta.get("refinement_kind")
+    if scope is None:
+        scope = "impact" if file_path else "project"
+
+    if file_path and scope == "impact":
+        return _run_impact_refinement(
+            job_id=job_id,
+            workspace_path=workspace_path,
+            prompt=prompt,
+            refinement_id=refinement_id,
+            job_db=job_db,
+            progress_callback=progress_callback,
+            file_path=file_path,
+            tech_stack_content=tech_stack_content,
+            file_listing=file_listing,
+            refinement_history=refinement_history,
+            previous_status=previous_status,
+            project_context=project_context,
+            refinement_kind=refinement_kind,
+        )
+
     if file_path:
         # ── FILE-LEVEL SCOPE ──────────────────────────────────────────
         return _run_single_file_refinement(
@@ -214,6 +243,9 @@ def run_refinement(
             file_listing=file_listing,
             refinement_history=refinement_history,
             previous_status=previous_status,
+            scope=scope if scope == "file" else "file",
+            project_context=project_context,
+            refinement_kind=refinement_kind,
         )
     else:
         # ── PROJECT-WIDE SCOPE ────────────────────────────────────────
@@ -228,7 +260,123 @@ def run_refinement(
             file_listing=file_listing,
             refinement_history=refinement_history,
             previous_status=previous_status,
+            project_context=project_context,
+            refinement_kind=refinement_kind,
         )
+
+
+def _job_metadata(job_db: Any, job_id: str) -> dict:
+    try:
+        from crew_studio.work_intent import parse_metadata
+        job = job_db.get_job(job_id)
+        return parse_metadata(job.get("metadata") if job else None)
+    except Exception:
+        return {}
+
+
+def _load_project_context(workspace_path: Path, job_db: Any, job_id: str, prompt: str) -> str:
+    try:
+        from src.llamaindex_crew.utils.refinement_context import load_refinement_context
+        ctx = load_refinement_context(workspace_path, job_db, job_id, user_prompt=prompt)
+        return ctx.format_for_prompt()
+    except Exception as exc:
+        logger.warning("Could not load refinement project context: %s", exc)
+        return ""
+
+
+def trigger_auto_fix_after_analyze(
+    job_id: str,
+    workspace_path: Path,
+    job_db: Any,
+    progress_callback: Callable[[str, int, Optional[str]], None],
+) -> Dict[str, Any]:
+    """Run fix refinement automatically after import analysis (JIRA bug / mode=fix)."""
+    import uuid as _uuid
+    meta = _job_metadata(job_db, job_id)
+    if not meta.get("auto_fix_after_analyze"):
+        return {"status": "skipped", "reason": "auto_fix_after_analyze not set"}
+
+    job = job_db.get_job(job_id) or {}
+    prompt = (job.get("vision") or "").strip()
+    if not prompt:
+        return {"status": "error", "error": "No vision/prompt for auto fix"}
+
+    refinement_id = str(_uuid.uuid4())
+    job_db.create_refinement(refinement_id, job_id, prompt, None)
+    job_db.update_job(job_id, {"status": "running"})
+    job_db.update_progress(job_id, "refining", 0, "Auto fix refinement started.")
+
+    return run_refinement(
+        job_id=job_id,
+        workspace_path=Path(workspace_path),
+        prompt=prompt,
+        refinement_id=refinement_id,
+        job_db=job_db,
+        progress_callback=progress_callback,
+        file_path=None,
+        previous_status="completed",
+        enhanced=True,
+        scope="project",
+        refinement_kind=meta.get("refinement_kind", "fix"),
+    )
+
+
+def _run_impact_refinement(
+    job_id: str,
+    workspace_path: Path,
+    prompt: str,
+    refinement_id: str,
+    job_db: Any,
+    progress_callback: Callable[[str, int, Optional[str]], None],
+    file_path: str,
+    tech_stack_content: Optional[str],
+    file_listing: Optional[str],
+    refinement_history: List[Dict[str, Any]],
+    previous_status: str = "completed",
+    project_context: str = "",
+    refinement_kind: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Impact-aware refinement: primary file + related files in one batched pass."""
+    from src.llamaindex_crew.utils.refinement_impact import discover_impact_files
+
+    all_sources = _discover_source_files(workspace_path)
+    allowed = discover_impact_files(
+        workspace_path, prompt, file_path, max_files=5, all_source_files=all_sources,
+    )
+    progress_callback("refining", 20, f"Impact scope: {', '.join(allowed)}")
+
+    preloaded = _preload_source_files(workspace_path, allowed)
+    if not preloaded:
+        return _fail_refinement(
+            job_db, job_id, refinement_id, progress_callback,
+            f"Could not load files for impact scope: {allowed}", previous_status,
+        )
+
+    try:
+        from src.llamaindex_crew.agents.refinement_agent import RefinementAgent
+        agent = RefinementAgent(workspace_path=workspace_path, project_id=job_id)
+        agent.run(
+            user_prompt=prompt,
+            candidate_files=preloaded,
+            tech_stack_content=tech_stack_content,
+            refinement_history=refinement_history,
+            project_context=project_context,
+        )
+    except Exception as e:
+        logger.exception("Impact refinement failed: %s", e)
+        return _fail_refinement(job_db, job_id, refinement_id, progress_callback, str(e), previous_status)
+
+    if not _workspace_has_changes(workspace_path):
+        return _fail_refinement(
+            job_db, job_id, refinement_id, progress_callback,
+            "Impact refinement completed but no files were changed.", previous_status,
+        )
+
+    _post_fix_gates(workspace_path, job_db, job_id, refinement_kind)
+    summary = f"Refinement completed — updated {len(allowed)} file(s) in impact scope: {', '.join(allowed)}"
+    return _complete_refinement(
+        workspace_path, job_db, job_id, refinement_id, progress_callback, summary, previous_status,
+    )
 
 
 def _run_single_file_refinement(
@@ -243,6 +391,9 @@ def _run_single_file_refinement(
     file_listing: Optional[str],
     refinement_history: List[Dict[str, Any]],
     previous_status: str = "completed",
+    scope: str = "file",
+    project_context: str = "",
+    refinement_kind: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Run refinement targeting a single file. Retries once if no files written."""
     initial_file_content = _load_file_content(workspace_path, file_path)
@@ -268,6 +419,9 @@ def _run_single_file_refinement(
                 file_listing=file_listing,
                 refinement_history=refinement_history,
                 initial_file_content=initial_file_content,
+                scope=scope,
+                allowed_files=[file_path],
+                project_context=project_context,
             )
             logger.info("File refinement response (attempt %d, %s): %s",
                         attempt, file_path, str(agent_response)[:500])
@@ -298,6 +452,7 @@ def _run_single_file_refinement(
         return _fail_refinement(job_db, job_id, refinement_id, progress_callback, error_msg, previous_status)
 
     summary = f"Refinement completed — {file_path} deleted." if (file_existed_before and not (workspace_path / file_path).exists()) else f"Refinement completed — {file_path} updated."
+    _post_fix_gates(workspace_path, job_db, job_id, refinement_kind)
     return _complete_refinement(workspace_path, job_db, job_id, refinement_id, progress_callback, summary, previous_status)
 
 
@@ -366,75 +521,137 @@ def _run_project_wide_refinement(
     file_listing: Optional[str],
     refinement_history: List[Dict[str, Any]],
     previous_status: str = "completed",
+    project_context: str = "",
+    refinement_kind: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Run project-wide refinement: filter to candidate files, then refine each individually."""
+    """Run project-wide refinement: filter candidates, batch edit when ≤5 files."""
     progress_callback("refining", 12, "Scanning project files...")
     all_source_files = _discover_source_files(workspace_path)
     if not all_source_files:
         return _fail_refinement(job_db, job_id, refinement_id, progress_callback,
                                 "No source files found in the workspace.", previous_status)
 
-    # Narrow to files that plausibly need changes based on the prompt
     source_files = _candidate_files_from_prompt(prompt, all_source_files, workspace_path)
     total = len(source_files)
     logger.info(
         "Project-wide scope: %d/%d candidate files: %s",
         total, len(all_source_files), source_files,
     )
-    progress_callback("refining", 15, f"Refining {total} candidate files...")
+    progress_callback("refining", 15, f"Refining {total} candidate file(s)...")
 
-    # Single pre-snapshot before processing any files
     _git_snapshot(workspace_path)
 
-    files_modified: List[str] = []
-    files_failed: List[str] = []
-
-    for idx, fp in enumerate(source_files, start=1):
-        pct = 20 + int(60 * idx / total)
-        progress_callback("refining", pct, f"Refining file {idx}/{total}: {fp}...")
-        initial_content = _load_file_content(workspace_path, fp)
-
+    if total <= 5:
+        preloaded = _preload_source_files(workspace_path, source_files)
+        if not preloaded:
+            return _fail_refinement(
+                job_db, job_id, refinement_id, progress_callback,
+                "Could not preload candidate files.", previous_status,
+            )
         try:
             from src.llamaindex_crew.agents.refinement_agent import RefinementAgent
             agent = RefinementAgent(workspace_path=workspace_path, project_id=job_id)
-            agent_response = agent.run(
+            agent.run(
                 user_prompt=prompt,
-                file_path=fp,
+                candidate_files=preloaded,
                 tech_stack_content=tech_stack_content,
-                file_listing=file_listing,
                 refinement_history=refinement_history,
-                initial_file_content=initial_content,
+                project_context=project_context,
             )
-            logger.info("Agent response for %s: %s", fp, str(agent_response)[:200])
         except Exception as e:
-            logger.warning("Agent error on %s (skipping): %s", fp, e)
-            files_failed.append(fp)
-            continue
+            logger.exception("Batched project refinement failed: %s", e)
+            return _fail_refinement(job_db, job_id, refinement_id, progress_callback, str(e), previous_status)
 
-        file_deleted = initial_content is not None and not (workspace_path / fp).exists()
-        if _workspace_has_changes(workspace_path) or file_deleted:
-            files_modified.append(fp)
-            logger.info("Changes detected for %s", fp)
-        else:
-            logger.info("No changes written for %s", fp)
-
-    if not files_modified:
-        reason = (
-            f"Processed {total} candidate files but none were changed. "
-            "The AI may not have found relevant modifications. Try being more specific."
+        if not _workspace_has_changes(workspace_path):
+            return _fail_refinement(
+                job_db, job_id, refinement_id, progress_callback,
+                f"Processed {total} candidate files but none were changed.",
+                previous_status,
+            )
+        _post_fix_gates(workspace_path, job_db, job_id, refinement_kind)
+        summary = f"Refinement completed — batched edit of {len(preloaded)} file(s)"
+        return _complete_refinement(
+            workspace_path, job_db, job_id, refinement_id, progress_callback, summary, previous_status,
         )
-        return _fail_refinement(job_db, job_id, refinement_id, progress_callback, reason, previous_status)
 
-    summary = (
-        f"Refinement completed — modified {len(files_modified)}/{total} files: "
-        f"{', '.join(files_modified)}"
+    # >5 candidates: process in batches of 5
+    files_modified: List[str] = []
+    for batch_start in range(0, total, 5):
+        batch = source_files[batch_start: batch_start + 5]
+        preloaded = _preload_source_files(workspace_path, batch)
+        if not preloaded:
+            continue
+        try:
+            from src.llamaindex_crew.agents.refinement_agent import RefinementAgent
+            agent = RefinementAgent(workspace_path=workspace_path, project_id=job_id)
+            agent.run(
+                user_prompt=prompt,
+                candidate_files=preloaded,
+                tech_stack_content=tech_stack_content,
+                refinement_history=refinement_history,
+                project_context=project_context,
+            )
+            for fp in batch:
+                if _workspace_has_changes(workspace_path):
+                    files_modified.append(fp)
+        except Exception as e:
+            logger.warning("Batch refinement error: %s", e)
+
+    if not files_modified and not _workspace_has_changes(workspace_path):
+        return _fail_refinement(
+            job_db, job_id, refinement_id, progress_callback,
+            f"Processed {total} candidate files but none were changed.",
+            previous_status,
+        )
+    _post_fix_gates(workspace_path, job_db, job_id, refinement_kind)
+    summary = f"Refinement completed — modified files in {total} candidate set"
+    return _complete_refinement(
+        workspace_path, job_db, job_id, refinement_id, progress_callback, summary, previous_status,
     )
-    if files_failed:
-        summary += f"; {len(files_failed)} file(s) skipped due to errors: {', '.join(files_failed)}"
-    return _complete_refinement(workspace_path, job_db, job_id, refinement_id, progress_callback, summary, previous_status)
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
+
+def _post_fix_gates(workspace_path: Path, job_db: Any, job_id: str, refinement_kind: Optional[str]) -> None:
+    """After fix refinements: optional validator + git commit with fix() message."""
+    if refinement_kind != "fix":
+        return
+    meta = _job_metadata(job_db, job_id)
+    issue_key = meta.get("jira_issue_key") or meta.get("jira_epic_key") or "BUG"
+    summary = ""
+    try:
+        job = job_db.get_job(job_id)
+        vision = (job.get("vision") or "") if job else ""
+        summary = vision.split("\n", 1)[0].replace(f"Fix JIRA {issue_key}:", "").strip()[:72]
+    except Exception:
+        pass
+
+    validator_url = os.getenv("VALIDATOR_URL", "").strip()
+    if validator_url:
+        try:
+            import httpx
+            r = httpx.post(
+                f"{validator_url.rstrip('/')}/api/v1/validate",
+                json={"workspace_path": str(workspace_path), "checks": ["syntax", "imports"]},
+                timeout=120.0,
+            )
+            if r.status_code >= 400:
+                logger.warning("Post-fix validator returned %s: %s", r.status_code, r.text[:200])
+        except Exception as exc:
+            logger.warning("Post-fix validator call failed: %s", exc)
+
+    try:
+        from src.llamaindex_crew.utils.fix_prompt import fix_commit_message
+        import git as gitmodule
+        msg = fix_commit_message(str(issue_key), summary or "bug fix")
+        if (workspace_path / ".git").exists():
+            repo = gitmodule.Repo(workspace_path)
+            repo.git.add(A=True)
+            if repo.is_dirty(untracked_files=True) or repo.untracked_files:
+                repo.index.commit(msg)
+    except Exception as exc:
+        logger.warning("Post-fix git commit failed: %s", exc)
+
 
 def _user_friendly_llm_error(raw_error: str) -> str:
     """Turn raw LLM/proxy errors (503, 502, 429, etc.) into a short message for the refine UI."""
@@ -528,17 +745,12 @@ def _create_github_pr(workspace_path: Path, job_id: str, prompt: str, job_db) ->
             )
 
         # Inject token into remote URL for push auth
-        auth_url = _re.sub(
-            r"https://",
-            f"https://{token}@",
-            origin_url if origin_url.startswith("https://") else f"https://github.com/{repo_slug}.git",
-        )
-        repo.remotes["origin"].set_url(auth_url)
-        try:
-            repo.remotes["origin"].push(f"HEAD:refs/heads/{branch}")
-        finally:
-            # Restore original URL (don't persist the token)
-            repo.remotes["origin"].set_url(origin_url)
+        from llamaindex_crew.utils.git_remote_auth import push_with_token
+
+        push_result = push_with_token(repo, remote_name="origin", branch_name=branch, token=token)
+        if not push_result.success:
+            logger.warning("Refinement push failed: %s", push_result.message)
+            return None
 
         # Detect the default branch via GitHub API
         default_branch = "main"

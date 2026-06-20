@@ -69,7 +69,6 @@ base_workspace_path.mkdir(parents=True, exist_ok=True)
 from crew_studio.migration.blueprint import migration_bp  # noqa: E402
 from crew_studio.refactor.blueprint import refactor_bp  # noqa: E402
 from crew_studio.import_flow.blueprint import import_bp  # noqa: E402
-
 app.config["JOB_DB"] = job_db
 app.config["WORKSPACE_PATH"] = str(base_workspace_path)
 app.register_blueprint(migration_bp)
@@ -78,57 +77,53 @@ app.register_blueprint(import_bp)
 
 
 # ---------------------------------------------------------------------------
-# Authentication & Job Ownership Check (Flask Fallback Routing)
+# Flask auth middleware — validates that the requesting user owns (or can
+# access) the job referenced in the URL. The ASGI layer already verified the
+# JWT and injected X-User-* headers; this hook enforces ownership for routes
+# that reach Flask via the WSGI fallback.
 # ---------------------------------------------------------------------------
 
 @app.before_request
 def enforce_job_ownership():
-    # Only enforce auth on API paths
     if not request.path.startswith("/api/"):
         return
 
-    # Check if AUTH_ENABLED is active
     from crew_studio.auth import AUTH_ENABLED
     if not AUTH_ENABLED:
         return
 
-    # Extract user identity headers injected by FastAPI middleware
     user_id = request.headers.get("X-User-Id")
     is_admin = request.headers.get("X-User-Admin", "false").lower() == "true"
-    
+
     if not user_id:
         return jsonify({"detail": "Unauthorized: Missing authentication headers"}), 401
 
     if is_admin:
-        return  # Admins bypass ownership checks
+        return  # admins see everything
 
-    # Extract job_id from URL view parameters or query arguments
     job_id = None
     if request.view_args and "job_id" in request.view_args:
         job_id = request.view_args["job_id"]
     elif request.args and "job_id" in request.args:
         job_id = request.args.get("job_id")
-        
+
     if job_id:
         job = job_db.get_job(job_id)
         if not job:
             return jsonify({"detail": "Job not found"}), 404
 
-        # Extract user teams
         raw_teams = request.headers.get("X-User-Teams", "")
         user_teams = [t.strip() for t in raw_teams.split(",") if t.strip()]
 
         has_access = (
-            (job.get("owner_id") == user_id) or 
+            (job.get("owner_id") == user_id) or
             (job.get("team_id") and job.get("team_id").lstrip("/") in user_teams)
         )
         if not has_access:
             return jsonify({"detail": "Job not found"}), 404
     else:
-        # If accessing workspace files globally without a specific job, reject
         if request.path.startswith("/api/workspace/"):
             return jsonify({"detail": "Job not found"}), 404
-
 
 
 # ── Phases used by migration / refactor / refinement flows ────────────────
@@ -137,7 +132,10 @@ _MIGRATION_PHASES = frozenset({'migrating'})
 _REFACTOR_PHASES = frozenset({'refactoring', 'analysis', 'design', 'planning', 'execution', 'devops'})
 _IMPORT_PHASES = frozenset({'import_analyzing'})
 _REFINEMENT_PHASES = frozenset({'refining'})
-_SKIP_PHASES = frozenset({'awaiting_migration', 'awaiting_refactor', 'awaiting_import', 'awaiting_refinement'})
+_SKIP_PHASES = frozenset({
+    'awaiting_migration', 'awaiting_refactor', 'awaiting_import',
+    'awaiting_refinement', 'pending_approval', 'pending_review',
+})
 
 
 def resume_pending_jobs(override_job_db=None):
@@ -183,7 +181,7 @@ def resume_pending_jobs(override_job_db=None):
             continue
 
         # Skip jobs waiting for explicit user trigger
-        if phase in _SKIP_PHASES:
+        if phase in _SKIP_PHASES or status in ("pending_approval", "pending_review"):
             continue
 
         # Migration / refactor / import analysis in progress → mark interrupted (no checkpoint resume)
@@ -328,67 +326,26 @@ def run_job_async(job_id: str, vision: str, job_config: SecretConfig = None, res
 
         job_workspace = Path(job['workspace_path'])
 
-        # Build enriched vision with uploaded reference docs & GitHub repos
-        pl = getattr(job_config, 'prompt_limits', None) if job_config else None
-        max_ref_doc = getattr(pl, 'max_reference_doc_chars', 12_000) if pl else 12_000
-        max_ref_repomix = getattr(pl, 'max_reference_doc_chars_repomix', 200_000) if pl else 200_000
-        max_enriched = getattr(pl, 'max_enriched_vision_chars', 24_000) if pl else 24_000
-
-        enriched_vision = vision
         uploaded_docs = job_db.get_job_documents(job_id)
+        rag_manifest = {}
         if uploaded_docs:
-            doc_context_parts = []
-            repo_context_parts = []
-            TEXT_TYPES = (
-                'txt', 'md', 'json', 'yaml', 'yml', 'csv', 'xml',
-                'py', 'js', 'ts', 'java', 'go', 'rs', 'rb', 'sh',
-                'html', 'css', 'sql', 'proto', 'graphql',
-            )
-            for doc in uploaded_docs:
-                doc_path = Path(doc['stored_path'])
-                if not doc_path.exists() or doc['file_type'] not in TEXT_TYPES:
-                    continue
-                try:
-                    is_repomix = doc['original_name'].startswith('github:')
-                    max_chars = max_ref_repomix if is_repomix else max_ref_doc
-                    content = doc_path.read_text(errors='replace')[:max_chars]
-                    if is_repomix:
-                        repo_name = doc['original_name'].replace('github:', '')
-                        repo_context_parts.append(
-                            f"--- Reference Repository: {repo_name} (packed by Repomix) ---\n{content}"
-                        )
-                    else:
-                        doc_context_parts.append(
-                            f"--- Reference: {doc['original_name']} ---\n{content}"
-                        )
-                except Exception as read_err:
-                    logger.warning(f"Could not read doc {doc['original_name']}: {read_err}")
-
-            all_parts = []
-            if doc_context_parts:
-                all_parts.append(
-                    f"=== REFERENCE DOCUMENTS ({len(doc_context_parts)} files) ===\n"
-                    + "\n\n".join(doc_context_parts)
+            try:
+                from crew_studio.reference_context import (
+                    build_pipeline_vision,
+                    index_job_reference_documents,
                 )
-            if repo_context_parts:
-                all_parts.append(
-                    f"=== REFERENCE REPOSITORIES ({len(repo_context_parts)} repos, packed by Repomix) ===\n"
-                    "Use the code structure and patterns from these repos as reference for implementation.\n\n"
-                    + "\n\n".join(repo_context_parts)
+                rag_manifest = index_job_reference_documents(
+                    job_workspace, job_id, uploaded_docs, job_config,
                 )
-            if all_parts:
-                enriched_vision = f"{vision}\n\n" + "\n\n".join(all_parts)
-                if len(enriched_vision) > max_enriched:
-                    before = len(enriched_vision)
-                    enriched_vision = enriched_vision[:max_enriched] + "\n\n[... reference truncated to fit API limit ...]"
-                    logger.warning(
-                        "Enriched vision truncated from %d to %d chars (max_enriched_vision_chars=%d)",
-                        before, len(enriched_vision), max_enriched,
-                    )
-                logger.info(
-                    f"Enriched vision with {len(doc_context_parts)} docs, "
-                    f"{len(repo_context_parts)} repos"
+                enriched_vision = build_pipeline_vision(
+                    vision, uploaded_docs, job_config, rag_manifest,
                 )
+            except Exception as rag_err:
+                logger.warning("Reference RAG indexing failed, using inline fallback: %s", rag_err)
+                from crew_studio.reference_context import build_pipeline_vision
+                enriched_vision = build_pipeline_vision(vision, uploaded_docs, job_config)
+        else:
+            enriched_vision = vision
 
         results = run_build_pipeline(
             job_id=job_id,
@@ -399,6 +356,21 @@ def run_job_async(job_id: str, vision: str, job_config: SecretConfig = None, res
             job_db=job_db,
             resume=resume,
         )
+
+        if results.get("status") in ("pending_approval", "pending_review"):
+            pause_status = results["status"]
+            job_db.update_job(job_id, {
+                "status": pause_status,
+                "current_phase": pause_status,
+                "progress": results.get("progress", 45),
+            })
+            logger.info(
+                "Job %s paused for human review (status=%s, stories_planned=%s)",
+                job_id,
+                pause_status,
+                results.get("epic_stories_planned", 0),
+            )
+            return
 
         # Mark job as completed, partially_completed, or failed
         task_validation = results.get('task_validation', {})
@@ -801,7 +773,6 @@ def health_llm():
 
 
 import subprocess
-import re
 
 # ── GitHub / Repomix integration ─────────────────────────────────────────────
 
@@ -1083,7 +1054,6 @@ def create_job():
     github_urls = []
     backend_name = 'opl-ai-team'  # default
     mode = 'build'
-    team_id = None
     
     metadata = {}
     if request.content_type and 'multipart/form-data' in request.content_type:
@@ -1092,7 +1062,6 @@ def create_job():
         # GitHub URLs can come as repeated form fields
         github_urls = request.form.getlist('github_urls')
         mode = request.form.get('mode', 'build')
-        team_id = request.form.get('team_id') or None
         raw_meta = request.form.get('metadata', '{}')
         try:
             metadata = json.loads(raw_meta) if raw_meta else {}
@@ -1104,9 +1073,7 @@ def create_job():
         backend_name = data.get('backend', 'opl-ai-team')
         github_urls = data.get('github_urls', [])
         mode = data.get('mode', 'build')
-        team_id = data.get('team_id') or None
         metadata = data.get('metadata', {})
-
     
     # Validate backend
     try:
@@ -1126,10 +1093,17 @@ def create_job():
     job_id = str(uuid.uuid4())
     
     if not vision:
-        if mode == 'import':
+        if mode in ('import', 'fix'):
             vision = '[Import] Existing codebase'
         else:
             return jsonify({'error': 'Vision is required'}), 400
+    
+    # Fix mode is import + auto fix refine metadata
+    if mode == 'fix':
+        from crew_studio.work_intent import apply_fix_mode_metadata
+        auto_fix = metadata.get('auto_fix_after_analyze', True) if isinstance(metadata, dict) else True
+        metadata = apply_fix_mode_metadata(metadata if isinstance(metadata, dict) else {}, auto_fix=bool(auto_fix))
+        mode = 'import'
     
     # Create job-specific workspace folder
     job_workspace = base_workspace_path / f"job-{job_id}"
@@ -1142,7 +1116,7 @@ def create_job():
 
     owner_id = request.headers.get("X-User-Id")
     owner_email = request.headers.get("X-User-Email")
-    
+
     from crew_studio.auth import AUTH_ENABLED
     if AUTH_ENABLED and team_id:
         is_admin = request.headers.get("X-User-Admin", "false").lower() == "true"
@@ -1156,7 +1130,7 @@ def create_job():
     # Create job record in database
     job_db.create_job(job_id, vision, str(job_workspace), metadata=metadata,
                       owner_id=owner_id, owner_email=owner_email, team_id=team_id)
-    
+
     # Save any uploaded documents (MTA reports end up here)
     uploaded_docs = []
     if request.files:
@@ -1213,6 +1187,33 @@ def create_job():
         else:
             phase = 'awaiting_import'
         job_db.update_job(job_id, {'status': 'queued', 'current_phase': phase})
+        # Fix jobs (work_intent=fix): auto-run import analysis → auto fix refine
+        meta_after = metadata if isinstance(metadata, dict) else {}
+        if meta_after.get('work_intent') == 'fix' and source_count + github_file_count > 0:
+            def _auto_analyze_fix():
+                from crew_studio.import_flow.runner import run_import_analysis
+
+                def _progress(phase: str, pct: int, msg: str = None):
+                    job_db.update_progress(job_id, phase, pct, msg or '')
+
+                job_db.update_job(job_id, {'status': 'running', 'current_phase': 'import_analyzing'})
+                try:
+                    run_import_analysis(
+                        job_id=job_id,
+                        workspace_path=job_workspace,
+                        job_db=job_db,
+                        progress_callback=_progress,
+                        vision=vision,
+                    )
+                except Exception as exc:
+                    logger.exception("Auto analyze for fix job %s failed: %s", job_id, exc)
+                    job_db.update_job(job_id, {
+                        'status': 'failed',
+                        'current_phase': 'error',
+                        'error': str(exc),
+                    })
+
+            threading.Thread(target=_auto_analyze_fix, daemon=True).start()
         return jsonify({
             'job_id': job_id,
             'status': 'queued',
@@ -1868,6 +1869,12 @@ def refine_job(job_id):
     previous_status = job.get('status') or 'completed'
     job_db.update_job(job_id, {'status': 'running'})
     job_db.update_progress(job_id, 'refining', 0, 'Refinement started.')
+    scope = (data.get('scope') or '').strip().lower() or None
+    if scope and scope not in ('impact', 'file', 'project'):
+        return jsonify({'error': 'scope must be impact, file, or project'}), 400
+    if scope is None:
+        scope = 'impact' if file_path else 'project'
+    refinement_kind = (data.get('refinement_kind') or '').strip() or None
     def progress_cb(phase: str, progress: int, message: Optional[str] = None):
         job_db.update_progress(job_id, phase, progress, message or '')
 
@@ -1890,6 +1897,8 @@ def refine_job(job_id):
             file_path=file_path,
             previous_status=previous_status,
             enhanced=enhanced,
+            scope=scope,
+            refinement_kind=refinement_kind,
         )
     thread = threading.Thread(target=run)
     thread.daemon = True

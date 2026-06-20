@@ -14,7 +14,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field, asdict
 from datetime import datetime
 from enum import Enum
-from typing import Any, Dict, List, Optional, Protocol, runtime_checkable
+from typing import Any, Dict, List, Protocol, runtime_checkable
 
 
 class JobMode(str, Enum):

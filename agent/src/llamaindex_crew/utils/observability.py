@@ -10,7 +10,6 @@ Compatible with OpenTelemetry when available, but works standalone.
 """
 import json
 import logging
-import os
 import time
 import traceback
 import uuid
