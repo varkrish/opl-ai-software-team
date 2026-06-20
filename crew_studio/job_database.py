@@ -64,6 +64,16 @@ class JobDatabase:
                 conn.execute("ALTER TABLE jobs ADD COLUMN metadata TEXT DEFAULT '{}'")
             except sqlite3.OperationalError:
                 pass  # column already exists
+
+            # Add new authentication columns to existing databases
+            for col, col_type in [("owner_id", "TEXT"), ("owner_email", "TEXT"), ("team_id", "TEXT")]:
+                try:
+                    conn.execute(f"ALTER TABLE jobs ADD COLUMN {col} {col_type}")
+                except sqlite3.OperationalError:
+                    pass  # column already exists
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_owner ON jobs(owner_id)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_team ON jobs(team_id)")
+
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS documents (
                     id TEXT PRIMARY KEY,
@@ -136,6 +146,21 @@ class JobDatabase:
             conn.execute("CREATE INDEX IF NOT EXISTS idx_refactor_tasks_status ON refactor_tasks(status)")
             # ── Validation issues table ───────────────────────────────────
             conn.execute("""
+                CREATE TABLE IF NOT EXISTS llm_usage (
+                    id TEXT PRIMARY KEY,
+                    job_id TEXT NOT NULL,
+                    agent_name TEXT,
+                    model TEXT,
+                    input_tokens INTEGER DEFAULT 0,
+                    output_tokens INTEGER DEFAULT 0,
+                    cost REAL DEFAULT 0.0,
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY (job_id) REFERENCES jobs(id)
+                )
+            """)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_llm_usage_job ON llm_usage(job_id)")
+
+            conn.execute("""
                 CREATE TABLE IF NOT EXISTS validation_issues (
                     id TEXT PRIMARY KEY,
                     job_id TEXT NOT NULL,
@@ -156,7 +181,10 @@ class JobDatabase:
             conn.execute("CREATE INDEX IF NOT EXISTS idx_validation_issues_status ON validation_issues(status)")
     
     def create_job(self, job_id: str, vision: str, workspace_path: str,
-                   metadata: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+                   metadata: Optional[Dict[str, Any]] = None,
+                   owner_id: Optional[str] = None,
+                   owner_email: Optional[str] = None,
+                   team_id: Optional[str] = None) -> Dict[str, Any]:
         """Create a new job record."""
         now = datetime.now().isoformat()
         meta_json = json.dumps(metadata) if metadata else '{}'
@@ -174,17 +202,22 @@ class JobDatabase:
             'error': None,
             'last_message': '[]',
             'metadata': metadata or {},
+            'owner_id': owner_id,
+            'owner_email': owner_email,
+            'team_id': team_id,
         }
         
         with self._get_conn() as conn:
             conn.execute("""
                 INSERT INTO jobs (id, vision, status, progress, current_phase, 
-                                created_at, workspace_path, last_message, metadata)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                created_at, workspace_path, last_message, metadata,
+                                owner_id, owner_email, team_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 job['id'], job['vision'], job['status'], job['progress'],
                 job['current_phase'], job['created_at'], job['workspace_path'],
-                job['last_message'], meta_json
+                job['last_message'], meta_json,
+                job['owner_id'], job['owner_email'], job['team_id']
             ))
         
         return job
@@ -192,15 +225,27 @@ class JobDatabase:
     def get_job(self, job_id: str) -> Optional[Dict[str, Any]]:
         """Get a single job by ID."""
         with self._get_conn() as conn:
-            row = conn.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
+            row = conn.execute(
+                "SELECT *, (SELECT SUM(cost) FROM llm_usage WHERE job_id = jobs.id) as cost, "
+                "(SELECT SUM(input_tokens + output_tokens) FROM llm_usage WHERE job_id = jobs.id) as tokens "
+                "FROM jobs WHERE id = ?", (job_id,)
+            ).fetchone()
             if not row:
                 return None
             return self._row_to_dict(row)
     
-    def get_all_jobs(self) -> List[Dict[str, Any]]:
-        """Get all jobs ordered by creation time (newest first)."""
+    def get_all_jobs(self, owner_id: Optional[str] = None,
+                     team_ids: Optional[List[str]] = None,
+                     is_admin: bool = False) -> List[Dict[str, Any]]:
+        """Get all jobs ordered by creation time (newest first), scoped by access."""
+        where, params = self._build_where(owner_id=owner_id, team_ids=team_ids, is_admin=is_admin)
         with self._get_conn() as conn:
-            rows = conn.execute("SELECT * FROM jobs ORDER BY created_at DESC").fetchall()
+            sql = (
+                f"SELECT *, (SELECT SUM(cost) FROM llm_usage WHERE job_id = jobs.id) as cost, "
+                f"(SELECT SUM(input_tokens + output_tokens) FROM llm_usage WHERE job_id = jobs.id) as tokens "
+                f"FROM jobs{where} ORDER BY created_at DESC"
+            )
+            rows = conn.execute(sql, params).fetchall()
             return [self._row_to_dict(row) for row in rows]
 
     _SORTABLE_COLUMNS = {"created_at", "vision", "status", "progress", "current_phase"}
@@ -209,8 +254,12 @@ class JobDatabase:
         self,
         vision_filter: Optional[str] = None,
         status_filter: Optional[str] = None,
+        owner_id: Optional[str] = None,
+        team_ids: Optional[List[str]] = None,
+        is_admin: bool = False,
+        team_id: Optional[str] = None,
     ) -> tuple:
-        """Build WHERE clause and params from optional filters."""
+        """Build WHERE clause and params from optional filters and access restrictions."""
         clauses: list = []
         params: list = []
         if vision_filter:
@@ -219,6 +268,45 @@ class JobDatabase:
         if status_filter:
             clauses.append("status = ?")
             params.append(status_filter)
+            
+        if not is_admin:
+            access_clauses = []
+            if owner_id:
+                if team_id == "personal":
+                    access_clauses.append("owner_id = ? AND (team_id IS NULL OR team_id = '')")
+                    params.append(owner_id)
+                elif team_id:
+                    allowed_teams = team_ids or []
+                    if team_id in allowed_teams:
+                        access_clauses.append("team_id = ?")
+                        params.append(team_id)
+                    else:
+                        # User has no access to this team! Force empty results.
+                        access_clauses.append("1 = 0")
+                else:
+                    access_clauses.append("owner_id = ?")
+                    params.append(owner_id)
+                    if team_ids:
+                        team_placeholders = ", ".join("?" for _ in team_ids)
+                        access_clauses.append(f"team_id IN ({team_placeholders})")
+                        params.extend(team_ids)
+            
+            if access_clauses:
+                if len(access_clauses) > 1 and not team_id:
+                    clauses.append(f"({' OR '.join(access_clauses)})")
+                else:
+                    clauses.append(access_clauses[0])
+            else:
+                # Force empty results for non-admins with no owner or team parameters
+                clauses.append("1 = 0")
+        else:
+            # Admin filters
+            if team_id == "personal":
+                clauses.append("(team_id IS NULL OR team_id = '')")
+            elif team_id:
+                clauses.append("team_id = ?")
+                params.append(team_id)
+                
         where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
         return where, params
 
@@ -226,9 +314,15 @@ class JobDatabase:
         self,
         vision_filter: Optional[str] = None,
         status_filter: Optional[str] = None,
+        owner_id: Optional[str] = None,
+        team_ids: Optional[List[str]] = None,
+        is_admin: bool = False,
+        team_id: Optional[str] = None,
     ) -> int:
-        """Return total number of jobs, optionally filtered."""
-        where, params = self._build_where(vision_filter, status_filter)
+        """Return total number of jobs, optionally filtered and scoped by access."""
+        where, params = self._build_where(
+            vision_filter, status_filter, owner_id=owner_id, team_ids=team_ids, is_admin=is_admin, team_id=team_id
+        )
         with self._get_conn() as conn:
             row = conn.execute(
                 f"SELECT COUNT(*) FROM jobs{where}", params
@@ -243,15 +337,25 @@ class JobDatabase:
         status_filter: Optional[str] = None,
         sort_by: Optional[str] = None,
         sort_order: Optional[str] = None,
+        owner_id: Optional[str] = None,
+        team_ids: Optional[List[str]] = None,
+        is_admin: bool = False,
+        team_id: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
-        """Get jobs with pagination, optional filters, and sorting."""
-        where, params = self._build_where(vision_filter, status_filter)
+        """Get jobs with pagination, optional filters, sorting, and access control."""
+        where, params = self._build_where(
+            vision_filter, status_filter, owner_id=owner_id, team_ids=team_ids, is_admin=is_admin, team_id=team_id
+        )
 
         col = sort_by if sort_by in self._SORTABLE_COLUMNS else "created_at"
         direction = "ASC" if sort_order == "asc" else "DESC"
         collate = " COLLATE NOCASE" if col == "vision" else ""
 
-        sql = f"SELECT * FROM jobs{where} ORDER BY {col}{collate} {direction} LIMIT ? OFFSET ?"
+        sql = (
+            f"SELECT *, (SELECT SUM(cost) FROM llm_usage WHERE job_id = jobs.id) as cost, "
+            f"(SELECT SUM(input_tokens + output_tokens) FROM llm_usage WHERE job_id = jobs.id) as tokens "
+            f"FROM jobs{where} ORDER BY {col}{collate} {direction} LIMIT ? OFFSET ?"
+        )
         params.extend([limit, offset])
         with self._get_conn() as conn:
             rows = conn.execute(sql, params).fetchall()
@@ -272,6 +376,29 @@ class JobDatabase:
                 values
             )
             return cursor.rowcount > 0
+
+    def add_skills_used(self, job_id: str, skills: List[str]) -> bool:
+        """Append skills to the job's metadata."""
+        if not skills:
+            return False
+        with self._get_conn() as conn:
+            row = conn.execute("SELECT metadata FROM jobs WHERE id = ?", (job_id,)).fetchone()
+            if not row:
+                return False
+            try:
+                metadata = json.loads(row["metadata"] or "{}")
+            except Exception:
+                metadata = {}
+            
+            existing_skills = set(metadata.get("skills_used", []))
+            new_skills = existing_skills.union(skills)
+            
+            if len(new_skills) == len(existing_skills):
+                return True
+                
+            metadata["skills_used"] = sorted(list(new_skills))
+            conn.execute("UPDATE jobs SET metadata = ? WHERE id = ?", (json.dumps(metadata), job_id))
+            return True
 
     def delete_job(self, job_id: str) -> bool:
         """Delete a job and its related records. Returns True if job was found and deleted."""
@@ -384,19 +511,25 @@ class JobDatabase:
             'completed_at': datetime.now().isoformat()
         })
     
-    def get_stats(self) -> Dict[str, int]:
-        """Get aggregate statistics across all jobs."""
+    def get_stats(self, owner_id: Optional[str] = None,
+                  team_ids: Optional[List[str]] = None,
+                  is_admin: bool = False) -> Dict[str, Any]:
+        """Get aggregate statistics across all jobs, scoped by access."""
+        where, params = self._build_where(owner_id=owner_id, team_ids=team_ids, is_admin=is_admin)
         with self._get_conn() as conn:
-            cursor = conn.execute("""
+            cursor = conn.execute(f"""
                 SELECT 
                     COUNT(*) as total,
                     SUM(CASE WHEN status IN ('completed', 'partially_completed') THEN 1 ELSE 0 END) as completed,
                     SUM(CASE WHEN status = 'running' THEN 1 ELSE 0 END) as running,
                     SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) as failed,
                     SUM(CASE WHEN status = 'quota_exhausted' THEN 1 ELSE 0 END) as quota_exhausted,
-                    SUM(CASE WHEN status = 'queued' THEN 1 ELSE 0 END) as queued
+                    SUM(CASE WHEN status = 'queued' THEN 1 ELSE 0 END) as queued,
+                    SUM((SELECT SUM(cost) FROM llm_usage WHERE job_id = jobs.id)) as total_cost,
+                    SUM((SELECT SUM(input_tokens + output_tokens) FROM llm_usage WHERE job_id = jobs.id)) as total_tokens
                 FROM jobs
-            """)
+                {where}
+            """, params)
             row = cursor.fetchone()
             return {
                 'total_jobs': row['total'] or 0,
@@ -404,7 +537,9 @@ class JobDatabase:
                 'running': row['running'] or 0,
                 'failed': row['failed'] or 0,
                 'quota_exhausted': row['quota_exhausted'] or 0,
-                'queued': row['queued'] or 0
+                'queued': row['queued'] or 0,
+                'total_cost': row['total_cost'] or 0.0,
+                'total_tokens': row['total_tokens'] or 0
             }
     
     # ── Document Methods ───────────────────────────────────────────────────────
@@ -666,6 +801,26 @@ class JobDatabase:
                 (job_id,),
             ).fetchone()
             return dict(row) if row else None
+
+    # ── LLM Usage ────────────────────────────────────────────────────────────
+
+    def record_llm_usage(self, job_id: str, agent_name: str, model: str, input_tokens: int, output_tokens: int, cost: float) -> str:
+        """Record LLM token usage and cost for a job."""
+        import uuid
+        now = datetime.now().isoformat()
+        usage_id = str(uuid.uuid4())
+        with self._get_conn() as conn:
+            conn.execute("""
+                INSERT INTO llm_usage (id, job_id, agent_name, model, input_tokens, output_tokens, cost, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, (usage_id, job_id, agent_name, model, input_tokens, output_tokens, cost, now))
+        return usage_id
+
+    def get_llm_usage(self, job_id: str) -> List[Dict[str, Any]]:
+        """Get all LLM usage records for a job."""
+        with self._get_conn() as conn:
+            rows = conn.execute("SELECT * FROM llm_usage WHERE job_id = ? ORDER BY created_at", (job_id,)).fetchall()
+            return [dict(r) for r in rows]
 
     # ── Refactor Tasks ───────────────────────────────────────────
 
