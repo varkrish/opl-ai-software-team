@@ -194,6 +194,9 @@ class CreateJobRequest(BaseModel):
     mode: str = "build"
     metadata: Dict[str, Any] = {}
     auto_approve_plan: bool = False  # when True, skip the plan review gate for this job
+    jira_issue_key: Optional[str] = None   # e.g. "PROJ-123"
+    jira_issue_url: Optional[str] = None   # full browse URL
+    jira_issue_summary: Optional[str] = None  # issue title for display
 
 
 def _resolve_backend(name: str):
@@ -340,6 +343,12 @@ async def create_job(request: Request, user: CurrentUser = Depends(get_current_u
     meta = dict(body.metadata) if body.metadata else {}
     if body.auto_approve_plan:
         meta["auto_approve_plan"] = True
+    if body.jira_issue_key:
+        meta["jira_issue_key"] = body.jira_issue_key
+    if body.jira_issue_url:
+        meta["jira_issue_url"] = body.jira_issue_url
+    if body.jira_issue_summary:
+        meta["jira_issue_summary"] = body.jira_issue_summary
 
     effective_mode = body.mode
     if body.mode == "fix":
@@ -763,6 +772,66 @@ async def delete_jira_config(user: CurrentUser = Depends(get_current_user)):
     """Remove the current user's stored Jira credentials."""
     deleted = job_db.delete_jira_config(user.user_id)
     return {"deleted": deleted}
+
+
+@app.get("/api/jira/search")
+async def search_jira_issues(
+    q: str = Query(default="", description="Text to search for in Jira issues"),
+    project: str = Query(default="", description="Optional project key filter"),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Search Jira issues using the current user's stored credentials.
+
+    Returns issues matching the query, sorted by last updated.
+    Requires the user to have configured Jira credentials via POST /api/jira/config.
+    """
+    cfg = job_db.get_jira_config(user.user_id)
+    if not cfg:
+        raise HTTPException(status_code=424, detail="Jira not configured. Go to Settings → Jira to connect.")
+
+    base_url = cfg["jira_base_url"].rstrip("/")
+    auth = (cfg["jira_email"], cfg["api_token"])
+
+    # Build JQL
+    conditions = []
+    if q.strip():
+        safe_q = q.strip().replace('"', '\\"')
+        conditions.append(f'(summary ~ "{safe_q}" OR description ~ "{safe_q}" OR key = "{safe_q}")')
+    if project.strip():
+        conditions.append(f'project = "{project.strip().upper()}"')
+    jql = " AND ".join(conditions) if conditions else "ORDER BY updated DESC"
+    if conditions:
+        jql += " ORDER BY updated DESC"
+
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(
+                f"{base_url}/rest/api/2/search",
+                params={"jql": jql, "maxResults": 20, "fields": "summary,status,issuetype,priority,assignee,project"},
+                auth=auth,
+                headers={"Accept": "application/json"},
+            )
+        if resp.status_code == 401:
+            raise HTTPException(status_code=424, detail="Jira credentials invalid — reconnect in Settings → Jira.")
+        resp.raise_for_status()
+        data = resp.json()
+        issues = [
+            {
+                "key": issue["key"],
+                "summary": issue["fields"].get("summary", ""),
+                "status": issue["fields"].get("status", {}).get("name", ""),
+                "issue_type": issue["fields"].get("issuetype", {}).get("name", ""),
+                "priority": issue["fields"].get("priority", {}).get("name", ""),
+                "project": issue["fields"].get("project", {}).get("key", ""),
+                "url": f"{base_url}/browse/{issue['key']}",
+            }
+            for issue in data.get("issues", [])
+        ]
+        return {"issues": issues, "total": data.get("total", 0)}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Jira search failed: {e}")
 
 
 @app.post("/api/jira/test-connection")
