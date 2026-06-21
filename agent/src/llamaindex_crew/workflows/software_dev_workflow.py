@@ -1144,7 +1144,12 @@ class SoftwareDevWorkflow:
             "missing_wiring": entrypoint_result.get("missing_wiring", []),
         }
 
-        # 8. File manifest
+        # 8. File manifest (controlled by TECH_STACK_MANIFEST_GUARD)
+        from ..utils.manifest_guard import (
+            get_manifest_guard_mode,
+            is_path_manifest_authorized,
+        )
+        guard_mode = get_manifest_guard_mode()
         allowed_paths = self.task_manager.get_registered_file_paths()
         _META_FILES = {
             "agent_backstories.json", "agent_prompts.json", "crew_errors.log",
@@ -1153,29 +1158,41 @@ class SoftwareDevWorkflow:
         }
         unauthorized: List[str] = []
         conflict_pairs: List[Dict[str, str]] = []
-        for src_file in sorted(self.workspace_path.rglob("*")):
-            if not src_file.is_file():
-                continue
-            rel = str(src_file.relative_to(self.workspace_path))
-            if rel.startswith(".") or rel.startswith("state_") or rel.startswith("tasks_"):
-                continue
-            if rel in _META_FILES or rel.startswith("features/"):
-                continue
-            if any(rel.endswith(ext) for ext in (".md", ".log", ".json", ".yaml", ".yml")):
-                continue
-            if rel not in allowed_paths:
-                unauthorized.append(rel)
-        for p in sorted(allowed_paths):
-            if p.endswith("/__init__.py"):
-                dir_stem = p.rsplit("/__init__.py", 1)[0]
-                flat_mod = f"{dir_stem}.py"
-                if flat_mod in allowed_paths or (self.workspace_path / flat_mod).exists():
-                    conflict_pairs.append({"package": p, "flat_module": flat_mod})
-        report["checks"]["file_manifest"] = {
-            "pass": len(unauthorized) == 0 and len(conflict_pairs) == 0,
-            "unauthorized_files": unauthorized,
-            "file_package_conflicts": conflict_pairs,
-        }
+        if guard_mode.value == "off":
+            report["checks"]["file_manifest"] = {
+                "pass": True,
+                "skipped": True,
+                "guard_mode": guard_mode.value,
+                "unauthorized_files": [],
+                "file_package_conflicts": [],
+            }
+        else:
+            for src_file in sorted(self.workspace_path.rglob("*")):
+                if not src_file.is_file():
+                    continue
+                rel = str(src_file.relative_to(self.workspace_path))
+                if rel.startswith(".") or rel.startswith("state_") or rel.startswith("tasks_"):
+                    continue
+                if rel in _META_FILES or rel.startswith("features/"):
+                    continue
+                if any(rel.endswith(ext) for ext in (".md", ".log", ".json", ".yaml", ".yml")):
+                    continue
+                if not is_path_manifest_authorized(
+                    rel, allowed_paths, self.workspace_path, guard_mode
+                ):
+                    unauthorized.append(rel)
+            for p in sorted(allowed_paths):
+                if p.endswith("/__init__.py"):
+                    dir_stem = p.rsplit("/__init__.py", 1)[0]
+                    flat_mod = f"{dir_stem}.py"
+                    if flat_mod in allowed_paths or (self.workspace_path / flat_mod).exists():
+                        conflict_pairs.append({"package": p, "flat_module": flat_mod})
+            report["checks"]["file_manifest"] = {
+                "pass": len(unauthorized) == 0 and len(conflict_pairs) == 0,
+                "guard_mode": guard_mode.value,
+                "unauthorized_files": unauthorized,
+                "file_package_conflicts": conflict_pairs,
+            }
 
         # 9. Contract conformance
         if self.api_contract and isinstance(self.api_contract, dict):
@@ -1542,8 +1559,12 @@ class SoftwareDevWorkflow:
                 fixable = [i for i in fixable if i.get("file") not in auto_fixed_files
                            or i not in auto_fixed]
 
-            # Temporarily allow writes to all registered files
-            allowed = self.task_manager.get_registered_file_paths()
+            # Apply manifest guard for remediation (TECH_STACK_MANIFEST_GUARD)
+            from ..utils.manifest_guard import remediation_write_allowlist
+            registered = self.task_manager.get_registered_file_paths()
+            allowed = remediation_write_allowlist(
+                registered, self.workspace_path,
+            )
             set_allowed_file_paths(allowed, workspace=str(self.workspace_path))
 
             # Ensure dev agent is available
@@ -2381,11 +2402,16 @@ class SoftwareDevWorkflow:
         )
 
         from ..tools.file_tools import set_allowed_file_paths
-        allowed = self.task_manager.get_registered_file_paths()
-        # Allowlist is cleared inside _process_file_tasks so feature/multi-file tasks
-        # can write paths beyond the tech-stack manifest (e.g. Java classes under src/).
-        set_allowed_file_paths(allowed, workspace=str(self.workspace_path))
-        logger.info("🔒 file_writer allowlist enabled: %d paths (workspace=%s)", len(allowed), self.workspace_path)
+        from ..utils.manifest_guard import dev_phase_write_guard_enabled
+
+        if dev_phase_write_guard_enabled():
+            allowed = self.task_manager.get_registered_file_paths()
+            set_allowed_file_paths(allowed, workspace=str(self.workspace_path))
+            logger.info(
+                "🔒 file_writer allowlist enabled (strict): %d paths workspace=%s",
+                len(allowed),
+                self.workspace_path,
+            )
 
         # Partition all registered tasks into backend and frontend
         all_registered = self.task_manager.get_pending_tasks()
