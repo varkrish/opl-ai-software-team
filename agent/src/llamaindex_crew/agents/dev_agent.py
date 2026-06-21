@@ -11,6 +11,7 @@ from ..tools import (
     GitTool,
     PytestRunnerTool, CodeCoverageTool,
     create_workspace_file_tools,
+    append_tldr_tools,
 )
 from ..tools.tool_loader import load_tools
 from ..config import ConfigLoader
@@ -52,6 +53,7 @@ You verify and use the technology stack defined by the Technical Architect."""
                 GitTool,
                 PytestRunnerTool, CodeCoverageTool,
             ]
+            append_tldr_tools(tools, Path(workspace_path))
         else:
             tools = [
                 FileWriterTool,

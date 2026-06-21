@@ -64,11 +64,22 @@ class BaseLlamaIndexAgent:
         # Initialize budget tracker
         self.budget_tracker = budget_tracker or EnhancedBudgetTracker()
         
+        from llama_index.core.callbacks import CallbackManager, TokenCountingHandler
+        try:
+            import tiktoken
+            tokenizer = tiktoken.get_encoding("cl100k_base").encode
+        except Exception:
+            tokenizer = lambda x: [1] * max(1, len(str(x)) // 4)
+            
+        self.token_counter = TokenCountingHandler(tokenizer=tokenizer)
+        
         # Create LLM with budget callback if not provided
         if llm is None:
-            self.llm = get_llm_for_agent(agent_type, budget_callback=self._budget_callback)
+            self.llm = get_llm_for_agent(agent_type)
         else:
             self.llm = llm
+            
+        self.llm.callback_manager = CallbackManager([self.token_counter])
         
         # Create agent instance
         self.agent = self._create_agent()
@@ -123,46 +134,7 @@ IMPORTANT INSTRUCTIONS:
 4. Always follow the required format: Thought -> Action -> Action Input -> Observation OR Final Answer."""
         return prompt
     
-    def _budget_callback(self, response: Any) -> None:
-        """Callback to track token usage for budget tracking"""
-        try:
-            # Extract token usage from response
-            # LlamaIndex response format may vary
-            input_tokens = 0
-            output_tokens = 0
-            model = 'unknown'
-            
-            # Try different response formats
-            if hasattr(response, 'raw') and hasattr(response.raw, 'usage'):
-                usage = response.raw.usage
-                input_tokens = getattr(usage, 'prompt_tokens', 0) or getattr(usage, 'total_tokens', 0)
-                output_tokens = getattr(usage, 'completion_tokens', 0)
-                model = getattr(response.raw, 'model', 'unknown')
-            elif hasattr(response, 'usage'):
-                usage = response.usage
-                input_tokens = getattr(usage, 'prompt_tokens', 0) or getattr(usage, 'total_tokens', 0)
-                output_tokens = getattr(usage, 'completion_tokens', 0)
-                model = getattr(response, 'model', 'unknown')
-            elif hasattr(response, 'response_metadata'):
-                # Try response_metadata format
-                metadata = response.response_metadata
-                if 'token_usage' in metadata:
-                    usage = metadata['token_usage']
-                    input_tokens = usage.get('prompt_tokens', 0) or usage.get('total_tokens', 0)
-                    output_tokens = usage.get('completion_tokens', 0)
-                model = metadata.get('model', 'unknown')
-            
-            # Only record if we have valid token counts
-            if input_tokens > 0 or output_tokens > 0:
-                self.budget_tracker.record_usage(
-                    project_id=self.budget_tracker.project_id,
-                    agent_name=self.role,
-                    model=model,
-                    input_tokens=input_tokens,
-                    output_tokens=output_tokens
-                )
-        except Exception as e:
-            logger.debug(f"Could not track budget from response: {e}")
+    # (Budget tracking is now natively handled by TokenCountingHandler)
     
     def reset_chat(self) -> None:
         """Clear the agent's chat history so subsequent calls start fresh.
@@ -191,6 +163,9 @@ IMPORTANT INSTRUCTIONS:
         budget_status = self.budget_tracker.check_budget_safe(self.budget_tracker.project_id)
         if not budget_status['allowed']:
             raise ValueError(f"Budget exceeded: {budget_status['message']}")
+            
+        start_prompt_tokens = self.token_counter.prompt_llm_token_count
+        start_completion_tokens = self.token_counter.completion_llm_token_count
         
         # Execute agent with retry for transient LLM parsing failures
         max_agent_retries = 3
@@ -230,17 +205,22 @@ IMPORTANT INSTRUCTIONS:
         if last_err is not None:
             raise last_err
         
-        # Track budget - try to extract from response
+        # Track budget using TokenCountingHandler
         try:
-            # LlamaIndex agents may store response in different places
-            if hasattr(self.agent, 'chat_history') and self.agent.chat_history:
-                last_message = self.agent.chat_history[-1]
-                if hasattr(last_message, 'response'):
-                    self._budget_callback(last_message.response)
-            elif hasattr(response, 'response'):
-                self._budget_callback(response.response)
-            else:
-                self._budget_callback(response)
+            end_prompt_tokens = self.token_counter.prompt_llm_token_count
+            end_completion_tokens = self.token_counter.completion_llm_token_count
+            
+            input_tokens = end_prompt_tokens - start_prompt_tokens
+            output_tokens = end_completion_tokens - start_completion_tokens
+            
+            if input_tokens > 0 or output_tokens > 0:
+                self.budget_tracker.record_usage(
+                    project_id=self.budget_tracker.project_id,
+                    agent_name=self.role,
+                    model=self.llm.metadata.model_name if hasattr(self.llm, 'metadata') else 'unknown',
+                    input_tokens=input_tokens,
+                    output_tokens=output_tokens
+                )
         except Exception as e:
             logger.debug(f"Budget tracking skipped: {e}")
         

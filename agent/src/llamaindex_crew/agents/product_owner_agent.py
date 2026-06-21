@@ -4,9 +4,9 @@ Migrated from ProductOwnerCrew to LlamaIndex agent
 """
 import logging
 from pathlib import Path
-from typing import Dict, Optional, Union
+from typing import Optional, Union
 from .base_agent import BaseLlamaIndexAgent
-from ..tools import FileWriterTool, create_workspace_file_tools
+from ..tools import FileWriterTool, create_workspace_file_tools, append_tldr_tools
 from ..tools.tool_loader import load_tools
 from ..config import ConfigLoader
 from ..utils.prompt_loader import load_prompt
@@ -24,6 +24,7 @@ class ProductOwnerAgent:
         budget_tracker=None,
         document_indexer: Optional[DocumentIndexer] = None,
         workspace_path: Optional[Union[str, Path]] = None,
+        config=None,
     ):
         """
         Initialize Product Owner Agent
@@ -33,8 +34,10 @@ class ProductOwnerAgent:
             budget_tracker: Optional budget tracker instance
             document_indexer: Optional document indexer for RAG
             workspace_path: When set, file tools write to this path (avoids thread-local/env issues).
+            config: Optional SecretConfig for RAG top-k / limits.
         """
         self.document_indexer = document_indexer
+        self.config = config
         default_backstory = load_prompt(
             'product_owner/product_owner_backstory.txt',
             fallback="""You are a Product Owner.
@@ -48,6 +51,7 @@ You break down requests into User Stories with Acceptance Criteria using Gherkin
         if workspace_path is not None:
             ws_tools = create_workspace_file_tools(Path(workspace_path))
             tools = [ws_tools[0]]  # file_writer
+            append_tldr_tools(tools, Path(workspace_path))
         else:
             tools = [FileWriterTool]
 
@@ -93,11 +97,22 @@ You break down requests into User Stories with Acceptance Criteria using Gherkin
         """
         # Retrieve relevant context from RAG if available
         rag_context = ""
-        if self.document_indexer:
+        if self.document_indexer and getattr(self.document_indexer, "has_index", False):
+            try:
+                from ..utils.rag_context import get_phase_rag_context
+                rag_context = get_phase_rag_context(
+                    self.document_indexer,
+                    "product_owner",
+                    self.config,
+                    extra_query=f"Project vision: {vision[:800]}",
+                )
+            except Exception as e:
+                logger.debug("RAG retrieval failed: %s", e)
+        elif self.document_indexer:
             try:
                 rag_results = self.document_indexer.query(
                     f"Project vision: {vision}. What are the requirements and user needs?",
-                    top_k=2
+                    top_k=6,
                 )
                 if rag_results:
                     rag_context = "\n\nRelevant context from project artifacts:\n" + "\n".join(rag_results)

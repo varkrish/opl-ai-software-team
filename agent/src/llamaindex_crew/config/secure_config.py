@@ -124,6 +124,11 @@ class ToolsConfig(BaseModel):
     )
 
 
+class PlanReviewConfig(BaseModel):
+    """Plan review gate configuration"""
+    enabled: bool = Field(False, description="Enable human-in-the-loop plan review gate")
+
+
 class SecretConfig(BaseModel):
     """
     Main configuration model with validation
@@ -138,6 +143,7 @@ class SecretConfig(BaseModel):
     prompt_limits: PromptLimitsConfig = Field(default_factory=PromptLimitsConfig)
     skills: SkillsConfig = Field(default_factory=SkillsConfig)
     tools: ToolsConfig = Field(default_factory=ToolsConfig)
+    plan_review: PlanReviewConfig = Field(default_factory=PlanReviewConfig)
     
     # Encryption key for encrypted values
     _encryption_key: Optional[bytes] = None

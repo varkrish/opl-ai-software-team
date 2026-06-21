@@ -131,6 +131,111 @@ class TestBuildFilePrompt(unittest.TestCase):
             "Scenarios should be surfaced in the feature prompt",
         )
 
+class TestStructureValidation(unittest.TestCase):
+    def setUp(self):
+        self.db_path = Path("tests/unit/test_structure_tasks.db")
+        if self.db_path.exists():
+            self.db_path.unlink()
+        self.manager = TaskManager(self.db_path, "structure_proj")
+
+    def tearDown(self):
+        if self.db_path.exists():
+            self.db_path.unlink()
+
+    def test_validate_rejects_folder_only_tree(self):
+        tech_stack = """
+```text
+project/
+├── controller/
+├── service/
+└── pom.xml
+```
+"""
+        result = self.manager.validate_tech_stack_completeness(tech_stack)
+        self.assertFalse(result["valid"])
+        self.assertTrue(any("concrete" in i.lower() or "source" in i.lower() for i in result["issues"]))
+
+    def test_validate_requires_layers_for_multi_file_project(self):
+        tech_stack = """
+```text
+src/
+├── controller/UserController.java
+├── config/AppConfig.java
+└── util/Helper.java
+```
+"""
+        result = self.manager.validate_tech_stack_completeness(tech_stack)
+        self.assertFalse(result["valid"])
+        joined = " ".join(result["issues"]).lower()
+        self.assertTrue("service" in joined or "model" in joined or "entrypoint" in joined)
+
+    def test_validate_accepts_complete_java_tree(self):
+        tech_stack = """
+```text
+src/main/java/com/example/app/
+├── Application.java
+├── model/User.java
+├── service/UserService.java
+└── controller/UserController.java
+src/test/java/com/example/app/UserServiceTest.java
+```
+"""
+        result = self.manager.validate_tech_stack_completeness(tech_stack)
+        self.assertTrue(result["valid"])
+
+
+class TestStructureScaffolding(unittest.TestCase):
+    def setUp(self):
+        self.db_path = Path("tests/unit/test_scaffold_tasks.db")
+        if self.db_path.exists():
+            self.db_path.unlink()
+        self.manager = TaskManager(self.db_path, "scaffold_proj")
+
+    def tearDown(self):
+        if self.db_path.exists():
+            self.db_path.unlink()
+
+    def _task(self, file_path: str) -> TaskDefinition:
+        return TaskDefinition(
+            task_id=f"file_{file_path.replace('/', '_')}",
+            phase="development",
+            task_type="file_creation",
+            description=f"Create {file_path}",
+            metadata={"file_path": file_path},
+        )
+
+    def test_inject_structure_scaffolding_from_controller_only(self):
+        tasks = [
+            self._task("src/main/java/com/example/app/controller/Core.java"),
+            self._task("src/main/java/com/example/app/config/AppConfig.java"),
+        ]
+        new_tasks = self.manager._inject_framework_scaffolding_tasks(tasks, "Java REST API", "Domain")
+        paths = [t.metadata["file_path"] for t in new_tasks]
+        self.assertIn("src/main/java/com/example/app/Application.java", paths)
+        self.assertIn("src/main/java/com/example/app/model/core.java", paths)
+        self.assertIn("src/main/java/com/example/app/service/core.java", paths)
+
+    def test_inject_structure_scaffolding_python_layout(self):
+        tasks = [
+            self._task("src/api/handlers.py"),
+            self._task("src/utils/helpers.py"),
+        ]
+        new_tasks = self.manager._inject_framework_scaffolding_tasks(tasks, "Python API", "Domain")
+        paths = [t.metadata["file_path"] for t in new_tasks]
+        self.assertIn("src/main.py", paths)
+        self.assertIn("src/model/core.py", paths)
+        self.assertIn("src/service/core.py", paths)
+
+    def test_no_scaffolding_when_layers_present(self):
+        tasks = [
+            self._task("src/main/java/com/example/app/Application.java"),
+            self._task("src/main/java/com/example/app/model/User.java"),
+            self._task("src/main/java/com/example/app/service/UserService.java"),
+            self._task("src/main/java/com/example/app/controller/UserController.java"),
+        ]
+        before = len(tasks)
+        new_tasks = self.manager._inject_framework_scaffolding_tasks(tasks, "Spring", "Domain")
+        self.assertEqual(len(new_tasks), before)
 
 if __name__ == '__main__':
     unittest.main()

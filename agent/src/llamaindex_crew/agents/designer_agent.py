@@ -6,7 +6,7 @@ import logging
 from pathlib import Path
 from typing import Optional, Union
 from .base_agent import BaseLlamaIndexAgent
-from ..tools import FileWriterTool, create_workspace_file_tools, prefetch_skills
+from ..tools import FileWriterTool, create_workspace_file_tools, prefetch_skills, append_tldr_tools
 from ..tools.tool_loader import load_tools
 from ..config import ConfigLoader
 from ..utils.prompt_loader import load_prompt
@@ -102,6 +102,7 @@ You create C4 Model diagrams and define component capabilities."""
         if workspace_path is not None:
             ws_tools = create_workspace_file_tools(self.workspace_path)
             tools = [ws_tools[0]]  # file_writer
+            append_tldr_tools(tools, self.workspace_path)
         else:
             tools = [FileWriterTool]
 
@@ -135,6 +136,7 @@ You create C4 Model diagrams and define component capabilities."""
         user_stories: str,
         context_digest: Optional[str] = None,
         vision: Optional[str] = None,
+        reference_context: Optional[str] = None,
     ) -> str:
         """
         Create design specification based on user stories
@@ -171,13 +173,18 @@ You create C4 Model diagrams and define component capabilities."""
                 f"ORIGINAL PROJECT VISION (this is the ground truth — your design MUST implement this):\n"
                 f"{vision}\n\n{prompt}"
             )
-        
+        if reference_context and reference_context.strip():
+            prompt = (
+                f"REFERENCE DOCUMENT EXCERPTS (retrieved — use for architecture decisions):\n"
+                f"{reference_context.strip()}\n\n{prompt}"
+            )
+
         response = self.agent.chat(prompt)
         
         return str(response)
     
     def run(self, user_stories: str, context_digest: Optional[str] = None,
-            vision: Optional[str] = None) -> str:
+            vision: Optional[str] = None, reference_context: Optional[str] = None) -> str:
         """
         Run the Designer agent workflow
         
@@ -185,8 +192,11 @@ You create C4 Model diagrams and define component capabilities."""
             user_stories: User stories content
             context_digest: Optional Project Context Digest
             vision: Original project vision
+            reference_context: Optional RAG-retrieved reference excerpts
         
         Returns:
             Result message
         """
-        return self.create_design_spec(user_stories, context_digest, vision=vision)
+        return self.create_design_spec(
+            user_stories, context_digest, vision=vision, reference_context=reference_context,
+        )
