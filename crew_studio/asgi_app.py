@@ -341,8 +341,7 @@ async def create_job(request: Request, user: CurrentUser = Depends(get_current_u
     job_workspace.mkdir(parents=True, exist_ok=True)
 
     meta = dict(body.metadata) if body.metadata else {}
-    if body.auto_approve_plan:
-        meta["auto_approve_plan"] = True
+    meta["auto_approve_plan"] = bool(body.auto_approve_plan)
     if body.jira_issue_key:
         meta["jira_issue_key"] = body.jira_issue_key
     if body.jira_issue_url:
@@ -574,19 +573,21 @@ async def refine_plan(job_id: str, body: RefinePlanRequest, user: CurrentUser = 
         from pathlib import Path as _Path
         from src.llamaindex_crew.workflows.software_dev_workflow import SoftwareDevWorkflow
         from src.llamaindex_crew.tools.file_tools import set_thread_workspace
+        from src.llamaindex_crew.utils.llm_config import user_llm_context
 
         workspace = _Path(job["workspace_path"])
         set_thread_workspace(str(workspace))
         cfg = _get_config()
-        workflow = SoftwareDevWorkflow(
-            project_id=job_id,
-            workspace_path=workspace,
-            vision=job.get("vision", ""),
-            config=cfg,
-            progress_callback=lambda phase, prog, msg=None: job_db.update_progress(job_id, phase, prog, msg),
-            job_db=job_db,
-        )
-        return workflow.refine_plan(body.feedback.strip())
+        with user_llm_context(job_id, job_db, cfg):
+            workflow = SoftwareDevWorkflow(
+                project_id=job_id,
+                workspace_path=workspace,
+                vision=job.get("vision", ""),
+                config=cfg,
+                progress_callback=lambda phase, prog, msg=None: job_db.update_progress(job_id, phase, prog, msg),
+                job_db=job_db,
+            )
+            return workflow.refine_plan(body.feedback.strip())
 
     loop = asyncio.get_running_loop()
     result = await loop.run_in_executor(None, _run_refine)
@@ -611,7 +612,7 @@ async def get_job_plan(job_id: str, user: CurrentUser = Depends(get_current_user
     from pathlib import Path as _Path
     workspace = _Path(job["workspace_path"])
     artifacts = {}
-    for name in ("user_stories.md", "design_spec.md", "tech_stack.md", "requirements.md"):
+    for name in ("user_stories.md", "design_spec.md", "tech_stack.md", "implementation_plan.md", "requirements.md"):
         p = workspace / name
         if p.exists():
             try:
@@ -752,6 +753,8 @@ async def save_jira_config(
     user: CurrentUser = Depends(get_current_user),
 ):
     """Save (or update) the current user's Jira credentials, encrypted at rest."""
+    if not user.user_id:
+        raise HTTPException(status_code=401, detail="Authenticated user has no identity")
     if not body.jira_base_url.startswith("http"):
         raise HTTPException(status_code=422, detail="jira_base_url must be a valid URL")
     if not body.jira_email or "@" not in body.jira_email:
@@ -764,7 +767,19 @@ async def save_jira_config(
         jira_email=body.jira_email,
         api_token=body.api_token,
     )
-    return {"saved": True}
+    cfg = job_db.get_jira_config(user.user_id)
+    if not cfg:
+        return {"saved": True, "configured": False}
+    token = cfg["api_token"]
+    masked = ("*" * max(0, len(token) - 4)) + token[-4:] if len(token) >= 4 else "****"
+    return {
+        "saved": True,
+        "configured": True,
+        "jira_base_url": cfg["jira_base_url"],
+        "jira_email": cfg["jira_email"],
+        "api_token_masked": masked,
+        "updated_at": cfg["updated_at"],
+    }
 
 
 @app.delete("/api/jira/config", status_code=200)
@@ -782,55 +797,40 @@ async def search_jira_issues(
 ):
     """Search Jira issues using the current user's stored credentials.
 
-    Returns issues matching the query, sorted by last updated.
-    Requires the user to have configured Jira credentials via POST /api/jira/config.
+    Auto-detects Jira Server (api/2) vs Cloud (api/3/search/jql) like crew_jira_connector.
     """
+    from crew_studio.jira_client import build_search_jql, detect_deployment, search_issues as jira_search
+
     cfg = job_db.get_jira_config(user.user_id)
     if not cfg:
         raise HTTPException(status_code=424, detail="Jira not configured. Go to Settings → Jira to connect.")
 
     base_url = cfg["jira_base_url"].rstrip("/")
-    auth = (cfg["jira_email"], cfg["api_token"])
-
-    # Build JQL
-    conditions = []
-    if q.strip():
-        safe_q = q.strip().replace('"', '\\"')
-        conditions.append(f'(summary ~ "{safe_q}" OR description ~ "{safe_q}" OR key = "{safe_q}")')
-    if project.strip():
-        conditions.append(f'project = "{project.strip().upper()}"')
-    jql = " AND ".join(conditions) if conditions else "ORDER BY updated DESC"
-    if conditions:
-        jql += " ORDER BY updated DESC"
-
     try:
-        async with httpx.AsyncClient(timeout=10) as client:
-            resp = await client.get(
-                f"{base_url}/rest/api/2/search",
-                params={"jql": jql, "maxResults": 20, "fields": "summary,status,issuetype,priority,assignee,project"},
-                auth=auth,
-                headers={"Accept": "application/json"},
-            )
-        if resp.status_code == 401:
+        deployment = await detect_deployment(base_url, (cfg["jira_email"], cfg["api_token"]))
+        jql = build_search_jql(q, project, deployment=deployment)
+        return await jira_search(
+            base_url,
+            cfg["jira_email"],
+            cfg["api_token"],
+            jql,
+            max_results=20,
+        )
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 401:
             raise HTTPException(status_code=424, detail="Jira credentials invalid — reconnect in Settings → Jira.")
-        resp.raise_for_status()
-        data = resp.json()
-        issues = [
-            {
-                "key": issue["key"],
-                "summary": issue["fields"].get("summary", ""),
-                "status": issue["fields"].get("status", {}).get("name", ""),
-                "issue_type": issue["fields"].get("issuetype", {}).get("name", ""),
-                "priority": issue["fields"].get("priority", {}).get("name", ""),
-                "project": issue["fields"].get("project", {}).get("key", ""),
-                "url": f"{base_url}/browse/{issue['key']}",
-            }
-            for issue in data.get("issues", [])
-        ]
-        return {"issues": issues, "total": data.get("total", 0)}
+        if e.response.status_code == 400:
+            try:
+                detail = e.response.json().get("errorMessages", [e.response.text])
+            except Exception:
+                detail = [e.response.text]
+            raise HTTPException(status_code=400, detail=f"Jira query error: {'; '.join(detail)}")
+        logger.exception("Jira search HTTP error for user %s: %s", user.user_id, e)
+        raise HTTPException(status_code=502, detail=f"Jira search failed: {e}")
     except HTTPException:
         raise
     except Exception as e:
+        logger.exception("Jira search failed for user %s: %s", user.user_id, e)
         raise HTTPException(status_code=502, detail=f"Jira search failed: {e}")
 
 
@@ -869,6 +869,283 @@ async def test_jira_connection(
         return {"ok": False, "error": f"Cannot reach {url} — check the base URL."}
     except Exception as e:
         return {"ok": False, "error": str(e)}
+
+
+# ---------------------------------------------------------------------------
+# GitHub configuration endpoints
+# ---------------------------------------------------------------------------
+
+class GitHubConfigRequest(BaseModel):
+    api_token: str
+
+
+@app.get("/api/github/config")
+async def get_github_config(user: CurrentUser = Depends(get_current_user)):
+    """Return the current user's GitHub config (token masked)."""
+    cfg = job_db.get_github_config(user.user_id)
+    if not cfg:
+        return {"configured": False}
+    token = cfg["token"]
+    masked = ("*" * max(0, len(token) - 4)) + token[-4:] if len(token) >= 4 else "****"
+    return {
+        "configured": True,
+        "github_username": cfg.get("github_username") or "",
+        "api_token_masked": masked,
+        "updated_at": cfg["updated_at"],
+    }
+
+
+@app.post("/api/github/config", status_code=201)
+async def save_github_config(
+    body: GitHubConfigRequest,
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Save (or update) the current user's GitHub PAT, encrypted at rest."""
+    if not user.user_id:
+        raise HTTPException(status_code=401, detail="Authenticated user has no identity")
+    if not body.api_token:
+        raise HTTPException(status_code=422, detail="api_token is required")
+
+    from crew_studio.github_client import test_github_connection
+
+    try:
+        profile = await test_github_connection(body.api_token)
+        username = profile.get("login", "")
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 401:
+            raise HTTPException(status_code=422, detail="Invalid GitHub token")
+        raise HTTPException(status_code=502, detail=f"GitHub API error: {e}")
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"GitHub connection failed: {e}")
+
+    job_db.save_github_config(
+        owner_id=user.user_id,
+        token=body.api_token,
+        github_username=username,
+    )
+    cfg = job_db.get_github_config(user.user_id)
+    if not cfg:
+        return {"saved": True, "configured": False}
+    token = cfg["token"]
+    masked = ("*" * max(0, len(token) - 4)) + token[-4:] if len(token) >= 4 else "****"
+    return {
+        "saved": True,
+        "configured": True,
+        "github_username": cfg.get("github_username") or username,
+        "api_token_masked": masked,
+        "updated_at": cfg["updated_at"],
+    }
+
+
+@app.delete("/api/github/config", status_code=200)
+async def delete_github_config(user: CurrentUser = Depends(get_current_user)):
+    """Remove the current user's stored GitHub credentials."""
+    deleted = job_db.delete_github_config(user.user_id)
+    return {"deleted": deleted}
+
+
+@app.get("/api/github/search")
+async def search_github_repos(
+    q: str = Query(default="", description="Repository name search"),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Search/list GitHub repositories using the current user's stored PAT."""
+    from crew_studio.github_client import search_repositories
+
+    cfg = job_db.get_github_config(user.user_id)
+    if not cfg:
+        raise HTTPException(
+            status_code=424,
+            detail="GitHub not configured. Go to Settings → GitHub to connect.",
+        )
+    try:
+        repos = await search_repositories(cfg["token"], q, per_page=20)
+        return {"repos": repos, "total": len(repos)}
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 401:
+            raise HTTPException(
+                status_code=424,
+                detail="GitHub credentials invalid — reconnect in Settings → GitHub.",
+            )
+        logger.exception("GitHub search HTTP error for user %s: %s", user.user_id, e)
+        raise HTTPException(status_code=502, detail=f"GitHub search failed: {e}")
+    except Exception as e:
+        logger.exception("GitHub search failed for user %s: %s", user.user_id, e)
+        raise HTTPException(status_code=502, detail=f"GitHub search failed: {e}")
+
+
+@app.post("/api/github/test-connection")
+async def test_github_connection_endpoint(
+    body: GitHubConfigRequest,
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Test GitHub PAT without saving it."""
+    from crew_studio.github_client import test_github_connection
+
+    if not body.api_token:
+        return {"ok": False, "error": "API token is required"}
+    try:
+        profile = await test_github_connection(body.api_token)
+        return {
+            "ok": True,
+            "login": profile.get("login", ""),
+            "name": profile.get("name", ""),
+        }
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 401:
+            return {"ok": False, "error": "Invalid token — check your GitHub PAT."}
+        return {"ok": False, "error": f"GitHub returned HTTP {e.response.status_code}"}
+    except httpx.ConnectError:
+        return {"ok": False, "error": "Cannot reach GitHub API — check your network."}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+# ---------------------------------------------------------------------------
+# LLM configuration endpoints
+# ---------------------------------------------------------------------------
+
+class LLMConfigRequest(BaseModel):
+    api_base_url: str
+    api_key: str
+    model_manager: Optional[str] = "gpt-4o-mini"
+    model_worker: Optional[str] = "gpt-4o-mini"
+    model_reviewer: Optional[str] = "gpt-4o-mini"
+
+
+class LLMConfigResponse(BaseModel):
+    configured: bool
+    api_base_url: Optional[str] = None
+    api_token_masked: Optional[str] = None
+    model_manager: Optional[str] = None
+    model_worker: Optional[str] = None
+    model_reviewer: Optional[str] = None
+    updated_at: Optional[str] = None
+
+
+@app.get("/api/llm/config", response_model=LLMConfigResponse)
+async def get_llm_config(user: CurrentUser = Depends(get_current_user)):
+    """Return the current user's LLM config (api_key masked)."""
+    cfg = job_db.get_llm_config(user.user_id)
+    if not cfg:
+        return {"configured": False}
+    key = cfg["api_key"]
+    masked = ("*" * 12) + key[-4:] if len(key) >= 4 else "****"
+    return {
+        "configured": True,
+        "api_base_url": cfg["api_base_url"],
+        "api_token_masked": masked,
+        "model_manager": cfg["model_manager"],
+        "model_worker": cfg["model_worker"],
+        "model_reviewer": cfg["model_reviewer"],
+        "updated_at": cfg["updated_at"],
+    }
+
+
+@app.post("/api/llm/config", status_code=201)
+async def save_llm_config(
+    body: LLMConfigRequest,
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Save (or update) the current user's LLM credentials, encrypted at rest."""
+    if not body.api_base_url.startswith("http"):
+        raise HTTPException(status_code=422, detail="api_base_url must be a valid URL")
+    if not body.api_key:
+        raise HTTPException(status_code=422, detail="api_key is required")
+
+    api_key = body.api_key
+    if "*" in api_key:
+        existing = job_db.get_llm_config(user.user_id)
+        if existing:
+            api_key = existing["api_key"]
+        else:
+            raise HTTPException(status_code=422, detail="Invalid API key format")
+
+    job_db.save_llm_config(
+        owner_id=user.user_id,
+        api_base_url=body.api_base_url,
+        api_key=api_key,
+        model_manager=body.model_manager or "gpt-4o-mini",
+        model_worker=body.model_worker or "gpt-4o-mini",
+        model_reviewer=body.model_reviewer or "gpt-4o-mini",
+    )
+    return {"saved": True}
+
+
+@app.delete("/api/llm/config", status_code=200)
+async def delete_llm_config(user: CurrentUser = Depends(get_current_user)):
+    """Remove the current user's stored LLM credentials."""
+    deleted = job_db.delete_llm_config(user.user_id)
+    return {"deleted": deleted}
+
+
+class LLMTestConnectionRequest(BaseModel):
+    api_base_url: str
+    api_key: str
+    model_manager: Optional[str] = None
+    model_worker: Optional[str] = None
+    model_reviewer: Optional[str] = None
+
+
+@app.post("/api/llm/test-connection")
+async def test_llm_connection(
+    body: LLMTestConnectionRequest,
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Test LLM connection with the supplied credentials for each configured model."""
+    api_key = body.api_key
+    if "*" in api_key:
+        existing = job_db.get_llm_config(user.user_id)
+        if existing:
+            api_key = existing["api_key"]
+        else:
+            return {"ok": False, "error": "Invalid API key"}
+
+    models_to_test = {
+        "Manager": body.model_manager or "gpt-4o-mini",
+        "Worker": body.model_worker or "gpt-4o-mini",
+        "Reviewer": body.model_reviewer or "gpt-4o-mini",
+    }
+
+    results = {}
+    from src.llamaindex_crew.utils.llm_config import GenericLlamaLLM
+
+    # Deduplicate models to avoid redundant network calls
+    tested_models = {}
+    for role, model_name in models_to_test.items():
+        if model_name in tested_models:
+            results[role] = tested_models[model_name]
+            continue
+
+        try:
+            llm = GenericLlamaLLM(
+                model=model_name,
+                api_key=api_key,
+                api_base=body.api_base_url,
+                max_tokens=5,
+            )
+            resp = llm.complete("ping")
+            if resp:
+                tested_models[model_name] = {"ok": True}
+            else:
+                tested_models[model_name] = {"ok": False, "error": "Empty response"}
+        except Exception as e:
+            tested_models[model_name] = {"ok": False, "error": str(e)}
+
+        results[role] = tested_models[model_name]
+
+    # Verify if all tests passed
+    failed = []
+    for role, res in results.items():
+        if not res["ok"]:
+            failed.append(f"{role} Model '{models_to_test[role]}': {res.get('error')}")
+
+    if not failed:
+        return {"ok": True}
+    return {
+        "ok": False,
+        "error": f"Connection tests failed: {'; '.join(failed)}"
+    }
 
 
 # ---------------------------------------------------------------------------

@@ -70,6 +70,37 @@ def run_refactor_job(
     job_db: Optional[object] = None,
     progress_callback: Optional[Callable] = None,
 ) -> Dict[str, Any]:
+    from src.llamaindex_crew.config import ConfigLoader
+    from src.llamaindex_crew.utils.llm_config import user_llm_context
+    fallback_config = ConfigLoader.load()
+    if job_db:
+        ctx = user_llm_context(job_id, job_db, fallback_config)
+    else:
+        from contextlib import nullcontext
+        ctx = nullcontext(fallback_config)
+    with ctx:
+        return _run_refactor_job_impl(
+            job_id=job_id,
+            workspace_path=workspace_path,
+            source_path=source_path,
+            target_stack=target_stack,
+            tech_preferences=tech_preferences,
+            devops_instructions=devops_instructions,
+            job_db=job_db,
+            progress_callback=progress_callback,
+        )
+
+
+def _run_refactor_job_impl(
+    job_id: str,
+    workspace_path: str,
+    source_path: str,
+    target_stack: str,
+    tech_preferences: str = "",
+    devops_instructions: str = "",
+    job_db: Optional[object] = None,
+    progress_callback: Optional[Callable] = None,
+) -> Dict[str, Any]:
     """
     Main entry point for running a refactor job.
 

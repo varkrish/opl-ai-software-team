@@ -270,6 +270,15 @@ def _is_import_mode_recommended_error(exc: BaseException) -> bool:
 
 def run_job_async(job_id: str, vision: str, job_config: SecretConfig = None, resume: bool = False):
     """Run workflow in a separate thread with job-specific workspace"""
+    if job_config is None:
+        job_config = config
+    from src.llamaindex_crew.utils.llm_config import user_llm_context
+    with user_llm_context(job_id, job_db, job_config):
+        return _run_job_async_impl(job_id, vision, job_config, resume)
+
+
+def _run_job_async_impl(job_id: str, vision: str, job_config: SecretConfig = None, resume: bool = False):
+    """Implementation of run_job_async"""
     import traceback
     import logging
     
@@ -880,18 +889,36 @@ def _run_repomix(github_url: str, job_workspace: Path, job_id: str) -> Optional[
 def _clone_github_repo(github_url: str, target_dir: Path, job_id: str) -> Optional[Dict[str, Any]]:
     """
     Clone a GitHub repository directly into the target directory.
-    Delegates to the unified git tool's clone implementation.
+    Uses the job owner's stored GitHub PAT (or GITHUB_TOKEN env) for private repos.
 
     Returns dict with metadata or None on failure.
     """
+    import os
+
+    from crew_studio.github_client import authenticated_clone_url
     from llamaindex_crew.tools.git_tools import clone_repository_into_directory
 
     clean_url = github_url.strip().rstrip('/')
     parts = clean_url.split('/')
     repo_name = '/'.join(parts[-2:]) if len(parts) >= 2 else parts[-1]
 
+    clone_url = clean_url
+    if _is_github_url(clean_url):
+        token = None
+        job = job_db.get_job(job_id)
+        owner_id = job.get("owner_id") if job else None
+        if owner_id:
+            cfg = job_db.get_github_config(owner_id)
+            if cfg:
+                token = cfg.get("token")
+        if not token:
+            token = os.getenv("GITHUB_TOKEN", "").strip() or None
+        if token:
+            git_url = clean_url if clean_url.endswith(".git") else f"{clean_url}.git"
+            clone_url = authenticated_clone_url(git_url, token)
+
     logger.info("Cloning GitHub repo: %s → %s", repo_name, target_dir)
-    result_msg = clone_repository_into_directory(clean_url, target_dir)
+    result_msg = clone_repository_into_directory(clone_url, target_dir)
 
     if "✅" in result_msg:
         # Extract file count from message like "✅ Cloned ... — 42 files copied"
@@ -1056,24 +1083,32 @@ def create_job():
     mode = 'build'
     
     metadata = {}
+    team_id = None
     if request.content_type and 'multipart/form-data' in request.content_type:
         vision = request.form.get('vision', '')
         backend_name = request.form.get('backend', 'opl-ai-team')
         # GitHub URLs can come as repeated form fields
         github_urls = request.form.getlist('github_urls')
         mode = request.form.get('mode', 'build')
+        team_id = request.form.get('team_id') or None
         raw_meta = request.form.get('metadata', '{}')
         try:
             metadata = json.loads(raw_meta) if raw_meta else {}
         except (json.JSONDecodeError, TypeError):
             metadata = {}
+        auto_approve_val = request.form.get('auto_approve_plan')
+        if auto_approve_val is not None:
+            metadata['auto_approve_plan'] = auto_approve_val.lower() == 'true'
     else:
         data = request.json or {}
         vision = data.get('vision', '')
         backend_name = data.get('backend', 'opl-ai-team')
         github_urls = data.get('github_urls', [])
         mode = data.get('mode', 'build')
+        team_id = data.get('team_id') or None
         metadata = data.get('metadata', {})
+        if 'auto_approve_plan' in data:
+            metadata['auto_approve_plan'] = bool(data['auto_approve_plan'])
     
     # Validate backend
     try:
@@ -1526,6 +1561,81 @@ def get_job_tasks(job_id):
     return jsonify({
         'total_tasks': len(tasks),
         'tasks': tasks,
+    })
+
+
+@app.route('/api/jobs/<job_id>/tasks/granular', methods=['GET'])
+def get_job_tasks_granular(job_id):
+    """Return all granular/subtasks from SQLite DB for the job."""
+    job = job_db.get_job(job_id)
+    if not job:
+        return jsonify({'error': 'Job not found'}), 404
+
+    workspace_path = Path(job['workspace_path'])
+    db_path = workspace_path / f"tasks_{job_id}.db"
+
+    if not db_path.exists():
+        db_files = list(workspace_path.glob('tasks_*.db'))
+        if db_files:
+            db_path = db_files[0]
+
+    tasks = []
+    if db_path.exists():
+        try:
+            import sqlite3
+            conn = sqlite3.connect(db_path)
+            cursor = conn.cursor()
+            
+            # Fetch all dependencies to map them to tasks
+            deps_map = {}
+            try:
+                cursor.execute("SELECT task_id, depends_on_task_id FROM task_dependencies")
+                for tid, dep_id in cursor.fetchall():
+                    if tid not in deps_map:
+                        deps_map[tid] = []
+                    deps_map[tid].append(dep_id)
+            except Exception as de:
+                print(f"Warning: could not read task dependencies: {de}")
+
+            # Fetch tasks
+            cursor.execute("""
+                SELECT task_id, phase, task_type, description, required, source, status, 
+                       created_at, updated_at, started_at, completed_at, error_message, metadata
+                FROM tasks
+                WHERE project_id = ?
+                ORDER BY created_at ASC
+            """, (job_id,))
+            for row in cursor.fetchall():
+                meta_val = None
+                if row[12]:
+                    try:
+                        meta_val = json.loads(row[12])
+                    except Exception:
+                        meta_val = row[12]
+                tasks.append({
+                    'task_id': row[0],
+                    'phase': row[1],
+                    'task_type': row[2],
+                    'description': row[3],
+                    'required': bool(row[4]),
+                    'source': row[5],
+                    'status': row[6],
+                    'created_at': row[7],
+                    'updated_at': row[8],
+                    'started_at': row[9],
+                    'completed_at': row[10],
+                    'error_message': row[11],
+                    'metadata': meta_val,
+                    'dependencies': deps_map.get(row[0], [])
+                })
+            conn.close()
+        except Exception as e:
+            print(f"Warning: could not read task DB for granular tasks: {e}")
+            return jsonify({'error': f"Could not read task DB: {e}"}), 500
+
+    return jsonify({
+        'total_tasks': len(tasks),
+        'tasks': tasks
     })
 
 

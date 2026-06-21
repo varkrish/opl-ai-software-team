@@ -423,21 +423,19 @@ class SoftwareDevWorkflow:
     def _plan_review_enabled(self) -> bool:
         """Return True when the review gate should activate for this job.
 
-        Disabled when:
-        - plan_review.enabled is False in config (default), OR
-        - the job metadata carries auto_approve_plan=True (per-job override set
-          by the UI when the user has auto-approve turned on).
+        Respects job-specific metadata override if defined, else falls back to server config.
         """
         metadata = self._load_job_metadata()
-        if metadata.get("auto_approve_plan"):
-            return False
+        auto_approve = metadata.get("auto_approve_plan")
+        if auto_approve is not None:
+            return not bool(auto_approve)
         pr_cfg = getattr(self.config, "plan_review", None) if self.config else None
         return bool(getattr(pr_cfg, "enabled", False))
 
     def _load_plan_artifacts(self) -> dict[str, str]:
         """Read planning artifacts from workspace for plan review."""
         artifacts: dict[str, str] = {}
-        for name in ("user_stories.md", "design_spec.md", "tech_stack.md", "requirements.md"):
+        for name in ("user_stories.md", "design_spec.md", "tech_stack.md", "implementation_plan.md", "requirements.md"):
             p = self.workspace_path / name
             if p.exists():
                 try:

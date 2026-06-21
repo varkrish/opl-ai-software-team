@@ -6,7 +6,9 @@ Supports multiple OpenAI-compatible providers.
 """
 import logging
 import socket
-from typing import Optional, Callable
+import threading
+from contextlib import contextmanager
+from typing import Optional, Callable, Any
 from llama_index.core.llms import LLM, LLMMetadata, ChatMessage, ChatResponse, CompletionResponse
 from llama_index.core.llms.callbacks import llm_chat_callback, llm_completion_callback
 from llama_index.llms.ollama import Ollama
@@ -453,6 +455,48 @@ class GenericLlamaLLM(LLM):
         raise NotImplementedError("Async streaming not implemented in generic wrapper")
 
 
+_thread_config = threading.local()
+
+
+def set_thread_config(config: SecretConfig) -> None:
+    """Set the LLM config override for the current thread."""
+    _thread_config.config = config
+
+
+def clear_thread_config() -> None:
+    """Clear the thread-local LLM config override."""
+    _thread_config.config = None
+
+
+@contextmanager
+def user_llm_context(job_id: str, job_db: Any, fallback_config: SecretConfig):
+    """Resolves and merges user-specific LLM config for the job owner, scoping it to this thread."""
+    job = job_db.get_job(job_id)
+    owner_id = job.get("owner_id") if job else None
+    if owner_id:
+        user_llm = job_db.get_llm_config(owner_id)
+        if user_llm:
+            from copy import deepcopy
+            merged = deepcopy(fallback_config)
+            merged.llm.api_key = user_llm["api_key"]
+            merged.llm.api_base_url = user_llm["api_base_url"]
+            merged.llm.model_manager = user_llm["model_manager"]
+            merged.llm.model_worker = user_llm["model_worker"]
+            merged.llm.model_reviewer = user_llm["model_reviewer"]
+            set_thread_config(merged)
+            try:
+                yield merged
+            finally:
+                clear_thread_config()
+            return
+
+    set_thread_config(fallback_config)
+    try:
+        yield fallback_config
+    finally:
+        clear_thread_config()
+
+
 def get_llm_for_agent(agent_type: str = "worker", config: Optional[SecretConfig] = None, budget_callback: Optional[Callable] = None):
     """
     Get LLM for specific agent type
@@ -465,6 +509,8 @@ def get_llm_for_agent(agent_type: str = "worker", config: Optional[SecretConfig]
     Returns:
         Configured LLM instance
     """
+    if config is None:
+        config = getattr(_thread_config, 'config', None)
     if config is None:
         from ..config import ConfigLoader
         config = ConfigLoader.load()
@@ -536,7 +582,22 @@ def _get_production_llm(agent_type: str, config: SecretConfig, budget_callback: 
             "maas" in config.llm.api_base_url.lower()
             or "redhatworkshops" in config.llm.api_base_url.lower()
         )
-        if is_maas:
+        # Check database for custom model context window mapping
+        db_model_ctx = None
+        try:
+            import os
+            from pathlib import Path
+            from crew_studio.job_database import JobDatabase
+            db_path = Path(os.getenv("JOB_DB_PATH", "./crew_jobs.db"))
+            job_db = JobDatabase(db_path)
+            db_model_ctx = job_db.get_model_context_window(model)
+        except Exception as e:
+            logger.debug("Could not query model context window from database: %s", e)
+
+        if db_model_ctx is not None:
+            llm_kwargs["context_window"] = db_model_ctx
+            logger.info("   Resolved context window from database: %d", db_model_ctx)
+        elif is_maas:
             m = model.lower()
             if "deepseek-r1-distill" in m or "deepseek-r1" in m:
                 # 16 384-token context — cap output to 6 144 so input can use up to 10 240
@@ -561,12 +622,25 @@ def _get_production_llm(agent_type: str, config: SecretConfig, budget_callback: 
         else:
             # Non-MaaS: set context window based on model info
             m = model.lower()
-            if "codellama" in m or "phi-4" in m:
+            if "codellama" in m:
                 llm_kwargs["context_window"] = 4_000
+            elif "phi-4" in m:
+                llm_kwargs["context_window"] = 16_384
             elif "qwen3" in m or "llama-scout" in m:
                 llm_kwargs["context_window"] = 400_000
+            elif "gpt-4o" in m or "gpt-4-turbo" in m:
+                llm_kwargs["context_window"] = 128_000
+            elif "claude-3-5" in m or "claude-3" in m:
+                llm_kwargs["context_window"] = 200_000
+            elif "gemini" in m:
+                llm_kwargs["context_window"] = 1_000_000
+            elif "llama-3.1" in m or "llama-3.2" in m:
+                llm_kwargs["context_window"] = 128_000
+            elif "deepseek-r1" in m or "deepseek-v3" in m:
+                llm_kwargs["context_window"] = 128_000
             else:
-                llm_kwargs["context_window"] = 4_000_000
+                # Sensible default context window for custom models
+                llm_kwargs["context_window"] = 128_000
             
         return GenericLlamaLLM(**llm_kwargs)
     

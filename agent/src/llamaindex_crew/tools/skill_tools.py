@@ -160,6 +160,7 @@ def prefetch_skills(
                     "skill_name": skill_name,
                     "query": q,
                     "score": r.get("score"),
+                    "content": r["content"],
                 })
         except Exception:
             logger.warning("prefetch_skills: query %r failed", q, exc_info=True)

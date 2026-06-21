@@ -168,6 +168,38 @@ def run_refinement(
     scope: Optional[str] = None,
     refinement_kind: Optional[str] = None,
 ) -> Dict[str, Any]:
+    from src.llamaindex_crew.config import ConfigLoader
+    from src.llamaindex_crew.utils.llm_config import user_llm_context
+    fallback_config = ConfigLoader.load()
+    with user_llm_context(job_id, job_db, fallback_config):
+        return _run_refinement_impl(
+            job_id=job_id,
+            workspace_path=workspace_path,
+            prompt=prompt,
+            refinement_id=refinement_id,
+            job_db=job_db,
+            progress_callback=progress_callback,
+            file_path=file_path,
+            previous_status=previous_status,
+            enhanced=enhanced,
+            scope=scope,
+            refinement_kind=refinement_kind,
+        )
+
+
+def _run_refinement_impl(
+    job_id: str,
+    workspace_path: Path,
+    prompt: str,
+    refinement_id: str,
+    job_db: Any,
+    progress_callback: Callable[[str, int, Optional[str]], None],
+    file_path: Optional[str] = None,
+    previous_status: str = "completed",
+    enhanced: bool = False,
+    scope: Optional[str] = None,
+    refinement_kind: Optional[str] = None,
+) -> Dict[str, Any]:
     """
     Run refinement: snapshot, build context, run RefinementAgent, update DB.
 

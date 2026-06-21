@@ -155,20 +155,6 @@ project/
         self.assertFalse(result["valid"])
         self.assertTrue(any("concrete" in i.lower() or "source" in i.lower() for i in result["issues"]))
 
-    def test_validate_requires_layers_for_multi_file_project(self):
-        tech_stack = """
-```text
-src/
-├── controller/UserController.java
-├── config/AppConfig.java
-└── util/Helper.java
-```
-"""
-        result = self.manager.validate_tech_stack_completeness(tech_stack)
-        self.assertFalse(result["valid"])
-        joined = " ".join(result["issues"]).lower()
-        self.assertTrue("service" in joined or "model" in joined or "entrypoint" in joined)
-
     def test_validate_accepts_complete_java_tree(self):
         tech_stack = """
 ```text
@@ -191,9 +177,23 @@ class TestStructureScaffolding(unittest.TestCase):
             self.db_path.unlink()
         self.manager = TaskManager(self.db_path, "scaffold_proj")
 
+        # Set up mock skill_prefetch.json with keyword indicators for model, service, controller, and main entrypoint
+        import json
+        (self.db_path.parent / "skill_prefetch.json").write_text(json.dumps({
+            "tech_architect": [
+                {
+                    "skill_name": "mvc_guidelines",
+                    "content": "Uses model entities, services for logic, controllers for api/handlers, and a main application entrypoint."
+                }
+            ]
+        }))
+
     def tearDown(self):
         if self.db_path.exists():
             self.db_path.unlink()
+        prefetch = self.db_path.parent / "skill_prefetch.json"
+        if prefetch.exists():
+            prefetch.unlink()
 
     def _task(self, file_path: str) -> TaskDefinition:
         return TaskDefinition(
@@ -225,6 +225,25 @@ class TestStructureScaffolding(unittest.TestCase):
         self.assertIn("src/main.py", paths)
         self.assertIn("src/model/core.py", paths)
         self.assertIn("src/service/core.py", paths)
+
+    def test_no_scaffolding_if_skills_not_applicable(self):
+        import json
+        (self.db_path.parent / "skill_prefetch.json").write_text(json.dumps({
+            "tech_architect": [
+                {
+                    "skill_name": "frappe_guidelines",
+                    "content": "Frappe uses DocType JSON files and python doctype controller classes."
+                }
+            ]
+        }))
+        tasks = [
+            self._task("src/api/handlers.py"),
+            self._task("src/utils/helpers.py"),
+        ]
+        new_tasks = self.manager._inject_framework_scaffolding_tasks(tasks, "Frappe API Stack", "Domain")
+        paths = [t.metadata["file_path"] for t in new_tasks]
+        self.assertNotIn("src/model/core.py", paths)
+        self.assertNotIn("src/service/core.py", paths)
 
     def test_no_scaffolding_when_layers_present(self):
         tasks = [

@@ -490,6 +490,7 @@ class TaskManager:
         1: "data/model/persistence",
         3: "service/business-logic",
         5: "API/controller/handler",
+        8: "application entrypoint",
     }
     _LAYER_DIRECTORY_SEGMENTS = frozenset({
         "model", "models", "entity", "entities", "schema", "schemas", "domain",
@@ -538,62 +539,86 @@ class TaskManager:
                 return True
         return False
 
+    def _extract_structure_paths(self, tech_stack_content: str) -> List[str]:
+        """Extract all file paths and raw directory names from the tech stack content."""
+        file_entries = self._extract_files_with_descriptions(tech_stack_content)
+        paths = [f["path"] for f in file_entries]
+
+        # Also parse raw block/tree lines to catch directories (e.g. models/, controllers/)
+        regions = []
+        current_lines = []
+        in_block = False
+        for line in tech_stack_content.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("```"):
+                if current_lines:
+                    regions.append("\n".join(current_lines))
+                    current_lines = []
+                in_block = not in_block
+                continue
+            current_lines.append(line)
+        if current_lines:
+            regions.append("\n".join(current_lines))
+
+        TREE_CHARS_RE = re.compile(r'[├└│─]')
+        for block in regions:
+            if not TREE_CHARS_RE.search(block):
+                continue
+            for line in block.splitlines():
+                entry_match = re.search(
+                    r'[├└│─\s]*([a-zA-Z0-9_.\-][a-zA-Z0-9_/.\-]*/?)(?:\s+#\s*(.*))?',
+                    line,
+                )
+                if entry_match:
+                    name = entry_match.group(1).strip()
+                    paths.append(name.rstrip('/'))
+        return list(set(paths))
+
     @classmethod
-    def _structure_validation_issues(cls, files: List[str]) -> List[str]:
-        """Technology-agnostic checks on enumerated file paths."""
-        issues: List[str] = []
-        src_files = [f for f in files if cls._is_source_file_path(f)]
+    def _tier_keywords_in_text(cls, text: str, tier: int) -> bool:
+        """Check if any keywords of the given tier are present in the text with word boundaries."""
+        keywords = cls._FILE_TIERS.get(tier, [])
+        for kw in keywords:
+            # Word boundary matching
+            pattern = r'\b' + re.escape(kw) + r'\b'
+            if re.search(pattern, text, re.IGNORECASE):
+                return True
+        return False
 
-        if len(src_files) == 0:
-            issues.append(
-                "No concrete source files found. You MUST enumerate concrete filenames "
-                "with extensions, not just folders."
-            )
-        elif len(src_files) < 2:
-            issues.append(
-                f"Found only {len(src_files)} source file(s). Ensure all concrete files "
-                "are enumerated, not just folders."
-            )
+    def _is_tier_applicable(self, tier: int, workspace_path: Path, tech_stack_content: Optional[str] = None) -> bool:
+        """Determine if a directory/layer tier is applicable to this project based on tech stack or skills."""
+        # 1. Parse tech stack (content passed or read from disk)
+        if not tech_stack_content:
+            tech_stack_file = workspace_path / "tech_stack.md"
+            if tech_stack_file.exists():
+                try:
+                    tech_stack_content = tech_stack_file.read_text(encoding="utf-8")
+                except Exception:
+                    pass
 
-        config_files = [
-            f for f in files
-            if Path(f).name.lower() in cls._CONFIG_ARTIFACT_NAMES
-            or (cls._classify_file_tier(f) == 0 and not cls._is_source_file_path(f))
-        ]
-        if len(src_files) >= 2 and len(config_files) > len(src_files):
-            issues.append(
-                "Too many config/build files relative to source files. Enumerate concrete "
-                "implementation files for each architectural layer your design requires."
-            )
+        if tech_stack_content:
+            paths = self._extract_structure_paths(tech_stack_content)
+            if self._tier_keywords_present(paths, tier):
+                return True
 
-        if len(src_files) >= 3:
-            parent_dirs = {str(Path(f).parent) for f in src_files if "/" in f}
-            if len(parent_dirs) < 2:
-                issues.append(
-                    "Source files are not spread across layers. List files in separate "
-                    "directories (data, service, API, etc.) per your framework conventions."
-                )
+        # 2. Check skill prefetch file
+        prefetch_file = workspace_path / "skill_prefetch.json"
+        if prefetch_file.exists():
+            try:
+                data = json.loads(prefetch_file.read_text(encoding="utf-8"))
+                all_entries = []
+                if isinstance(data, dict):
+                    for role_entries in data.values():
+                        if isinstance(role_entries, list):
+                            all_entries.extend(role_entries)
+                for entry in all_entries:
+                    content = entry.get("content", "")
+                    if content and self._tier_keywords_in_text(content, tier):
+                        return True
+            except Exception as e:
+                logger.warning("Error reading skill_prefetch.json: %s", e)
 
-            if not cls._has_entrypoint_in_paths(files):
-                issues.append(
-                    "Missing entrypoint/bootstrap file. Enumerate the application main "
-                    "file using your framework's standard naming."
-                )
-
-            for tier, label in cls._STRUCTURE_LAYER_TIERS.items():
-                if not cls._tier_keywords_present(src_files, tier):
-                    issues.append(
-                        f"Missing {label} layer file. Enumerate at least one concrete "
-                        "file for this layer following your framework conventions."
-                    )
-
-        test_files = [f for f in files if "test" in f.lower() or "spec" in f.lower()]
-        if len(src_files) > 2 and len(test_files) == 0:
-            issues.append(
-                "No test files found. You MUST enumerate matching unit test files for domain classes."
-            )
-
-        return issues
+        return False
 
     @staticmethod
     def _default_entrypoint_filename(ext: str) -> str:
@@ -679,16 +704,24 @@ class TaskManager:
                 paths.append(rel)
 
         gaps: List[str] = []
-        if not self._has_entrypoint_in_paths(paths):
-            gaps.append(
-                "Create the missing application entrypoint/bootstrap file following "
-                "your tech stack conventions."
-            )
         for tier, label in self._STRUCTURE_LAYER_TIERS.items():
-            if not self._tier_keywords_present(paths, tier):
-                gaps.append(
-                    f"Create missing {label} layer file(s) following your tech stack conventions."
-                )
+            if tier == 8:
+                if self._has_entrypoint_in_paths(paths):
+                    continue
+            else:
+                if self._tier_keywords_present(paths, tier):
+                    continue
+
+            if self._is_tier_applicable(tier, workspace):
+                if tier == 8:
+                    gaps.append(
+                        "Create the missing application entrypoint/bootstrap file following "
+                        "your tech stack conventions."
+                    )
+                else:
+                    gaps.append(
+                        f"Create missing {label} layer file(s) following your tech stack conventions."
+                    )
         return gaps
 
     def validate_tech_stack_completeness(self, tech_stack_content: str) -> Dict[str, Any]:
@@ -1048,7 +1081,78 @@ class TaskManager:
                          self._classify_file_tier((t.metadata or {}).get("file_path", ""))
                          for t in all_tasks
                      )))
+        
+        self.generate_implementation_plan_file(all_tasks)
         return all_tasks
+
+    def generate_implementation_plan_file(self, tasks: List[TaskDefinition]) -> None:
+        """Generate implementation_plan.md in the project workspace."""
+        plan_path = self.db_path.parent / "implementation_plan.md"
+        
+        # If the file already exists (e.g. written by the Tech Architect agent),
+        # we preserve its content and optionally append the deconstructed file task list
+        # as a reference appendix if not already present.
+        existing_content = ""
+        if plan_path.exists():
+            try:
+                existing_content = plan_path.read_text(encoding="utf-8")
+            except Exception:
+                pass
+                
+        # If it has a rich agent-written implementation plan, we preserve it.
+        # We append the detailed tasks appendix at the end if it doesn't already contain it.
+        if existing_content and "### Appendix: Deconstructed Task List" in existing_content:
+            # Already has our appendix or was generated by this function previously.
+            return
+            
+        content = []
+        if existing_content:
+            content.append(existing_content)
+            content.append("\n\n---\n")
+            content.append("### Appendix: Deconstructed Task List\n")
+            content.append("This appendix lists the deconstructed code-generation and validation tasks registered for execution.\n")
+        else:
+            content.append("# Project Implementation Plan\n")
+            content.append("This implementation plan details the deconstructed tasks, file creation order, and verification steps necessary to implement the project requirements.\n")
+            
+        content.append("#### Task Summary\n")
+        content.append(f"Total registered tasks: **{len(tasks)}**\n")
+        
+        # Group tasks by phase or type
+        phases = {}
+        for t in tasks:
+            phase_name = t.phase.replace("_", " ").title()
+            if phase_name not in phases:
+                phases[phase_name] = []
+            phases[phase_name].append(t)
+            
+        for phase_name, phase_tasks in phases.items():
+            content.append(f"##### Phase: {phase_name}\n")
+            for t in phase_tasks:
+                file_path = (t.metadata or {}).get("file_path")
+                file_desc = (t.metadata or {}).get("file_description", "")
+                desc_str = f" (`{file_path}`)" if file_path else ""
+                desc_detail = f" - *{file_desc}*" if file_desc else ""
+                
+                content.append(f"- **{t.task_id}**: {t.description}{desc_str}{desc_detail}")
+                if t.dependencies:
+                    deps_str = ", ".join(t.dependencies)
+                    content.append(f"  *Dependencies: {deps_str}*")
+            content.append("")
+            
+        if not existing_content:
+            content.append("## Verification Steps\n")
+            content.append("1. **Syntax Checks**: Verify that all files parse correctly without syntax errors.")
+            content.append("2. **Import Integrity**: Check that there are no broken relative or module imports.")
+            content.append("3. **API Contract Verification**: Ensure routes conform to the designated contract.")
+            content.append("4. **Functional Testing**: Run pytest or equivalent tests where configured.")
+            content.append("\n")
+        
+        try:
+            plan_path.write_text("\n".join(content), encoding="utf-8")
+            logger.info("Generated implementation_plan.md at %s", plan_path)
+        except Exception as e:
+            logger.warning("Could not write implementation_plan.md: %s", e)
 
     def _inject_init_py_tasks(self, tasks: List[TaskDefinition]) -> List[TaskDefinition]:
         """Auto-inject ``__init__.py`` creation tasks for Python package directories.
@@ -1122,10 +1226,16 @@ class TaskManager:
             return tasks
 
         needed_tiers: List[int] = []
-        if not self._has_entrypoint_in_paths(list(existing_paths)):
-            needed_tiers.append(8)
+        workspace_path = self.db_path.parent
         for tier in self._STRUCTURE_LAYER_TIERS:
-            if not self._tier_keywords_present(list(existing_paths), tier):
+            if tier == 8:
+                if self._has_entrypoint_in_paths(list(existing_paths)):
+                    continue
+            else:
+                if self._tier_keywords_present(list(existing_paths), tier):
+                    continue
+
+            if self._is_tier_applicable(tier, workspace_path, tech_stack_content):
                 needed_tiers.append(tier)
 
         for tier in needed_tiers:
@@ -1755,9 +1865,10 @@ class TaskManager:
                 f"Implement the feature: **{feature_name}**\n"
                 "Write ALL production-quality files required to make this feature work.\n\n"
                 "IMPORTANT INSTRUCTION:\n"
-                "If this feature requires data persistence, create entity/model classes. "
-                "If it requires business logic, create service classes. "
-                "Create ALL layers (model, service, controller) needed."
+                "Refer to the PROJECT FILE TREE and tech stack below for structural guidance. "
+                "Only create the layers, directories, or modules that are defined in the tech stack or are standard "
+                "conventions for the framework. Do NOT unconditionally create models, services, or controllers "
+                "unless they are explicitly expected by this project."
             )
             if existing_files:
                 parts.append("\nExisting files in workspace:")

@@ -192,6 +192,16 @@ class JobDatabase:
                 )
             """)
 
+            # Per-user GitHub configurations (PAT encrypted at rest)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS github_configs (
+                    owner_id TEXT PRIMARY KEY,
+                    github_username TEXT,
+                    encrypted_token TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+            """)
+
             # Generic key-value store for system-level settings
             # (e.g. auto-generated encryption keys)
             conn.execute("""
@@ -201,6 +211,97 @@ class JobDatabase:
                     created_at TEXT NOT NULL
                 )
             """)
+
+            # Per-user LLM configurations (api_key encrypted at rest)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS user_llm_configs (
+                    owner_id TEXT PRIMARY KEY,
+                    api_base_url TEXT NOT NULL,
+                    encrypted_key TEXT NOT NULL,
+                    model_manager TEXT NOT NULL DEFAULT 'gpt-4o-mini',
+                    model_worker TEXT NOT NULL DEFAULT 'gpt-4o-mini',
+                    model_reviewer TEXT NOT NULL DEFAULT 'gpt-4o-mini',
+                    updated_at TEXT NOT NULL
+                )
+            """)
+
+            # Model context windows dictionary (maps model substrings to context sizes)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS model_context_windows (
+                    model_pattern TEXT PRIMARY KEY,
+                    context_window INTEGER NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+            """)
+
+            # Pre-populate defaults
+            now = datetime.now().isoformat()
+            default_models = [
+                # OpenAI
+                ("gpt-4o-mini", 128000),
+                ("gpt-4o", 128000),
+                ("gpt-4-turbo", 128000),
+                ("gpt-4", 8192),
+                ("gpt-3.5", 16384),
+                # Anthropic (standard & OpenRouter)
+                ("claude-3.5", 200000),
+                ("claude-3-5", 200000),
+                ("claude-3", 200000),
+                # Google Gemini (standard & OpenRouter)
+                ("gemini-2.0", 1000000),
+                ("gemini-1.5", 1000000),
+                ("gemini-pro", 2000000),
+                ("gemini-flash", 1000000),
+                # DeepSeek
+                ("deepseek-r1", 128000),
+                ("deepseek-v3", 128000),
+                ("deepseek-chat", 128000),
+                ("deepseek-coder", 128000),
+                ("deepseek", 128000),
+                # Meta Llama (standard & OpenRouter)
+                ("llama-3.1", 128000),
+                ("llama-3.2", 128000),
+                ("llama-3", 8192),
+                ("llama3", 8192),
+                ("llama-scout", 400000),
+                ("llama-nemotron", 10240),
+                ("nemotron-3-super", 1000000),
+                ("nemotron-3", 1000000),
+                # IBM Granite
+                ("granite-3", 128000),
+                ("granite3", 128000),
+                # Alibaba Qwen
+                ("qwen-2.5", 128000),
+                ("qwen-2", 32768),
+                ("qwen3-coder", 400000),
+                ("qwen3", 400000),
+                # Mistral / Mixtral
+                ("mixtral-8x22b", 64000),
+                ("mixtral-8x7b", 32768),
+                ("pixtral", 128000),
+                ("mistral-large", 128000),
+                ("mistral", 32768),
+                ("mixtral", 32768),
+                # Cohere
+                ("command-r-plus", 128000),
+                ("command-r", 128000),
+                # Microsoft Phi
+                ("phi-4", 16384),
+                ("phi-3", 128000),
+                ("codellama", 4000),
+                # Common OpenRouter Free Models
+                ("gemma-2", 8192),
+                ("gemma", 8192),
+                ("openchat", 8192),
+                ("mythomax", 4096),
+                ("hermes-3", 128000),
+                ("zephyr", 16384)
+            ]
+            for pattern, window in default_models:
+                conn.execute("""
+                    INSERT OR IGNORE INTO model_context_windows (model_pattern, context_window, updated_at)
+                    VALUES (?, ?, ?)
+                """, (pattern, window, now))
     
     def create_job(self, job_id: str, vision: str, workspace_path: str,
                    metadata: Optional[Dict[str, Any]] = None,
@@ -1121,10 +1222,14 @@ class JobDatabase:
     def save_jira_config(self, owner_id: str, jira_base_url: str,
                          jira_email: str, api_token: str) -> None:
         """Encrypt and persist Jira credentials for owner_id."""
+        if not owner_id:
+            raise ValueError("owner_id is required to save Jira config")
         f = self._get_fernet()
         encrypted = f.encrypt(api_token.encode()).decode()
         now = datetime.now().isoformat()
         with self._get_conn() as conn:
+            # Remove legacy rows saved before auth supplied a stable owner_id
+            conn.execute("DELETE FROM jira_configs WHERE owner_id IS NULL")
             conn.execute("""
                 INSERT INTO jira_configs (owner_id, jira_base_url, jira_email, encrypted_token, updated_at)
                 VALUES (?, ?, ?, ?, ?)
@@ -1137,12 +1242,28 @@ class JobDatabase:
 
     def get_jira_config(self, owner_id: str) -> Optional[Dict[str, str]]:
         """Return Jira config for owner_id with the token decrypted, or None."""
+        if not owner_id:
+            return None
         with self._get_conn() as conn:
             row = conn.execute(
                 "SELECT jira_base_url, jira_email, encrypted_token, updated_at "
                 "FROM jira_configs WHERE owner_id = ?",
                 (owner_id,)
             ).fetchone()
+            if not row:
+                # Migrate a legacy NULL-owner row (saved before sub claim was wired)
+                legacy = conn.execute(
+                    "SELECT rowid, jira_base_url, jira_email, encrypted_token, updated_at "
+                    "FROM jira_configs WHERE owner_id IS NULL "
+                    "ORDER BY updated_at DESC LIMIT 1"
+                ).fetchone()
+                if legacy:
+                    conn.execute(
+                        "UPDATE jira_configs SET owner_id = ? WHERE rowid = ?",
+                        (owner_id, legacy["rowid"]),
+                    )
+                    conn.execute("DELETE FROM jira_configs WHERE owner_id IS NULL")
+                    row = legacy
         if not row:
             return None
         f = self._get_fernet()
@@ -1164,3 +1285,142 @@ class JobDatabase:
                 "DELETE FROM jira_configs WHERE owner_id = ?", (owner_id,)
             )
         return cursor.rowcount > 0
+
+    # ------------------------------------------------------------------
+    # GitHub configuration — encrypted per-user storage
+    # ------------------------------------------------------------------
+
+    def save_github_config(self, owner_id: str, token: str,
+                           github_username: str = "") -> None:
+        """Encrypt and persist GitHub PAT for owner_id."""
+        f = self._get_fernet()
+        encrypted = f.encrypt(token.encode()).decode()
+        now = datetime.now().isoformat()
+        with self._get_conn() as conn:
+            conn.execute("""
+                INSERT INTO github_configs (owner_id, github_username, encrypted_token, updated_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(owner_id) DO UPDATE SET
+                    github_username = excluded.github_username,
+                    encrypted_token = excluded.encrypted_token,
+                    updated_at = excluded.updated_at
+            """, (owner_id, github_username, encrypted, now))
+
+    def get_github_config(self, owner_id: str) -> Optional[Dict[str, Any]]:
+        """Return GitHub config for owner_id (token decrypted). None if not configured."""
+        with self._get_conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM github_configs WHERE owner_id = ?", (owner_id,)
+            ).fetchone()
+        if not row:
+            return None
+        f = self._get_fernet()
+        return {
+            "owner_id": row["owner_id"],
+            "github_username": row["github_username"] or "",
+            "token": f.decrypt(row["encrypted_token"].encode()).decode(),
+            "updated_at": row["updated_at"],
+        }
+
+    def delete_github_config(self, owner_id: str) -> bool:
+        """Remove stored GitHub config for owner_id."""
+        with self._get_conn() as conn:
+            cursor = conn.execute(
+                "DELETE FROM github_configs WHERE owner_id = ?", (owner_id,)
+            )
+        return cursor.rowcount > 0
+
+    # ------------------------------------------------------------------
+    # LLM configuration — encrypted per-user storage
+    # ------------------------------------------------------------------
+
+    def save_llm_config(self, owner_id: str, api_base_url: str,
+                        api_key: str, model_manager: str = "gpt-4o-mini",
+                        model_worker: str = "gpt-4o-mini",
+                        model_reviewer: str = "gpt-4o-mini") -> None:
+        """Encrypt and persist LLM credentials for owner_id."""
+        f = self._get_fernet()
+        encrypted = f.encrypt(api_key.encode()).decode()
+        now = datetime.now().isoformat()
+        with self._get_conn() as conn:
+            conn.execute("""
+                INSERT INTO user_llm_configs (owner_id, api_base_url, encrypted_key, 
+                                            model_manager, model_worker, model_reviewer, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(owner_id) DO UPDATE SET
+                    api_base_url = excluded.api_base_url,
+                    encrypted_key = excluded.encrypted_key,
+                    model_manager = excluded.model_manager,
+                    model_worker = excluded.model_worker,
+                    model_reviewer = excluded.model_reviewer,
+                    updated_at = excluded.updated_at
+            """, (owner_id, api_base_url, encrypted, model_manager, model_worker, model_reviewer, now))
+
+    def get_llm_config(self, owner_id: str) -> Optional[Dict[str, str]]:
+        """Return LLM config for owner_id with the API key decrypted, or None."""
+        with self._get_conn() as conn:
+            row = conn.execute(
+                "SELECT api_base_url, encrypted_key, model_manager, model_worker, model_reviewer, updated_at "
+                "FROM user_llm_configs WHERE owner_id = ?",
+                (owner_id,)
+            ).fetchone()
+        if not row:
+            return None
+        f = self._get_fernet()
+        try:
+            api_key = f.decrypt(row["encrypted_key"].encode()).decode()
+        except Exception:
+            api_key = ""
+        return {
+            "api_base_url": row["api_base_url"],
+            "api_key": api_key,
+            "model_manager": row["model_manager"],
+            "model_worker": row["model_worker"],
+            "model_reviewer": row["model_reviewer"],
+            "updated_at": row["updated_at"],
+        }
+
+    def delete_llm_config(self, owner_id: str) -> bool:
+        """Remove stored LLM config for owner_id. Returns True if a row was deleted."""
+        with self._get_conn() as conn:
+            cursor = conn.execute(
+                "DELETE FROM user_llm_configs WHERE owner_id = ?", (owner_id,)
+            )
+        return cursor.rowcount > 0
+
+    # ------------------------------------------------------------------
+    # Model context windows dictionary (stores model token limits)
+    # ------------------------------------------------------------------
+
+    def get_model_context_window(self, model_name: str) -> Optional[int]:
+        """Query the model_context_windows table for a matching pattern using LIKE."""
+        if not model_name:
+            return None
+        with self._get_conn() as conn:
+            row = conn.execute("""
+                SELECT context_window 
+                FROM model_context_windows 
+                WHERE ? LIKE '%' || model_pattern || '%' 
+                ORDER BY length(model_pattern) DESC 
+                LIMIT 1
+            """, (model_name.lower(),)).fetchone()
+            return row["context_window"] if row else None
+
+    def save_model_context_window(self, model_pattern: str, context_window: int) -> None:
+        """Upsert a model pattern and its context window size."""
+        now = datetime.now().isoformat()
+        with self._get_conn() as conn:
+            conn.execute("""
+                INSERT OR REPLACE INTO model_context_windows (model_pattern, context_window, updated_at)
+                VALUES (?, ?, ?)
+            """, (model_pattern.lower(), context_window, now))
+
+    def delete_model_context_window(self, model_pattern: str) -> bool:
+        """Delete a model pattern entry. Returns True if a row was deleted."""
+        with self._get_conn() as conn:
+            cursor = conn.execute(
+                "DELETE FROM model_context_windows WHERE model_pattern = ?",
+                (model_pattern.lower(),)
+            )
+            return cursor.rowcount > 0
+
