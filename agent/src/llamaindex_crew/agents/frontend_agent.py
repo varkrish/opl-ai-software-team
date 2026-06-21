@@ -6,7 +6,7 @@ import logging
 from pathlib import Path
 from typing import Optional
 from .base_agent import BaseLlamaIndexAgent
-from ..tools import FileWriterTool, FileReaderTool, FileListTool, create_workspace_file_tools
+from ..tools import FileWriterTool, FileReaderTool, FileListTool, create_workspace_file_tools, append_tldr_tools
 from ..tools.tool_loader import load_tools
 from ..config import ConfigLoader
 from ..utils.prompt_loader import load_prompt
@@ -43,6 +43,7 @@ You create reusable components and ensure responsive design."""
         if workspace_path is not None:
             ws_tools = create_workspace_file_tools(Path(workspace_path))
             tools = [ws_tools[0], ws_tools[1], ws_tools[2]]
+            append_tldr_tools(tools, Path(workspace_path))
         else:
             tools = [FileWriterTool, FileReaderTool, FileListTool]
 

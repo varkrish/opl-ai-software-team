@@ -1640,6 +1640,24 @@ class SoftwareDevWorkflow:
                 logger.info("Resume: loaded agent_backstories.json")
             except Exception as e:
                 logger.warning("Resume: could not load agent_backstories.json: %s", e)
+
+    def _infer_resume_state_from_artifacts(self) -> Optional[ProjectState]:
+        """Infer the last completed planning phase from persisted workspace files."""
+        wp = self.workspace_path
+        try:
+            if (wp / "tech_stack.md").exists() and (wp / "tech_stack.md").read_text(
+                encoding="utf-8", errors="replace"
+            ).strip():
+                return ProjectState.DEVELOPMENT
+            if (wp / "design_spec.md").exists():
+                return ProjectState.TECH_ARCHITECT
+            if (wp / "user_stories.md").exists():
+                return ProjectState.DESIGNER
+            if (wp / "agent_backstories.json").exists():
+                return ProjectState.PRODUCT_OWNER
+        except Exception as e:
+            logger.warning("Resume: could not infer checkpoint from artifacts: %s", e)
+        return None
     
     def run_meta_phase(self, retry_count: int = 0) -> Dict[str, str]:
         """Run Meta phase to generate agent backstories"""
@@ -1949,27 +1967,51 @@ class SoftwareDevWorkflow:
             workspace_path=self.workspace_path,
         )
         
-        # Run tech architect agent
         ta_rag = get_phase_rag_context(
             self.document_indexer, "tech_architect", self.config,
             extra_query=(self.design_spec or "")[:1500],
         )
-        result = self.tech_architect_agent.run(
-            self.design_spec or "",
-            self.vision,
-            self.project_context,
-            reference_context=ta_rag,
-        )
         
-        # Fallback: if agent returned content but didn't call file_writer
-        _persist_phase_artifact(self.workspace_path, "tech_stack.md", result)
+        result = ""
+        max_attempts = 3
+        validation_msg = ""
         
-        # Read generated tech stack
-        tech_stack_file = self.workspace_path / "tech_stack.md"
-        if tech_stack_file.exists():
-            with open(tech_stack_file, 'r', encoding='utf-8') as f:
-                self.tech_stack = f.read()
+        for attempt in range(max_attempts):
+            if attempt == 0:
+                result = self.tech_architect_agent.run(
+                    self.design_spec or "",
+                    self.vision,
+                    self.project_context,
+                    reference_context=ta_rag,
+                )
+            else:
+                logger.info(f"🔄 Tech Architect retry attempt {attempt + 1}/{max_attempts}")
+                self._report_progress('tech_architect', 60 + attempt, f"Retrying tech stack definition (Attempt {attempt + 1})...")
+                result = str(self.tech_architect_agent.agent.chat(
+                    f"Your previous tech stack definition was incomplete. Please rewrite tech_stack.md addressing these issues:\n{validation_msg}"
+                ))
             
+            # Fallback: if agent returned content but didn't call file_writer
+            _persist_phase_artifact(self.workspace_path, "tech_stack.md", result)
+            
+            tech_stack_file = self.workspace_path / "tech_stack.md"
+            if tech_stack_file.exists():
+                with open(tech_stack_file, 'r', encoding='utf-8') as f:
+                    self.tech_stack = f.read()
+                    
+                validation_result = self.task_manager.validate_tech_stack_completeness(self.tech_stack)
+                if validation_result["valid"]:
+                    break
+                else:
+                    validation_msg = "\n".join(f"- {i}" for i in validation_result["issues"])
+                    logger.warning(f"Tech stack validation failed: {validation_msg}")
+                    # Only delete the file if there are more retries remaining,
+                    # so the last attempt's tech_stack.md is preserved and the
+                    # pipeline can always proceed to register_granular_tasks.
+                    if attempt < max_attempts - 1:
+                        tech_stack_file.unlink()
+        
+        if tech_stack_file.exists():
             # Validate tech stack coherence with vision
             _check_vision_coherence(self.vision, self.tech_stack, "tech_stack.md")
 
@@ -2224,6 +2266,11 @@ class SoftwareDevWorkflow:
                     break
 
                 if not file_path:
+                    self.task_manager.update_task_status(
+                        task.task_id,
+                        "completed",
+                        f"Feature implemented: {task.description or task.task_id}",
+                    )
                     break
 
                 full_path = self.workspace_path / file_path
@@ -2314,6 +2361,19 @@ class SoftwareDevWorkflow:
             self.task_manager.register_tasks_from_features(features)
             logger.info("📋 Registered %d BDD feature task(s) for development", len(features))
 
+        # Retry feature tasks stuck failed/in_progress from a prior interrupted run
+        for t in self.task_manager.get_incomplete_tasks():
+            if t.task_type == "feature" and t.status in (
+                TaskStatus.FAILED.value,
+                TaskStatus.IN_PROGRESS.value,
+                TaskStatus.CREATED.value,
+            ):
+                self.task_manager.update_task_status(
+                    t.task_id,
+                    TaskStatus.REGISTERED.value,
+                    "Reset for development retry",
+                )
+
         # Create backend dev agent
         backstory = self.agent_backstories.get('developer')
         self.dev_agent = DevAgent(
@@ -2324,6 +2384,8 @@ class SoftwareDevWorkflow:
 
         from ..tools.file_tools import set_allowed_file_paths
         allowed = self.task_manager.get_registered_file_paths()
+        # Allowlist is cleared inside _process_file_tasks so feature/multi-file tasks
+        # can write paths beyond the tech-stack manifest (e.g. Java classes under src/).
         set_allowed_file_paths(allowed, workspace=str(self.workspace_path))
         logger.info("🔒 file_writer allowlist enabled: %d paths (workspace=%s)", len(allowed), self.workspace_path)
 
@@ -2390,13 +2452,57 @@ class SoftwareDevWorkflow:
         # Handle any remaining feature tasks
         feature_tasks = [t for t in self.task_manager.get_incomplete_tasks() if t.task_type == "feature"]
         if feature_tasks:
+            from ..tools.file_tools import set_allowed_file_paths
+            set_allowed_file_paths(None, workspace=str(self.workspace_path))
             feature_names = [t.description for t in feature_tasks]
             try:
                 result = self.dev_agent.run(feature_names, self.tech_stack or "", self.user_stories)
                 self.task_manager.update_task_status_by_output(result)
+                for t in feature_tasks:
+                    if t.status not in (TaskStatus.COMPLETED.value, TaskStatus.SKIPPED.value):
+                        self.task_manager.update_task_status(
+                            t.task_id,
+                            "completed",
+                            f"Feature batch implemented: {t.description or t.task_id}",
+                        )
             except Exception as e:
                 logger.error("Feature implementation failed: %s", e)
+                for t in feature_tasks:
+                    if t.status not in (TaskStatus.COMPLETED.value, TaskStatus.SKIPPED.value):
+                        self.task_manager.mark_task_executed(
+                            t.task_id, TaskStatus.FAILED, str(e)[:500],
+                        )
         
+        # ── Post-development completeness check ──
+        try:
+            from ..tools.file_tools import set_allowed_file_paths
+            set_allowed_file_paths(None, workspace=str(self.workspace_path))
+
+            from ..orchestrator.code_validator import CodeCompletenessValidator
+            entry_check = CodeCompletenessValidator.validate_entrypoint(
+                self.workspace_path, self.tech_stack or ""
+            )
+            if not entry_check.get("valid", True):
+                missing = entry_check.get("missing_wiring") or []
+                detail = missing[0] if missing else "entrypoint wiring incomplete"
+                logger.warning("Post-dev gap-fill: entrypoint issue — %s", detail)
+                self.dev_agent.run(
+                    [f"Create or fix the application entrypoint/bootstrap file. {detail}"],
+                    self.tech_stack or "",
+                    self.user_stories,
+                )
+
+            structure_gaps = self.task_manager.detect_workspace_structure_gaps(self.workspace_path)
+            if structure_gaps:
+                logger.warning(
+                    "Post-dev gap-fill: %d structural gap(s) — %s",
+                    len(structure_gaps),
+                    structure_gaps[0][:120],
+                )
+                self.dev_agent.run(structure_gaps, self.tech_stack or "", self.user_stories)
+        except Exception as e:
+            logger.warning("Post-dev completeness check failed: %s", e)
+
         # ── Post-development validation suite (delegates to reusable method) ──
         report = self._run_validation_suite()
         report["tasks_processed"] = task_count
@@ -2623,10 +2729,16 @@ class SoftwareDevWorkflow:
         self._report_progress('devops', 93, "Creating Containerfiles and CI/CD pipelines...")
 
         if self.state_machine.get_current_state() != ProjectState.DEVOPS:
-            self.state_machine.transition(
-                ProjectState.DEVOPS,
-                TransitionContext(phase="devops", data={})
-            )
+            if self.state_machine.can_transition(ProjectState.DEVOPS):
+                self.state_machine.transition(
+                    ProjectState.DEVOPS,
+                    TransitionContext(phase="devops", data={})
+                )
+            else:
+                self.state_machine.force_transition(
+                    ProjectState.DEVOPS,
+                    TransitionContext(phase="devops", data={}),
+                )
 
         set_thread_workspace(str(self.workspace_path))
         set_allowed_file_paths(None, workspace=str(self.workspace_path))
@@ -2726,46 +2838,61 @@ class SoftwareDevWorkflow:
             if is_epic_job(job_metadata):
                 return self._run_epic_workflow(job_metadata, resume=resume)
 
+            resume_from_checkpoint = False
             if resume:
                 self._load_phase_artifacts()
                 current = self.state_machine.get_current_state()
-                if current in (ProjectState.COMPLETED, ProjectState.FAILED):
-                    logger.info("Resume: state already %s; running full workflow", current.value)
-                    resume = False
+                if current == ProjectState.COMPLETED:
+                    logger.info("Resume: state already completed; running full workflow")
+                elif current == ProjectState.FAILED:
+                    inferred = self._infer_resume_state_from_artifacts()
+                    if inferred:
+                        logger.info(
+                            "Resume: failed state — inferring checkpoint %s from workspace",
+                            inferred.value,
+                        )
+                        self.state_machine.force_transition(inferred)
+                        current = inferred
+                        resume_from_checkpoint = True
+                    else:
+                        logger.info("Resume: failed with no checkpoint artifacts; running full workflow")
                 else:
-                    try:
-                        start_idx = _RESUMABLE_PHASES.index(current)
-                    except ValueError:
-                        start_idx = 0
-                    logger.info("Resume: starting from phase %s (index %d)", current.value, start_idx)
-                    remaining = _RESUMABLE_PHASES[start_idx:]
-                    for phase_state in remaining:
-                        if phase_state == ProjectState.META:
-                            self.run_meta_phase()
-                        elif phase_state == ProjectState.PRODUCT_OWNER:
-                            self._run_phase_with_retry("product_owner", self.run_product_owner_phase)
-                        elif phase_state == ProjectState.DESIGNER:
-                            self._run_phase_with_retry("designer", self.run_designer_phase)
-                        elif phase_state == ProjectState.TECH_ARCHITECT:
-                            self._run_phase_with_retry("tech_architect", self.run_tech_architect_phase)
-                        elif phase_state == ProjectState.DEVELOPMENT:
-                            # Dev, Frontend, DevOps in parallel when resuming from dev
-                            import concurrent.futures as _cf
-                            with _cf.ThreadPoolExecutor(max_workers=3) as pool:
-                                futs = [pool.submit(self._run_phase_with_retry, "development", self.run_development_phase)]
-                                if ProjectState.FRONTEND in remaining:
-                                    futs.append(pool.submit(self._run_phase_with_retry, "frontend", self.run_frontend_phase))
-                                if ProjectState.DEVOPS in remaining:
-                                    futs.append(pool.submit(self._run_phase_with_retry, "devops", self.run_devops_phase))
-                                for f in futs:
-                                    f.result()
-                            break  # all remaining phases handled
-                        elif phase_state == ProjectState.FRONTEND:
-                            self._run_phase_with_retry("frontend", self.run_frontend_phase)
-                        elif phase_state == ProjectState.DEVOPS:
-                            self._run_phase_with_retry("devops", self.run_devops_phase)
-                    # Fall through to transition to completed + final sweep below
-            if not resume:
+                    resume_from_checkpoint = True
+
+            if resume_from_checkpoint:
+                try:
+                    start_idx = _RESUMABLE_PHASES.index(current)
+                except ValueError:
+                    start_idx = 0
+                logger.info("Resume: starting from phase %s (index %d)", current.value, start_idx)
+                remaining = _RESUMABLE_PHASES[start_idx:]
+                for phase_state in remaining:
+                    if phase_state == ProjectState.META:
+                        self.run_meta_phase()
+                    elif phase_state == ProjectState.PRODUCT_OWNER:
+                        self._run_phase_with_retry("product_owner", self.run_product_owner_phase)
+                    elif phase_state == ProjectState.DESIGNER:
+                        self._run_phase_with_retry("designer", self.run_designer_phase)
+                    elif phase_state == ProjectState.TECH_ARCHITECT:
+                        self._run_phase_with_retry("tech_architect", self.run_tech_architect_phase)
+                    elif phase_state == ProjectState.DEVELOPMENT:
+                        # Dev, Frontend, DevOps in parallel when resuming from dev
+                        import concurrent.futures as _cf
+                        with _cf.ThreadPoolExecutor(max_workers=3) as pool:
+                            futs = [pool.submit(self._run_phase_with_retry, "development", self.run_development_phase)]
+                            if ProjectState.FRONTEND in remaining:
+                                futs.append(pool.submit(self._run_phase_with_retry, "frontend", self.run_frontend_phase))
+                            if ProjectState.DEVOPS in remaining:
+                                futs.append(pool.submit(self._run_phase_with_retry, "devops", self.run_devops_phase))
+                            for f in futs:
+                                f.result()
+                        break  # all remaining phases handled
+                    elif phase_state == ProjectState.FRONTEND:
+                        self._run_phase_with_retry("frontend", self.run_frontend_phase)
+                    elif phase_state == ProjectState.DEVOPS:
+                        self._run_phase_with_retry("devops", self.run_devops_phase)
+                # Fall through to transition to completed + final sweep below
+            else:
                 # Phase 1: Meta (has its own retry logic)
                 self.run_meta_phase()
                 # Phases 2–4: planning — can be paused for human review

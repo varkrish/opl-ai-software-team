@@ -8,6 +8,7 @@ import logging
 import socket
 from typing import Optional, Callable
 from llama_index.core.llms import LLM, LLMMetadata, ChatMessage, ChatResponse, CompletionResponse
+from llama_index.core.llms.callbacks import llm_chat_callback, llm_completion_callback
 from llama_index.llms.ollama import Ollama
 from llama_index.embeddings.huggingface import HuggingFaceEmbedding
 
@@ -26,11 +27,13 @@ socket.setdefaulttimeout(300)
 
 def _trim_payload_for_context(payload: dict, trim_fraction: float = 0.25) -> dict:
     """
-    Return a copy of *payload* with the last user message trimmed by *trim_fraction*.
+    Return a copy of *payload* with the longest message trimmed by *trim_fraction*.
 
     Called when the API returns a 400 context-length error so we can retry
-    without rebuilding the entire call stack.  Only trims the final user message
-    because that is where dynamic content (prompts, file listings) lives.
+    without rebuilding the entire call stack.
+    
+    Prioritizes trimming 'user' or 'assistant' messages over 'system' messages 
+    to preserve critical agent instructions (tool schemas, persona).
     Returns the original payload unchanged if there is nothing to trim.
     """
     import copy
@@ -38,21 +41,51 @@ def _trim_payload_for_context(payload: dict, trim_fraction: float = 0.25) -> dic
     if not messages:
         return payload
 
-    # Find the last user message (index from end)
-    for i in range(len(messages) - 1, -1, -1):
-        if messages[i].get("role") == "user":
-            original = messages[i]["content"]
-            if not original:
-                break
-            keep_chars = int(len(original) * (1.0 - trim_fraction))
-            trimmed = original[:keep_chars] + "\n[... trimmed to fit context window ...]"
-            new_payload = copy.deepcopy(payload)
-            new_payload["messages"][i]["content"] = trimmed
-            logger.info(
-                "_trim_payload_for_context: trimmed last user message %d → %d chars (%.0f%%)",
-                len(original), len(trimmed), trim_fraction * 100,
+    best_idx = -1
+    best_score = -1
+    
+    # Find the longest message, preferring user/assistant over system
+    for i, msg in enumerate(messages):
+        content = msg.get("content", "")
+        if not content:
+            continue
+            
+        role = msg.get("role", "")
+        score = len(content)
+        
+        # Penalize system messages so we heavily favor trimming history/user input first
+        if role == "system":
+            score = score * 0.3 
+            
+        if score > best_score:
+            best_score = score
+            best_idx = i
+
+    if best_idx >= 0:
+        original = messages[best_idx]["content"]
+        keep_chars = int(len(original) * (1.0 - trim_fraction))
+        trimmed = original[:keep_chars] + "\n[... trimmed to fit context window ...]"
+        new_payload = dict(payload)
+        new_messages = []
+        for i, msg in enumerate(messages):
+            if i == best_idx:
+                new_msg = dict(msg)
+                new_msg["content"] = trimmed
+                new_messages.append(new_msg)
+            else:
+                new_messages.append(msg)
+        new_payload["messages"] = new_messages
+        
+        # We need logger from the outer module scope, but just to be safe, print it too or rely on module logger
+        try:
+            logger.warning(
+                "Context chunker triggered: trimmed longest message (role=%s) %d → %d chars (%.0f%%)",
+                messages[best_idx].get("role"), len(original), len(trimmed), trim_fraction * 100,
             )
-            return new_payload
+        except Exception:
+            pass
+            
+        return new_payload
 
     return payload  # nothing to trim
 
@@ -106,6 +139,7 @@ class GenericLlamaLLM(LLM):
             base = f"{base}/v1"
         return f"{base}/chat/completions"
 
+    @llm_chat_callback()
     def chat(self, messages: list[ChatMessage], **kwargs) -> ChatResponse:
         import httpx
         import time
@@ -279,6 +313,7 @@ class GenericLlamaLLM(LLM):
                 formatted_messages.append({"role": "user", "content": "Please provide your final answer or next step."})
         return formatted_messages
 
+    @llm_chat_callback()
     async def achat(self, messages: list[ChatMessage], **kwargs) -> ChatResponse:
         import httpx
         from llama_index.core.llms import ChatResponse, ChatMessage, MessageRole
@@ -315,6 +350,7 @@ class GenericLlamaLLM(LLM):
                 raw=data
             )
 
+    @llm_completion_callback()
     def complete(self, prompt: str, **kwargs) -> CompletionResponse:
         import httpx
         import time
@@ -373,6 +409,7 @@ class GenericLlamaLLM(LLM):
                 else:
                     raise
 
+    @llm_completion_callback()
     async def acomplete(self, prompt: str, **kwargs) -> CompletionResponse:
         import httpx
         from llama_index.core.llms import CompletionResponse

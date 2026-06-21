@@ -82,6 +82,44 @@ class TestDevAgentToolWiring:
         assert "extra_skill_query" in tool_names
         assert "file_writer" in tool_names
 
+    @patch("llamaindex_crew.agents.base_agent.get_llm_for_agent")
+    def test_dev_agent_with_workspace_includes_tldr_tools(self, mock_llm):
+        """DevAgent with workspace_path should include all tldr code-search tools."""
+        mock_llm.return_value = MagicMock()
+        config = _make_config()
+
+        with patch("llamaindex_crew.agents.dev_agent.load_tools", return_value=[]):
+            with patch("llamaindex_crew.agents.dev_agent.ConfigLoader") as mock_cl:
+                mock_cl.load.return_value = config
+                with patch(
+                    "llamaindex_crew.agents.dev_agent.append_tldr_tools",
+                    side_effect=lambda tools, wp: tools,
+                ) as mock_append:
+                    from llamaindex_crew.agents.dev_agent import DevAgent
+                    ws = Path("/tmp/test-job-workspace")
+                    agent = DevAgent(workspace_path=ws)
+                    mock_append.assert_called_once()
+                    assert mock_append.call_args[0][1] == ws
+
+        with patch("llamaindex_crew.agents.dev_agent.load_tools", return_value=[]):
+            with patch("llamaindex_crew.agents.dev_agent.ConfigLoader") as mock_cl:
+                mock_cl.load.return_value = config
+                with patch(
+                    "llamaindex_crew.tools.tldr_tools.create_tldr_tools",
+                    return_value=[
+                        _dummy_tool("code_search"),
+                        _dummy_tool("code_structure"),
+                        _dummy_tool("code_context"),
+                        _dummy_tool("code_impact"),
+                    ],
+                ):
+                    from llamaindex_crew.agents.dev_agent import DevAgent
+                    agent = DevAgent(workspace_path=Path("/tmp/test-job-workspace"))
+
+        tool_names = {t.metadata.name for t in agent.agent.tools}
+        assert "code_search" in tool_names
+        assert "code_impact" in tool_names
+
 
 class TestFrontendAgentToolWiring:
 

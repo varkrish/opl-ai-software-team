@@ -175,7 +175,7 @@ Responsibilities:
 2. Create a unique backstory for EACH role, ensuring they adopt specific OPL behaviors:
    - Product Owner: Must use Impact Mapping (Goal>Actor>Impact>Deliverable) and Mobius Loop thinking (Discovery -> Delivery).
    - High-Level Designer: Must use Event Storming (Domain Events) and Context Mapping (Bounded Contexts).
-   - Tech Architect: Must use Architecture Decision Records (ADRs) and C4 Model terminology.
+   - Tech Architect: Must use Architecture Decision Records (ADRs) and C4 Model terminology. IMPORTANT: Instruct them to list the project structure in tech_stack.md but don't write file contents.
    - Coder: Must practice Horizontal Slicing (Database -> API -> Frontend). IMPORTANT: Do NOT hardcode the tech stack. 
      The Coder's backstory must state: "You verify and use the technology stack defined by the Technical Architect's previous output."
    - Tester: Must use Exploratory Testing principles. IMPORTANT: Do NOT hardcode the tech stack. 
@@ -283,19 +283,26 @@ Return only JSON: {{"delivery_mode":"greenfield"|"import_iterate","confidence":"
         logger.info("Delivery triage (LLM): %s", out)
         return out
     
-    def analyze_vision(self, vision: str) -> str:
+    def analyze_vision(self, vision: str, reference_context: Optional[str] = None) -> str:
         """
         Analyze project vision and extract Project Context Digest
         
         Args:
             vision: Project vision/idea text
+            reference_context: Optional RAG-retrieved reference document excerpts
         
         Returns:
             Project Context Digest
         """
+        ref_section = ""
+        if reference_context and reference_context.strip():
+            ref_section = (
+                f"\n\nREFERENCE DOCUMENT EXCERPTS (retrieved — incorporate all relevant details):\n"
+                f"{reference_context.strip()}\n"
+            )
         prompt = f"""Analyze the following project vision/idea and produce a Project Context Digest:
 
-{vision}
+{vision}{ref_section}
 
 Extract:
 1. Target Audience and their specific pain points
@@ -329,7 +336,7 @@ IMPORTANT:
 - Embed Open Practice Library (OPL) techniques.
 - Product Owner: Impact Mapping, Mobius Loop.
 - Designer: Event Storming, Context Mapping.
-- Tech Architect: ADRs, C4 Model.
+- Tech Architect: ADRs, C4 Model. Instruct them to list the project structure in tech_stack.md but don't write file contents.
 - Developer: Horizontal Slicing, TDD.
 - Frontend: Design System.
 - Code Reviewer: Exploratory Testing.
@@ -395,7 +402,7 @@ Structure:
         return {
             "product_owner": "You are a Product Owner who uses Impact Mapping and Mobius Loop thinking.",
             "designer": "You are a Designer who uses Event Storming and Context Mapping.",
-            "tech_architect": "You are a Tech Architect who uses Architecture Decision Records (ADRs) and C4 Model.",
+            "tech_architect": "You are a Tech Architect who uses Architecture Decision Records (ADRs) and C4 Model. List the project structure in tech_stack.md but don't write file contents.",
             "developer": "You are a Developer who practices Horizontal Slicing and uses the tech stack defined by the Technical Architect.",
             "frontend_developer": "You are a Frontend Developer who follows design system principles.",
             "code_reviewer": "You are a Code Reviewer who uses Exploratory Testing principles."

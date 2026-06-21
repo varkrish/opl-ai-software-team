@@ -7,10 +7,11 @@ from pathlib import Path
 from typing import Optional, Union
 
 from .base_agent import BaseLlamaIndexAgent
-from ..tools import FileWriterTool, FileReaderTool, create_workspace_file_tools, prefetch_skills
+from ..tools import FileWriterTool, FileReaderTool, create_workspace_file_tools, prefetch_skills, append_tldr_tools
 from ..tools.tool_loader import load_tools
 from ..config import ConfigLoader
 from ..utils.prompt_loader import load_prompt
+from ..utils.prompt_budget import PromptBudget
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +48,7 @@ You consider the project vision and constraints when making decisions."""
         if workspace_path is not None:
             ws_tools = create_workspace_file_tools(self.workspace_path)
             tools = [ws_tools[0], ws_tools[1]]  # file_writer, file_reader
+            append_tldr_tools(tools, self.workspace_path)
         else:
             tools = [FileWriterTool, FileReaderTool]
 
@@ -80,7 +82,8 @@ You consider the project vision and constraints when making decisions."""
         self,
         design_spec: str,
         vision: str,
-        context_digest: Optional[str] = None
+        context_digest: Optional[str] = None,
+        reference_context: Optional[str] = None,
     ) -> str:
         """
         Define technology stack based on design specification
@@ -89,6 +92,7 @@ You consider the project vision and constraints when making decisions."""
             design_spec: Design specification content
             vision: Project vision
             context_digest: Optional Project Context Digest
+            reference_context: Optional RAG-retrieved reference excerpts
         
         Returns:
             Result message
@@ -104,12 +108,28 @@ You consider the project vision and constraints when making decisions."""
             fallback=_DEFAULT_TECH_STACK_PROMPT,
         )
 
-        prompt = task_prompt.format(
-            design_spec=design_spec,
-            context_digest=context_digest or "",
-            vision=vision,
-            skill_context=skill_context,
+        # Fit sections into the model's context window; protect vision and design_spec first
+        budget = PromptBudget.from_llm(self.agent.llm)
+        sections = {
+            "design_spec":    design_spec or "",
+            "context_digest": context_digest or "",
+            "vision":         vision or "",
+            "skill_context":  skill_context or "",
+        }
+        ref_overhead = len(reference_context) if reference_context and reference_context.strip() else 0
+        fixed_overhead = len(task_prompt) + ref_overhead
+        trimmed = budget.fit(
+            sections,
+            fixed_overhead_chars=fixed_overhead,
+            priority=["vision", "design_spec", "context_digest", "skill_context"],
         )
+
+        prompt = task_prompt.format(**trimmed)
+        if reference_context and reference_context.strip():
+            prompt = (
+                f"REFERENCE DOCUMENT EXCERPTS (retrieved — follow file structure and constraints):\n"
+                f"{reference_context.strip()}\n\n{prompt}"
+            )
 
         response = self.agent.chat(prompt)
 
@@ -148,7 +168,13 @@ You consider the project vision and constraints when making decisions."""
         response = self.agent.chat(prompt)
         return str(response)
 
-    def run(self, design_spec: str, vision: str, context_digest: Optional[str] = None) -> str:
+    def run(
+        self,
+        design_spec: str,
+        vision: str,
+        context_digest: Optional[str] = None,
+        reference_context: Optional[str] = None,
+    ) -> str:
         """
         Run the Tech Architect agent workflow
         
@@ -156,11 +182,14 @@ You consider the project vision and constraints when making decisions."""
             design_spec: Design specification content
             vision: Project vision
             context_digest: Optional Project Context Digest
+            reference_context: Optional RAG-retrieved reference excerpts
         
         Returns:
             Result message
         """
-        return self.define_tech_stack(design_spec, vision, context_digest)
+        return self.define_tech_stack(
+            design_spec, vision, context_digest, reference_context=reference_context,
+        )
 
 
 _DEFAULT_TECH_STACK_PROMPT = """\
@@ -203,8 +232,13 @@ Based on the FRAMEWORK REFERENCE above and the design specification:
    JSON files, not Python model classes. There are no migrations/ folders.
 4. List every file the developer agents need to create, using the exact folder layout
    from the skill reference.
+5. You MUST enumerate concrete filenames with extensions (e.g., Task.java, UserService.java). NEVER list only folders (e.g., controller/, service/) without the files inside them. The orchestrator cannot create tasks for folder names.
 
 Call file_writer(file_path='tech_stack.md', content='<your tech stack>')
+
+Your final response MUST be formatted as:
+Thought: I have successfully created the tech_stack.md file.
+Final Answer: ✅ Created complete tech_stack.md with buildable [technology] structure
 """
 
 
@@ -253,6 +287,7 @@ ACTION REQUIRED:
 Call file_writer(file_path='api_contract.yaml', content='<your OpenAPI spec>')
 WAIT FOR: "✅ Successfully wrote to api_contract.yaml"
 
-Your response should be:
-"✅ Created api_contract.yaml with [N] endpoints covering [entities]"
+Your final response MUST be formatted as:
+Thought: I have successfully created the api_contract.yaml file.
+Final Answer: ✅ Created api_contract.yaml with [N] endpoints covering [entities]
 """

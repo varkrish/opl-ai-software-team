@@ -6,6 +6,7 @@ understand codebase structure and call-sites before making changes.
 
 Factory: create_tldr_tools(workspace_path, lang=None)
 Helper:  detect_tldr_lang(workspace_path) -> Optional[str]
+         append_tldr_tools(tools, workspace_path, lang=None) -> list
 Graph:   read_call_graph(workspace_path) -> list[dict]
          format_call_graph_delta(edges, story_key) -> str
 """
@@ -331,3 +332,36 @@ def create_tldr_tools(workspace_path: Path, lang: Optional[str] = None) -> List[
             ),
         ),
     ]
+
+
+TLDR_TOOL_NAMES = frozenset({
+    "code_search",
+    "code_structure",
+    "code_context",
+    "code_impact",
+})
+
+
+def append_tldr_tools(
+    tools: List[FunctionTool],
+    workspace_path: Path,
+    lang: Optional[str] = None,
+) -> List[FunctionTool]:
+    """Append tldr code-search tools for *workspace_path*, skipping duplicates."""
+    wp = Path(workspace_path)
+    detected = lang if lang is not None else detect_tldr_lang(wp)
+    existing = {t.metadata.name for t in tools if getattr(t, "metadata", None)}
+    added = 0
+    for tool in create_tldr_tools(wp, lang=detected):
+        name = tool.metadata.name
+        if name in existing:
+            continue
+        tools.append(tool)
+        existing.add(name)
+        added += 1
+    if added:
+        logger.debug(
+            "append_tldr_tools: added %d tool(s) for workspace=%s lang=%r",
+            added, wp, detected,
+        )
+    return tools

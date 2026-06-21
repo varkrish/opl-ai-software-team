@@ -144,10 +144,11 @@ def set_allowed_file_paths(paths: Optional[set], workspace: Optional[str] = None
 
 def file_writer(file_path: str, content: str, workspace_path: Optional[str] = None) -> str:
     """Write content to a file. Creates parent directories if needed. Use this tool to create or update any file in the workspace.
+    CRITICAL: Do NOT pass file keys (like 'version' or 'dependencies') as extra arguments. Provide the entire file text inside the 'content' string argument.
     
     Args:
         file_path: Path to the file to write (relative to workspace root). Example: 'index.html' or 'src/main.py'
-        content: The content to write to the file.
+        content: The FULL content to write to the file, as a single string. Do NOT pass file properties as separate tool arguments.
         workspace_path: Optional workspace root (for thread-safe use). If not set, uses WORKSPACE_PATH env.
     
     Returns:
@@ -416,7 +417,7 @@ def file_deleter(file_path: str, workspace_path: Optional[str] = None) -> str:
 FileWriterTool = FunctionTool.from_defaults(
     fn=file_writer,
     name="file_writer",
-    description="Write content to a file. Creates parent directories if needed. Use this tool to create or update any file in the workspace."
+    description="Write content to a file. Creates parent directories if needed. CRITICAL: Pass the entire file text in the 'content' string. Do NOT pass file keys like 'version' as extra arguments."
 )
 
 FileReaderTool = FunctionTool.from_defaults(
@@ -446,7 +447,7 @@ def create_workspace_file_tools(workspace_path: Path):
         FunctionTool.from_defaults(
             fn=partial(file_writer, workspace_path=ws),
             name="file_writer",
-            description="Write content to a file. Creates parent directories if needed. Use this tool to create or update any file in the workspace."
+            description="Write content to a file. Creates parent directories if needed. CRITICAL: Pass the entire file text in the 'content' string. Do NOT pass file keys like 'version' as extra arguments."
         ),
         FunctionTool.from_defaults(
             fn=partial(file_reader, workspace_path=ws),

@@ -360,7 +360,7 @@ Your file structure MUST match these. Do NOT invent folders or files not shown h
 
 CRITICAL RULES:
 1. You MUST use the EXACT technology stated in the vision (e.g. Spring Boot + PostgreSQL + OpenAPI, or Python + FastAPI, or React Native). Never substitute a different stack.
-2. You MUST specify a COMPLETE, BUILDABLE file structure (not just source files)
+2. You MUST specify a COMPLETE, BUILDABLE file structure (not just source files). You MUST enumerate concrete filenames with extensions (e.g., Task.java, UserService.java). NEVER list only folders (e.g., controller/, service/) without the files inside them. The orchestrator cannot create tasks for folder names.
 3. Include ALL necessary config files, entry points, and build files
 4. The structure must be runnable (e.g. ./mvnw spring-boot:run for Spring Boot, or npm install && ..., or pip install ...)
 4a. If the FRAMEWORK REFERENCE section above contains skill content, your file structure MUST follow it exactly. Do NOT add folders or files that are not shown in the reference (e.g. no models/, controllers/, views/, migrations/ for Frappe).
@@ -414,4 +414,6 @@ CRITICAL RULES:
    Do NOT mix require() with import/export in the same project. Every .js/.ts file must follow the declared module system.
    State the module system clearly in the "Core Technology" section, e.g.: **Module System**: ES modules
 
-Your response should be: "✅ Created complete tech_stack.md with buildable [technology] structure"
+Your final response MUST be formatted as:
+Thought: I have successfully created the tech_stack.md file.
+Final Answer: ✅ Created complete tech_stack.md with buildable [technology] structure

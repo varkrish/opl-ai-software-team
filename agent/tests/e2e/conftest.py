@@ -42,9 +42,18 @@ def set_e2e_env(e2e_workspace, monkeypatch):
     monkeypatch.setenv("BUDGET_MAX_COST_PER_HOUR", "5.0")
     
     # Ensure we have API keys for E2E tests
-    if not os.getenv("OPENROUTER_API_KEY") and not os.getenv("OPENAI_API_KEY"):
-        pytest.skip("E2E tests require OPENROUTER_API_KEY or OPENAI_API_KEY")
-
+    import sys
+    sys.path.insert(0, str(Path(__file__).parent.parent.parent / "src"))
+    from llamaindex_crew.config import ConfigLoader
+    
+    try:
+        config = ConfigLoader.load()
+        has_key = bool(config.llm.api_key)
+    except Exception:
+        has_key = False
+        
+    if not has_key and not os.getenv("OPENROUTER_API_KEY") and not os.getenv("OPENAI_API_KEY") and not os.getenv("LLM_API_KEY"):
+        pytest.skip("E2E tests require an LLM API key in config.yaml or environment variables")
 
 @pytest.fixture
 def calculator_vision():

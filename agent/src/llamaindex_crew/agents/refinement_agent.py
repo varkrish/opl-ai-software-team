@@ -8,7 +8,7 @@ from typing import Optional, List, Dict, Any
 
 from .base_agent import BaseLlamaIndexAgent
 from ..tools.file_tools import create_workspace_file_tools
-from ..tools.tldr_tools import create_tldr_tools, detect_tldr_lang
+from ..tools.tldr_tools import append_tldr_tools
 from ..budget.tracker import EnhancedBudgetTracker
 
 logger = logging.getLogger(__name__)
@@ -63,9 +63,8 @@ class RefinementAgent:
         self.workspace_path = Path(workspace_path)
         self.project_id = project_id
         tools = create_workspace_file_tools(self.workspace_path)
-        lang = detect_tldr_lang(self.workspace_path)
-        tools += create_tldr_tools(self.workspace_path, lang=lang)
-        logger.debug("RefinementAgent: tldr lang=%r for workspace %s", lang, self.workspace_path)
+        append_tldr_tools(tools, self.workspace_path)
+        logger.debug("RefinementAgent: tldr tools wired for workspace %s", self.workspace_path)
         tracker = budget_tracker or EnhancedBudgetTracker()
         tracker.project_id = project_id
         self.agent = BaseLlamaIndexAgent(
