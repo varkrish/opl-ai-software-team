@@ -125,6 +125,20 @@ STEP 3: WRITE COMPLETE tech_stack.md
 ACTION REQUIRED: Call file_writer(file_path='tech_stack.md', content='[your complete tech stack]')
 WAIT FOR: "✅ Successfully wrote to tech_stack.md"
 
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+STEP 3.5: WRITE LOGICAL IMPLEMENTATION PLAN
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+After creating `tech_stack.md`, you MUST write a comprehensive logical implementation plan to `implementation_plan.md` detailing the technical architecture and logical solution rather than just listing files.
+The plan MUST contain:
+1. **Architectural Overview**: Logical system architecture and core design patterns (e.g. clean architecture, service layers, websocket handshake details, real-time message broadcasting).
+2. **Core Logical Components**: Description of how core business logic, database tables, socket handlers, and event emitters function logically.
+3. **Data Flow & Sequence**: Textual explanation or Mermaid diagrams showing request-response or message transmission paths through routing, controllers, services, database/socket, and client response.
+4. **Integration Strategy**: How the frontend integrates with the backend API, state management of socket connections, and reconnection loops.
+5. **Security, Validation & Error Handling**: Authentication/authorization enforcement (e.g. token extraction, RBAC, channel auth), inputs validation rules, rate-limiting, and resilience features for connection dropouts.
+
+ACTION REQUIRED: Call file_writer(file_path='implementation_plan.md', content='[your logical implementation plan]')
+WAIT FOR: "✅ Successfully wrote to implementation_plan.md"
+
 Example for React Native calculator (COMPLETE structure):
 ```
 # Technology Stack for React Native Calculator
@@ -383,7 +397,7 @@ CRITICAL RULES:
    RIGHT: leave_tracker/leave_tracker/leave_tracker/doctype/
    The doctype/ folder NEVER sits directly under the inner package — it is always inside a module folder.
    Similarly, page/ and report/ folders go inside the module folder, NOT directly under the inner package.
-5. You MUST call file_writer to create tech_stack.md
+5. You MUST call file_writer to create BOTH tech_stack.md and implementation_plan.md. The implementation plan MUST be a logical solution detailing system flow, patterns, and integration strategy rather than just listing files.
 6. EVERY source file (component, service, controller, module) MUST have a matching test file in the file tree:
    - Angular/TypeScript: *.spec.ts next to the source file (e.g. todo.service.ts → todo.service.spec.ts)
    - Python: test_*.py in a tests/ directory (e.g. operations.py → tests/test_operations.py)
@@ -415,5 +429,6 @@ CRITICAL RULES:
    State the module system clearly in the "Core Technology" section, e.g.: **Module System**: ES modules
 
 Your final response MUST be formatted as:
-Thought: I have successfully created the tech_stack.md file.
-Final Answer: ✅ Created complete tech_stack.md with buildable [technology] structure
+Thought: I have successfully created the tech_stack.md and implementation_plan.md files.
+Final Answer: ✅ Created complete tech_stack.md and implementation_plan.md with logical [technology] solution
+

@@ -193,7 +193,7 @@ You consider the project vision and constraints when making decisions."""
 
 
 _DEFAULT_TECH_STACK_PROMPT = """\
-You are the Technical Architect. Define the concrete technology stack for this project.
+You are the Technical Architect. Define the concrete technology stack and the logical implementation plan for this project.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 INPUTS
@@ -219,7 +219,7 @@ Do NOT invent folders, files, or patterns that are not shown here.
 {skill_context}
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-TASK — Define Tech Stack
+TASK 1 — Define Tech Stack
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 Based on the FRAMEWORK REFERENCE above and the design specification:
@@ -236,9 +236,23 @@ Based on the FRAMEWORK REFERENCE above and the design specification:
 
 Call file_writer(file_path='tech_stack.md', content='<your tech stack>')
 
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+TASK 2 — Write Logical Implementation Plan
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+After creating `tech_stack.md`, you MUST write a comprehensive logical implementation plan to `implementation_plan.md` detailing the technical architecture and logical solution rather than just listing files.
+The plan MUST contain:
+1. **Architectural Overview**: Logical system architecture and core design patterns (e.g. clean architecture, service layers, websocket handshake details, real-time message broadcasting).
+2. **Core Logical Components**: Description of how core business logic, database tables, socket handlers, and event emitters function logically.
+3. **Data Flow & Sequence**: Textual explanation or Mermaid diagrams showing request-response or message transmission paths through routing, controllers, services, database/socket, and client response.
+4. **Integration Strategy**: How the frontend integrates with the backend API, state management of socket connections, and reconnection loops.
+5. **Security, Validation & Error Handling**: Authentication/authorization enforcement (e.g. token extraction, RBAC, channel auth), inputs validation rules, rate-limiting, and resilience features for connection dropouts.
+
+Call file_writer(file_path='implementation_plan.md', content='<your logical implementation plan>')
+
 Your final response MUST be formatted as:
-Thought: I have successfully created the tech_stack.md file.
-Final Answer: ✅ Created complete tech_stack.md with buildable [technology] structure
+Thought: I have successfully created the tech_stack.md and implementation_plan.md files.
+Final Answer: ✅ Created complete tech_stack.md and implementation_plan.md with logical [technology] solution
 """
 
 

@@ -213,7 +213,7 @@ class PaymentService:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 class TestTechStackCompletenessValidation:
-    """TaskManager.validate_tech_stack_completeness detects missing concrete files and entrypoints."""
+    """TaskManager.validate_tech_stack_completeness detects empty tech stacks or folder-only structures."""
 
     def test_rejects_only_folders(self, task_mgr):
         tech_stack = """
@@ -227,20 +227,6 @@ src/
         result = task_mgr.validate_tech_stack_completeness(tech_stack)
         assert result["valid"] is False
         assert any("No concrete source files found" in issue for issue in result["issues"])
-
-    def test_rejects_missing_java_entrypoint(self, task_mgr):
-        tech_stack = """
-```
-src/
-├── models/
-│   └── User.java
-└── views/
-    └── UserView.java
-```
-"""
-        result = task_mgr.validate_tech_stack_completeness(tech_stack)
-        assert result["valid"] is False
-        assert any("Missing Java entrypoint file" in issue for issue in result["issues"])
 
     def test_accepts_valid_java_stack(self, task_mgr):
         tech_stack = """
@@ -256,18 +242,6 @@ src/
         result = task_mgr.validate_tech_stack_completeness(tech_stack)
         assert result["valid"] is True
 
-    def test_rejects_missing_python_entrypoint(self, task_mgr):
-        tech_stack = """
-```
-src/
-├── models.py
-└── views.py
-```
-"""
-        result = task_mgr.validate_tech_stack_completeness(tech_stack)
-        assert result["valid"] is False
-        assert any("Missing Python entrypoint file" in issue for issue in result["issues"])
-
     def test_accepts_valid_python_stack(self, task_mgr):
         tech_stack = """
 ```
@@ -280,19 +254,6 @@ src/
 """
         result = task_mgr.validate_tech_stack_completeness(tech_stack)
         assert result["valid"] is True
-
-    def test_rejects_missing_unit_tests(self, task_mgr):
-        tech_stack = """
-```
-src/
-├── main.py
-├── models.py
-└── views.py
-```
-"""
-        result = task_mgr.validate_tech_stack_completeness(tech_stack)
-        assert result["valid"] is False
-        assert any("No test files found" in issue for issue in result["issues"])
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

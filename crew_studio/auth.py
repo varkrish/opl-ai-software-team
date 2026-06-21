@@ -108,8 +108,10 @@ def decode_and_verify_token(token: str) -> CurrentUser:
         if not any(a in ["opl-studio", "connector-service"] for a in aud_list):
             raise InvalidTokenError("Token authorized party (azp) or audience not allowed")
 
-    # 5. Extract fields
-    user_id = payload.get("sub")
+    # 5. Extract fields — sub is required; fall back to stable username/email claims
+    user_id = payload.get("sub") or payload.get("preferred_username") or payload.get("email")
+    if not user_id:
+        raise InvalidTokenError("Token missing subject identity (sub/preferred_username/email)")
     email = payload.get("email") or payload.get("preferred_username") or f"service-account-{azp}@example.com"
     
     realm_access = payload.get("realm_access", {})

@@ -321,6 +321,26 @@ def run_import_analysis(
     progress_callback: Callable[[str, int, Optional[str]], None],
     vision: str = "",
 ) -> None:
+    from src.llamaindex_crew.config import ConfigLoader
+    from src.llamaindex_crew.utils.llm_config import user_llm_context
+    fallback_config = ConfigLoader.load()
+    with user_llm_context(job_id, job_db, fallback_config):
+        return _run_import_analysis_impl(
+            job_id=job_id,
+            workspace_path=workspace_path,
+            job_db=job_db,
+            progress_callback=progress_callback,
+            vision=vision,
+        )
+
+
+def _run_import_analysis_impl(
+    job_id: str,
+    workspace_path: Path,
+    job_db: Any,
+    progress_callback: Callable[[str, int, Optional[str]], None],
+    vision: str = "",
+) -> None:
     """
     Analyze imported workspace: git, tech_stack.md, index key source files, mark job completed.
     """

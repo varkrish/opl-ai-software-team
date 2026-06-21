@@ -296,6 +296,30 @@ def run_migration(
     job_db: Any,
     progress_callback: Optional[Callable] = None,
 ) -> None:
+    from src.llamaindex_crew.config import ConfigLoader
+    from src.llamaindex_crew.utils.llm_config import user_llm_context
+    fallback_config = ConfigLoader.load()
+    with user_llm_context(job_id, job_db, fallback_config):
+        return _run_migration_impl(
+            job_id=job_id,
+            workspace_path=workspace_path,
+            migration_goal=migration_goal,
+            report_path=report_path,
+            migration_notes=migration_notes,
+            job_db=job_db,
+            progress_callback=progress_callback,
+        )
+
+
+def _run_migration_impl(
+    job_id: str,
+    workspace_path: str,
+    migration_goal: str,
+    report_path: str,
+    migration_notes: Optional[str],
+    job_db: Any,
+    progress_callback: Optional[Callable] = None,
+) -> None:
     """
     Run a full migration: analyse MTA report → apply changes per file.
 
@@ -603,6 +627,26 @@ def run_migration(
 # ── Retry only failed tasks ─────────────────────────────────────────────────
 
 def run_migration_retry(
+    job_id: str,
+    workspace_path: str,
+    migration_goal: str,
+    job_db: Any,
+    progress_callback: Optional[Callable] = None,
+) -> None:
+    from src.llamaindex_crew.config import ConfigLoader
+    from src.llamaindex_crew.utils.llm_config import user_llm_context
+    fallback_config = ConfigLoader.load()
+    with user_llm_context(job_id, job_db, fallback_config):
+        return _run_migration_retry_impl(
+            job_id=job_id,
+            workspace_path=workspace_path,
+            migration_goal=migration_goal,
+            job_db=job_db,
+            progress_callback=progress_callback,
+        )
+
+
+def _run_migration_retry_impl(
     job_id: str,
     workspace_path: str,
     migration_goal: str,
