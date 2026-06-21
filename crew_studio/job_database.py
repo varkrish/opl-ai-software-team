@@ -191,6 +191,16 @@ class JobDatabase:
                     updated_at TEXT NOT NULL
                 )
             """)
+
+            # Generic key-value store for system-level settings
+            # (e.g. auto-generated encryption keys)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS system_config (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                )
+            """)
     
     def create_job(self, job_id: str, vision: str, workspace_path: str,
                    metadata: Optional[Dict[str, Any]] = None,
@@ -1068,23 +1078,44 @@ class JobDatabase:
     # Jira configuration — encrypted per-user storage
     # ------------------------------------------------------------------
 
-    @staticmethod
-    def _get_fernet():
-        """Return a Fernet cipher keyed from JIRA_CONFIG_SECRET env var.
+    _JIRA_SECRET_KEY = "jira_config_secret"
 
-        If the var is not set, a deterministic fallback key is derived from the
-        string "opl-crew-jira-secret" so that unit tests and dev environments
-        work without configuration — this is NOT safe for production.
+    def _get_fernet(self):
+        """Return a Fernet cipher for encrypting Jira API tokens.
+
+        Priority:
+          1. JIRA_CONFIG_SECRET env var (explicit override / CI / Kubernetes secret)
+          2. Key stored in the system_config table (auto-generated on first use)
+          3. Generate a new key, persist it, and use it going forward
+
+        The auto-generated key is stored in the database so all future starts
+        use the same key without any manual configuration.
         """
         from cryptography.fernet import Fernet
-        import base64, hashlib
-        raw = os.getenv("JIRA_CONFIG_SECRET", "")
+        raw = os.getenv("JIRA_CONFIG_SECRET", "").strip()
         if raw:
-            # Expect a URL-safe base64 32-byte key (generated with Fernet.generate_key())
-            key = raw.encode() if isinstance(raw, str) else raw
-        else:
-            # Derive a stable 32-byte key from a fixed passphrase (dev/test only)
-            key = base64.urlsafe_b64encode(hashlib.sha256(b"opl-crew-jira-secret").digest())
+            return Fernet(raw.encode() if isinstance(raw, str) else raw)
+
+        # Look up persisted key
+        with self._get_conn() as conn:
+            row = conn.execute(
+                "SELECT value FROM system_config WHERE key = ?",
+                (self._JIRA_SECRET_KEY,)
+            ).fetchone()
+            if row:
+                return Fernet(row["value"].encode())
+
+            # First time — generate, persist, and use
+            key = Fernet.generate_key()
+            conn.execute(
+                "INSERT INTO system_config (key, value, created_at) VALUES (?, ?, ?)",
+                (self._JIRA_SECRET_KEY, key.decode(), datetime.now().isoformat())
+            )
+        import logging
+        logging.getLogger(__name__).info(
+            "Generated new Jira encryption key and saved to system_config table. "
+            "Export JIRA_CONFIG_SECRET from the DB if you need to migrate the database."
+        )
         return Fernet(key)
 
     def save_jira_config(self, owner_id: str, jira_base_url: str,
