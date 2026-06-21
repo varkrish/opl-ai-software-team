@@ -4,6 +4,7 @@ Stores all job metadata, status, progress, and messages.
 """
 import sqlite3
 import json
+import os
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, List, Optional
@@ -179,6 +180,17 @@ class JobDatabase:
             """)
             conn.execute("CREATE INDEX IF NOT EXISTS idx_validation_issues_job ON validation_issues(job_id)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_validation_issues_status ON validation_issues(status)")
+
+            # Per-user Jira configurations (tokens encrypted at rest)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS jira_configs (
+                    owner_id TEXT PRIMARY KEY,
+                    jira_base_url TEXT NOT NULL,
+                    jira_email TEXT NOT NULL,
+                    encrypted_token TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+            """)
     
     def create_job(self, job_id: str, vision: str, workspace_path: str,
                    metadata: Optional[Dict[str, Any]] = None,
@@ -1051,3 +1063,73 @@ class JobDatabase:
             job['metadata'] = {}
         
         return job
+
+    # ------------------------------------------------------------------
+    # Jira configuration — encrypted per-user storage
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _get_fernet():
+        """Return a Fernet cipher keyed from JIRA_CONFIG_SECRET env var.
+
+        If the var is not set, a deterministic fallback key is derived from the
+        string "opl-crew-jira-secret" so that unit tests and dev environments
+        work without configuration — this is NOT safe for production.
+        """
+        from cryptography.fernet import Fernet
+        import base64, hashlib
+        raw = os.getenv("JIRA_CONFIG_SECRET", "")
+        if raw:
+            # Expect a URL-safe base64 32-byte key (generated with Fernet.generate_key())
+            key = raw.encode() if isinstance(raw, str) else raw
+        else:
+            # Derive a stable 32-byte key from a fixed passphrase (dev/test only)
+            key = base64.urlsafe_b64encode(hashlib.sha256(b"opl-crew-jira-secret").digest())
+        return Fernet(key)
+
+    def save_jira_config(self, owner_id: str, jira_base_url: str,
+                         jira_email: str, api_token: str) -> None:
+        """Encrypt and persist Jira credentials for owner_id."""
+        f = self._get_fernet()
+        encrypted = f.encrypt(api_token.encode()).decode()
+        now = datetime.now().isoformat()
+        with self._get_conn() as conn:
+            conn.execute("""
+                INSERT INTO jira_configs (owner_id, jira_base_url, jira_email, encrypted_token, updated_at)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(owner_id) DO UPDATE SET
+                    jira_base_url = excluded.jira_base_url,
+                    jira_email = excluded.jira_email,
+                    encrypted_token = excluded.encrypted_token,
+                    updated_at = excluded.updated_at
+            """, (owner_id, jira_base_url, jira_email, encrypted, now))
+
+    def get_jira_config(self, owner_id: str) -> Optional[Dict[str, str]]:
+        """Return Jira config for owner_id with the token decrypted, or None."""
+        with self._get_conn() as conn:
+            row = conn.execute(
+                "SELECT jira_base_url, jira_email, encrypted_token, updated_at "
+                "FROM jira_configs WHERE owner_id = ?",
+                (owner_id,)
+            ).fetchone()
+        if not row:
+            return None
+        f = self._get_fernet()
+        try:
+            token = f.decrypt(row["encrypted_token"].encode()).decode()
+        except Exception:
+            token = ""
+        return {
+            "jira_base_url": row["jira_base_url"],
+            "jira_email": row["jira_email"],
+            "api_token": token,
+            "updated_at": row["updated_at"],
+        }
+
+    def delete_jira_config(self, owner_id: str) -> bool:
+        """Remove stored Jira config for owner_id. Returns True if a row was deleted."""
+        with self._get_conn() as conn:
+            cursor = conn.execute(
+                "DELETE FROM jira_configs WHERE owner_id = ?", (owner_id,)
+            )
+        return cursor.rowcount > 0

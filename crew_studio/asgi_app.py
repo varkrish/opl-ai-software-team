@@ -711,6 +711,98 @@ async def reload_skills(user: CurrentUser = Depends(get_current_user)):
 
 
 # ---------------------------------------------------------------------------
+# Jira configuration endpoints
+# ---------------------------------------------------------------------------
+
+class JiraConfigRequest(BaseModel):
+    jira_base_url: str
+    jira_email: str
+    api_token: str
+
+
+@app.get("/api/jira/config")
+async def get_jira_config(user: CurrentUser = Depends(get_current_user)):
+    """Return the current user's Jira config (token masked)."""
+    cfg = job_db.get_jira_config(user.user_id)
+    if not cfg:
+        return {"configured": False}
+    token = cfg["api_token"]
+    masked = ("*" * max(0, len(token) - 4)) + token[-4:] if len(token) >= 4 else "****"
+    return {
+        "configured": True,
+        "jira_base_url": cfg["jira_base_url"],
+        "jira_email": cfg["jira_email"],
+        "api_token_masked": masked,
+        "updated_at": cfg["updated_at"],
+    }
+
+
+@app.post("/api/jira/config", status_code=201)
+async def save_jira_config(
+    body: JiraConfigRequest,
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Save (or update) the current user's Jira credentials, encrypted at rest."""
+    if not body.jira_base_url.startswith("http"):
+        raise HTTPException(status_code=422, detail="jira_base_url must be a valid URL")
+    if not body.jira_email or "@" not in body.jira_email:
+        raise HTTPException(status_code=422, detail="jira_email must be a valid email")
+    if not body.api_token:
+        raise HTTPException(status_code=422, detail="api_token is required")
+    job_db.save_jira_config(
+        owner_id=user.user_id,
+        jira_base_url=body.jira_base_url.rstrip("/"),
+        jira_email=body.jira_email,
+        api_token=body.api_token,
+    )
+    return {"saved": True}
+
+
+@app.delete("/api/jira/config", status_code=200)
+async def delete_jira_config(user: CurrentUser = Depends(get_current_user)):
+    """Remove the current user's stored Jira credentials."""
+    deleted = job_db.delete_jira_config(user.user_id)
+    return {"deleted": deleted}
+
+
+@app.post("/api/jira/test-connection")
+async def test_jira_connection(
+    body: JiraConfigRequest,
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Test Jira credentials without saving them.
+
+    Calls GET /rest/api/2/myself on the supplied Jira instance and returns
+    the display name on success, or an error message on failure.
+    """
+    url = body.jira_base_url.rstrip("/")
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(
+                f"{url}/rest/api/2/myself",
+                auth=(body.jira_email, body.api_token),
+                headers={"Accept": "application/json"},
+            )
+        if resp.status_code == 200:
+            data = resp.json()
+            return {
+                "ok": True,
+                "display_name": data.get("displayName", body.jira_email),
+                "account_id": data.get("accountId"),
+            }
+        elif resp.status_code == 401:
+            return {"ok": False, "error": "Invalid credentials — check your email and API token."}
+        elif resp.status_code == 403:
+            return {"ok": False, "error": "Forbidden — your account may lack API access."}
+        else:
+            return {"ok": False, "error": f"Jira returned HTTP {resp.status_code}"}
+    except httpx.ConnectError:
+        return {"ok": False, "error": f"Cannot reach {url} — check the base URL."}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+# ---------------------------------------------------------------------------
 # Mount the existing Flask app for all remaining routes
 # ---------------------------------------------------------------------------
 
