@@ -1189,3 +1189,31 @@ class TestPostBuildFixIncludesFileContent:
         assert "preserve" in prompt.lower() or "keep" in prompt.lower(), (
             "Post-build fix prompt must instruct LLM to preserve existing code"
         )
+
+
+class TestRemediationPathExpansion:
+    """Companion test paths must be writable during post-build validation fixes."""
+
+    def test_companion_test_paths_for_middleware(self):
+        from src.llamaindex_crew.utils.manifest_guard import companion_test_paths
+
+        companions = companion_test_paths("src/middleware/channel.middleware.ts")
+        assert "src/middleware/__tests__/channel.middleware.test.ts" in companions
+        assert "src/middleware/channel.middleware.test.ts" in companions
+
+    def test_expand_remediation_paths_includes_companion_tests(self, workspace):
+        from src.llamaindex_crew.utils.manifest_guard import expand_remediation_paths
+
+        allowed = {"src/middleware/channel.middleware.ts"}
+        expanded = expand_remediation_paths(allowed, workspace)
+        assert "src/middleware/__tests__/channel.middleware.test.ts" in expanded
+
+    def test_is_companion_test_file(self):
+        from src.llamaindex_crew.utils.manifest_guard import is_companion_test_file
+
+        allowed = {"src/middleware/channel.middleware.ts"}
+        assert is_companion_test_file(
+            "src/middleware/__tests__/channel.middleware.test.ts", allowed
+        )
+        assert not is_companion_test_file("src/other/random.test.ts", allowed)
+
