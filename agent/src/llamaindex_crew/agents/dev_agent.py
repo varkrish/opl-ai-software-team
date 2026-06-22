@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Optional, List
 from .base_agent import BaseLlamaIndexAgent
 from ..tools import (
-    FileWriterTool, FileReaderTool, FileListTool,
+    FileWriterTool, BulkFileWriterTool, FileReaderTool, FileListTool,
     GitTool,
     PytestRunnerTool, CodeCoverageTool,
     create_workspace_file_tools,
@@ -16,6 +16,7 @@ from ..tools import (
 from ..tools.tool_loader import load_tools
 from ..config import ConfigLoader
 from ..utils.prompt_loader import load_prompt
+from ..utils.llm_config import get_supports_react
 
 logger = logging.getLogger(__name__)
 
@@ -44,25 +45,27 @@ Your goal is to implement features using Test-Driven Development (TDD).
 You practice Horizontal Slicing: Database -> API -> Frontend.
 You verify and use the technology stack defined by the Technical Architect."""
         )
-        
+
         backstory = custom_backstory or default_backstory
 
-        if workspace_path is not None:
-            ws_tools = create_workspace_file_tools(Path(workspace_path))
-            tools = list(ws_tools) + [
-                GitTool,
-                PytestRunnerTool, CodeCoverageTool,
-            ]
-            append_tldr_tools(tools, Path(workspace_path))
+        # Determine capability mode for the worker model
+        self.supports_react = get_supports_react("worker")
+        logger.info("DevAgent: supports_react=%s", self.supports_react)
+
+        if self.supports_react:
+            if workspace_path is not None:
+                ws_tools = create_workspace_file_tools(Path(workspace_path))
+                tools = list(ws_tools) + [GitTool, PytestRunnerTool, CodeCoverageTool]
+                append_tldr_tools(tools, Path(workspace_path))
+            else:
+                tools = [
+                    FileWriterTool, BulkFileWriterTool, FileReaderTool, FileListTool,
+                    GitTool, PytestRunnerTool, CodeCoverageTool,
+                ]
         else:
-            tools = [
-                FileWriterTool,
-                FileReaderTool,
-                FileListTool,
-                GitTool,
-                PytestRunnerTool,
-                CodeCoverageTool,
-            ]
+            # Simple mode: no tools — single-shot JSON output; workflow writes files
+            # via output_parser.  Context is already injected in build_file_prompt.
+            tools = []
 
         try:
             config = ConfigLoader.load()

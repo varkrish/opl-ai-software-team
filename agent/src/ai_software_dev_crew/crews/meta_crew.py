@@ -77,8 +77,7 @@ class MetaCrew:
             backstory=backstory,
             llm=get_llm_for_agent("manager"),
             verbose=True,
-            allow_delegation=False,
-            tools=[FileWriterTool()]
+            allow_delegation=False
         )
 
     @task
@@ -119,9 +118,7 @@ class MetaCrew:
               "developer": "detailed backstory for developer agent",
               "frontend_developer": "detailed backstory for frontend developer agent",
               "code_reviewer": "detailed backstory for code reviewer agent"
-            }}
-            
-            Also use the file_writer tool to save the generated prompts to 'agent_prompts.json' for reference.""",
+            }}""",
             agent=self.prompter_agent(),
             expected_output="""JSON object with keys: business_analyst, developer, frontend_developer, code_reviewer.
             Each value should be a rich, motivating backstory that explicitly mentions OPL techniques and how they apply to THIS specific project.""",

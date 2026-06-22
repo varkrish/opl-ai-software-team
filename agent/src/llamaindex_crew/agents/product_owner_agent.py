@@ -6,11 +6,17 @@ import logging
 from pathlib import Path
 from typing import Optional, Union
 from .base_agent import BaseLlamaIndexAgent
-from ..tools import FileWriterTool, create_workspace_file_tools, append_tldr_tools
+from ..tools import FileWriterTool, BulkFileWriterTool, create_workspace_file_tools, append_tldr_tools
 from ..tools.tool_loader import load_tools
 from ..config import ConfigLoader
 from ..utils.prompt_loader import load_prompt
 from ..utils.document_indexer import DocumentIndexer
+from ..utils.llm_config import get_supports_react
+from ..utils.output_parser import (
+    product_owner_format_instruction,
+    simple_mode_format_instruction,
+    write_files_from_response,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +44,8 @@ class ProductOwnerAgent:
         """
         self.document_indexer = document_indexer
         self.config = config
+        self.workspace_path = Path(workspace_path) if workspace_path else None
+
         default_backstory = load_prompt(
             'product_owner/product_owner_backstory.txt',
             fallback="""You are a Product Owner.
@@ -45,19 +53,27 @@ Your goal is to maximize value for stakeholders by defining clear requirements.
 You use Impact Mapping: Goal -> Actor -> Impact -> Deliverable.
 You break down requests into User Stories with Acceptance Criteria using Gherkin."""
         )
-        
+
         backstory = custom_backstory or default_backstory
 
-        if workspace_path is not None:
-            ws_tools = create_workspace_file_tools(Path(workspace_path))
-            tools = [ws_tools[0]]  # file_writer
-            append_tldr_tools(tools, Path(workspace_path))
+        # Determine capability mode for the manager model
+        self.supports_react = get_supports_react("manager")
+        logger.info("ProductOwnerAgent: supports_react=%s", self.supports_react)
+
+        if self.supports_react:
+            if workspace_path is not None:
+                ws_tools = create_workspace_file_tools(Path(workspace_path))
+                tools = [ws_tools[0], ws_tools[1]]  # file_writer and bulk_file_writer
+                append_tldr_tools(tools, Path(workspace_path))
+            else:
+                tools = [FileWriterTool, BulkFileWriterTool]
         else:
-            tools = [FileWriterTool]
+            # Simple mode: no file tools — output parser handles writes
+            tools = []
 
         try:
-            config = ConfigLoader.load()
-            entries = config.tools.global_tools + config.tools.agent_tools.get("product_owner", [])
+            cfg = ConfigLoader.load()
+            entries = cfg.tools.global_tools + cfg.tools.agent_tools.get("product_owner", [])
             extra_tools = load_tools(entries)
             tools.extend(extra_tools)
             if extra_tools:
@@ -145,11 +161,45 @@ Save to user_stories.md and feature files."""
                 context_digest="",
                 rag_context=rag_context
             )
-        
+
+        # Simple mode: append JSON format instruction so the weak model knows
+        # exactly what output to produce; we write files manually below.
+        if not self.supports_react:
+            prompt += product_owner_format_instruction()
+
         # Execute agent
         response = self.agent.chat(prompt)
-        
-        return str(response)
+        response_str = str(response)
+
+        from ..tools.file_tools import _resolve_workspace
+        ws_path = self.workspace_path or _resolve_workspace()
+
+        if not self.supports_react:
+            # Simple mode: primary parse + write
+            write_files_from_response(
+                response_str,
+                ws_path,
+                raw_fallback_path="user_stories.md",
+                label="ProductOwnerAgent",
+            )
+        else:
+            # ReAct safety net: tools should write files; parse response if artifacts missing
+            needs_fallback = (
+                not (ws_path / "requirements.md").exists()
+                or not (ws_path / "user_stories.md").exists()
+                or not (ws_path / "features").exists()
+                or not any((ws_path / "features").glob("*.feature"))
+            )
+            if needs_fallback:
+                logger.info("ProductOwnerAgent: ReAct safety net — parsing response for missing artifacts")
+                write_files_from_response(
+                    response_str,
+                    ws_path,
+                    raw_fallback_path="user_stories.md",
+                    label="ProductOwnerAgent-safetynet",
+                )
+
+        return response_str
     
     def run(self, vision: str, context_digest: Optional[str] = None) -> str:
         """

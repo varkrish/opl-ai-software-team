@@ -6,10 +6,14 @@ import logging
 from pathlib import Path
 from typing import Optional
 from .base_agent import BaseLlamaIndexAgent
-from ..tools import FileWriterTool, FileReaderTool, FileListTool, create_workspace_file_tools, append_tldr_tools
+from ..tools import (
+    FileWriterTool, BulkFileWriterTool, FileReaderTool, FileListTool,
+    create_workspace_file_tools, append_tldr_tools,
+)
 from ..tools.tool_loader import load_tools
 from ..config import ConfigLoader
 from ..utils.prompt_loader import load_prompt
+from ..utils.llm_config import get_supports_react
 
 logger = logging.getLogger(__name__)
 
@@ -37,15 +41,23 @@ class FrontendAgent:
 Your goal is to implement user interfaces following design system principles.
 You create reusable components and ensure responsive design."""
         )
-        
+
         backstory = custom_backstory or default_backstory
 
-        if workspace_path is not None:
-            ws_tools = create_workspace_file_tools(Path(workspace_path))
-            tools = [ws_tools[0], ws_tools[1], ws_tools[2]]
-            append_tldr_tools(tools, Path(workspace_path))
+        # Determine capability mode for the worker model
+        self.supports_react = get_supports_react("worker")
+        logger.info("FrontendAgent: supports_react=%s", self.supports_react)
+
+        if self.supports_react:
+            if workspace_path is not None:
+                ws_tools = create_workspace_file_tools(Path(workspace_path))
+                tools = [ws_tools[0], ws_tools[1], ws_tools[2], ws_tools[3]]  # writer, bulk, reader, lister
+                append_tldr_tools(tools, Path(workspace_path))
+            else:
+                tools = [FileWriterTool, BulkFileWriterTool, FileReaderTool, FileListTool]
         else:
-            tools = [FileWriterTool, FileReaderTool, FileListTool]
+            # Simple mode: no tools — single-shot JSON; prompt carries context.
+            tools = []
 
         try:
             config = ConfigLoader.load()

@@ -1,126 +1,50 @@
-YOUR ONLY JOB: Create ALL implementation files defined in tech_stack.md. You MUST create 2+ files minimum.
+YOUR ONLY JOB: Implement the specific feature requested in the requirements.
 
 Requirements: {feature_desc}
 {feature_context}
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-MANDATORY 5-STEP PROCESS (DO NOT SKIP ANY STEP):
+TOOL MODE — MANDATORY 5-STEP ITERATIVE PROCESS (when file_writer tools are available)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-STEP 1: READ TECH STACK TO GET COMPLETE FILE STRUCTURE
+STEP 1: ARCHITECTURAL MAP & CONTEXT DISCOVERY
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Call file_reader(file_path='tech_stack.md')
-Call file_reader(file_path='requirements.md')
+1. Call file_reader(file_path='tech_stack.md') to understand the project architecture and module system.
+   - Do NOT build the entire tech_stack.md. Treat it strictly as a map.
+2. Use `code_search` or `code_impact` to discover where the current feature logic should be injected into existing code.
 
-EXTRACT:
-- The programming language (Python, JavaScript, TypeScript, etc.)
-- The COMPLETE file structure with ALL files to create
-- Every module, class, function, test file mentioned
-
-CRITICAL: Count how many files are in the tech_stack file structure!
-If tech_stack shows 6 files, you MUST create all 6 files!
-
-FRAPPE APP FILE PATHS — MANDATORY:
-If this is a Frappe app, file paths have THREE levels of same-name folders. This is NOT a typo!
-Example for app "asset_tracker" with module "Asset Tracker":
-  asset_tracker/asset_tracker/asset_tracker/doctype/it_asset/it_asset.json
-  Level 1: app root / Level 2: inner package / Level 3: module folder / doctype/ / doctype_name/
-You MUST use the EXACT paths from tech_stack.md. Do NOT "simplify" by removing a folder level.
-If tech_stack.md shows three nested folders with the same name, create all three.
-
-Example from tech_stack.md:
-```
-src/
-├── calculator.py        # You must create this
-├── operations.py        # You must create this  
-├── display.py          # You must create this
-└── tests/
-    ├── test_calculator.py    # You must create this
-    ├── test_operations.py    # You must create this
-    └── test_display.py       # You must create this
-```
-You MUST create ALL 6 files!
-
-NOTE:
-- Ignore config files like package.json, tsconfig.json, metro/babel configs. Focus on source files under src/ and src/tests/ (or __tests__/).
-- File names are case-sensitive. Match the casing used in tech_stack.md (e.g., calculator.py vs Calculator.py).
-
+STEP 2: READ EXISTING FILES
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-STEP 2: CREATE ALL IMPLEMENTATION FILES
+Before modifying any file, check if it already exists:
+1. Call `file_lister(directory='.')` or `file_reader` on the target files.
+2. If the file exists, you MUST read its content to understand its current state.
+
+STEP 3: IMPLEMENT FEATURE (PATCH VS CREATE)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-**CRITICAL: Module system rule — read tech_stack.md to find the declared module system.**
-- If tech_stack.md says "ES modules" → use `import`/`export` in ALL .js/.ts files. Do NOT use `require()` or `module.exports`.
-  HTML files must load scripts with `<script type="module">`.
-- If tech_stack.md says "CommonJS" → use `require()`/`module.exports` in ALL .js files. Do NOT use `import`/`export`.
-- If tech_stack.md says "Script tags" → do NOT use `import`/`export` or `require()`. Use global variables and plain `<script src="...">` tags.
-Every file in the project MUST follow the same module system. Do NOT mix them.
+You MUST choose the correct tool based on file existence:
 
-**THIS IS MANDATORY - CREATE EVERY FILE IN TECH_STACK**
+SCENARIO A: The file ALREADY EXISTS (Brownfield/Updates)
+- You MUST use `replace_file_content` with a `start_line` and `end_line` to patch specific methods or classes.
+- NEVER use `file_writer` or `bulk_file_writer` on an existing file, as it will delete the rest of the file!
 
-For EACH implementation file in tech_stack.md:
-1. Call file_writer(file_path='src/<module>.<ext>', content='...')
-2. Wait for "✅ Successfully wrote" confirmation
-3. Move to next file
+SCENARIO B: The file is BRAND NEW (Greenfield)
+- You MUST use `bulk_file_writer` or `file_writer` to create the new file from scratch.
+- CRITICAL MANIFEST RULE: You MUST ONLY create files that are explicitly listed in the "PROJECT FILE TREE" in your prompt context. The file system enforces this. If you invent new file paths (e.g. 'tests/test_feature_x.py' instead of 'tests/core.py'), the tool will REJECT your write.
+- CRITICAL JSON RULE: Escape all newlines inside the `content` string as `\n` to prevent truncation.
 
-Example:
-- file_writer(file_path='src/calculator.py', content='...')
-  → WAIT FOR ✅
-- file_writer(file_path='src/operations.py', content='...')
-  → WAIT FOR ✅
-- file_writer(file_path='src/display.py', content='...')
-  → WAIT FOR ✅
-
-DO NOT skip any implementation file!
-
+STEP 4: WRITE TESTS FOR YOUR FEATURE
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-STEP 3: CREATE ALL TEST FILES
+- Only write tests relevant to the feature you just implemented.
+- Use `replace_file_content` if adding to an existing test file.
+- Use `bulk_file_writer` if creating a brand new test file.
+
+STEP 5: VERIFY
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-**THIS IS MANDATORY - CREATE EVERY TEST FILE**
+Confirm that your changes correctly implemented the feature described in the requirements.
 
-**CRITICAL: Test import matching rule — read tech_stack.md to determine the testing framework.**
-- Vanilla HTML/CSS/JS → use Jest + jsdom. Do NOT import React or @testing-library/react.
-- React / React Native → use Jest + @testing-library/react
-- Angular → use Jasmine + Karma
-- Python → use pytest
-- Java → use JUnit 5
-Test files must ONLY import libraries that are listed in the tech stack. Do NOT import
-React, Angular, Vue, or any framework that the project does not use.
+CRITICAL RULES (tool mode):
+- You MUST ONLY call ONE tool per turn! After outputting `Action:` and `Action Input:`, STOP generating text. Wait for the Observation.
+- For existing files, ONLY use `replace_file_content`.
 
-For EACH implementation file, create its test file:
-1. Call file_writer(file_path='src/tests/test_<module>.<ext>', content='...')
-2. Wait for "✅ Successfully wrote" confirmation
-3. Move to next test file
-
-Example:
-- file_writer(file_path='src/tests/test_calculator.py', content='...')
-  → WAIT FOR ✅
-- file_writer(file_path='src/tests/test_operations.py', content='...')
-  → WAIT FOR ✅
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-STEP 4: VERIFY ALL FILES EXIST
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Call file_lister(directory='src')
-
-Count the files. Does it match tech_stack.md?
-- If tech_stack shows 6 files, you must see 6 files
-- If any file is missing, create it now!
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-CRITICAL FAILURE CONDITIONS:
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-❌ FAILURE: Creating only 1-2 files when tech_stack specifies 6+ files
-❌ FAILURE: Skipping test files
-❌ FAILURE: Not seeing "✅ Successfully wrote" for EACH file
-
-✅ SUCCESS: Created ALL implementation AND test files from tech_stack.md
-
-Your final answer MUST list ALL files you created:
-"✅ Created src/calculator.py (implementation)
-✅ Created src/operations.py (implementation)
-✅ Created src/display.py (implementation)
-✅ Created src/tests/test_calculator.py (tests)
-✅ Created src/tests/test_operations.py (tests)
-✅ Created src/tests/test_display.py (tests)"
-
-DO NOT give final answer until you created EVERY file from tech_stack.md!
+✅ SUCCESS: Implemented the feature correctly using patches and writes.
+Your final answer MUST list the files you patched or created.

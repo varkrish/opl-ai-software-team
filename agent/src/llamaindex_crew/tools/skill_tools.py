@@ -121,18 +121,18 @@ def prefetch_skills(
 
     if role == "designer":
         queries = [
-            f"{vision} design patterns UI architecture conventions",
-            f"{vision} component architecture implementation patterns",
+            f"design patterns UI architecture conventions {vision[:200]}",
+            f"component architecture implementation patterns {vision[:200]}",
         ]
     elif role == "tech_architect":
         queries = [
-            f"{vision} app folder structure scaffold conventions",
-            f"{vision} coding patterns implementation architecture",
+            f"folder structure scaffold file tree {vision[:200]}",
+            f"coding patterns implementation architecture {vision[:200]}",
         ]
     else:
         queries = [
-            f"{vision} architecture conventions patterns",
-            f"{vision} folder structure implementation",
+            f"architecture conventions patterns {vision[:200]}",
+            f"folder structure implementation {vision[:200]}",
         ]
 
     if extra_queries:

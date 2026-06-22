@@ -1,7 +1,10 @@
 """
 Tools module for LlamaIndex FunctionTools
 """
-from .file_tools import FileWriterTool, FileReaderTool, FileListTool, FileDeleterTool, create_workspace_file_tools
+from .file_tools import (
+    FileWriterTool, BulkFileWriterTool, FileReaderTool,
+    FileListTool, FileDeleterTool, create_workspace_file_tools,
+)
 from .git_tools import (
     GitTool,
     GitInitTool,
@@ -16,6 +19,7 @@ from .tool_loader import load_tools
 
 __all__ = [
     "FileWriterTool",
+    "BulkFileWriterTool",
     "FileReaderTool",
     "FileListTool",
     "FileDeleterTool",

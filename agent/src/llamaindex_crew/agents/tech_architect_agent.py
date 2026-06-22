@@ -45,18 +45,16 @@ You consider the project vision and constraints when making decisions."""
         
         backstory = custom_backstory or default_backstory
 
-        if workspace_path is not None:
-            ws_tools = create_workspace_file_tools(self.workspace_path)
-            tools = [ws_tools[0], ws_tools[1]]  # file_writer, file_reader
-            append_tldr_tools(tools, self.workspace_path)
-        else:
-            tools = [FileWriterTool, FileReaderTool]
+        # The Tech Architect explicitly uses XML output tags (<tech_stack>, <implementation_plan>) 
+        # and its output is parsed by the Python wrapper. We do NOT want to give it any tools.
+        # Giving it tools forces the ReActAgent parser, which fails on large trimmed contexts.
+        tools = []
 
         try:
             config = ConfigLoader.load()
             entries = config.tools.global_tools + config.tools.agent_tools.get("tech_architect", [])
             extra_tools = load_tools(entries)
-            tools.extend(extra_tools)
+            # DO NOT append extra tools to force SimpleAgent usage!
             if extra_tools:
                 backstory += (
                     "\n\nFramework-specific skills are automatically injected into your task "
@@ -132,8 +130,30 @@ You consider the project vision and constraints when making decisions."""
             )
 
         response = self.agent.chat(prompt)
+        response_text = str(response)
+        
+        # DeepSeek-R1 outputs the final files inside XML tags to avoid JSON serialization failures
+        # Extract them and write to disk
+        if self.workspace_path:
+            import re
+            tech_stack_path = self.workspace_path / "tech_stack.md"
+            impl_plan_path = self.workspace_path / "implementation_plan.md"
+            
+            tech_match = re.search(r'<tech_stack>\s*(.*?)\s*</tech_stack>', response_text, re.DOTALL)
+            if tech_match:
+                tech_stack_path.write_text(tech_match.group(1).strip())
+            elif not tech_stack_path.exists():
+                logger.warning("tech_stack.md not found and XML tags missing. Applying fallback.")
+                tech_stack_path.write_text(response_text)
+                
+            impl_match = re.search(r'<implementation_plan>\s*(.*?)\s*</implementation_plan>', response_text, re.DOTALL)
+            if impl_match:
+                impl_plan_path.write_text(impl_match.group(1).strip())
+            elif not impl_plan_path.exists():
+                logger.warning("implementation_plan.md not found and XML tags missing. Applying fallback.")
+                impl_plan_path.write_text(response_text)
 
-        return str(response)
+        return response_text
     
     def generate_api_contract(
         self,
@@ -247,12 +267,6 @@ The plan MUST contain:
 3. **Data Flow & Sequence**: Textual explanation or Mermaid diagrams showing request-response or message transmission paths through routing, controllers, services, database/socket, and client response.
 4. **Integration Strategy**: How the frontend integrates with the backend API, state management of socket connections, and reconnection loops.
 5. **Security, Validation & Error Handling**: Authentication/authorization enforcement (e.g. token extraction, RBAC, channel auth), inputs validation rules, rate-limiting, and resilience features for connection dropouts.
-
-Call file_writer(file_path='implementation_plan.md', content='<your logical implementation plan>')
-
-Your final response MUST be formatted as:
-Thought: I have successfully created the tech_stack.md and implementation_plan.md files.
-Final Answer: ✅ Created complete tech_stack.md and implementation_plan.md with logical [technology] solution
 """
 
 

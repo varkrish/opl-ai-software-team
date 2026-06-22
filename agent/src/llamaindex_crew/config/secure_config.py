@@ -35,20 +35,32 @@ class LLMConfig(BaseModel):
     api_key: str = Field(..., description="API key for LLM provider")
     api_base_url: Optional[str] = Field(None, description="Base URL for API endpoint")
     environment: str = Field("production", description="Environment: production or local")
-    
+
     # Model configuration
     model_manager: str = Field("gpt-4o-mini", description="Model for manager agents")
     model_worker: str = Field("gpt-4o-mini", description="Model for worker agents")
     model_reviewer: str = Field("gpt-4o-mini", description="Model for reviewer agents")
-    
+
     # LLM parameters
     max_tokens: int = Field(8192, description="Maximum tokens per request")
     temperature: float = Field(0.7, description="Sampling temperature")
     embedding_model: str = Field("text-embedding-3-small", description="Embedding model")
-    
+
     # Ollama configuration (for local)
     ollama_base_url: str = Field("http://localhost:11434", description="Ollama server URL")
     ollama_model: str = Field("llama3.2:latest", description="Ollama model name")
+
+    # Capability flag: controls whether agents use ReAct tool loops or single-shot
+    # structured output.  None = auto-infer from model name (see llm_config.py).
+    # Set to false explicitly for weak/free/small models that crash in ReAct loops.
+    supports_react: Optional[bool] = Field(
+        None,
+        description=(
+            "Whether the configured models can execute ReAct tool loops. "
+            "None (default) = auto-inferred from model name. "
+            "Set to false for weak/free/small models to use structured single-shot output instead."
+        ),
+    )
 
 
 class BudgetConfig(BaseModel):
@@ -124,6 +136,68 @@ class ToolsConfig(BaseModel):
     )
 
 
+class GenerationConfig(BaseModel):
+    """Code generation performance settings."""
+    parallel_file_workers: int = Field(
+        5,
+        description=(
+            "Number of concurrent LLM worker threads for file generation. "
+            "Each worker holds its own independent agent and fires a separate API call. "
+            "Set to 1 for sequential mode (useful for debugging or rate-limited endpoints). "
+            "Can be overridden at runtime with the PARALLEL_FILE_WORKERS environment variable."
+        ),
+    )
+    simple_mode_skip_rag: bool = Field(
+        True,
+        description=(
+            "When supports_react=False, skip per-file RAG embedding queries during "
+            "development (context is already in the file prompt)."
+        ),
+    )
+    simple_mode_max_retries: int = Field(
+        2,
+        description=(
+            "Validation retry count for simple-mode file generation. "
+            "Small/weak models benefit from 2 retries (3 attempts total). "
+            "Set to 0 only for fastest/debug runs."
+        ),
+    )
+    simple_mode_retry_critical_only: bool = Field(
+        False,
+        description=(
+            "When false (default), retry on all validation issues — recommended for "
+            "small models in simple mode. When true, only retry syntax/missing-file "
+            "failures and accept stub/placeholder warnings without a retry."
+        ),
+    )
+    simple_mode_max_tech_stack_chars: int = Field(
+        12_000,
+        description="Max tech_stack.md chars injected per file prompt in simple mode.",
+    )
+    simple_mode_max_user_stories_chars: int = Field(
+        3_000,
+        description="Max user_stories chars injected per file prompt in simple mode.",
+    )
+    simple_mode_large_file_tech_stack_chars: int = Field(
+        24_000,
+        description=(
+            "Higher tech_stack char budget for complex targets (DocTypes, services, "
+            "migrations, hooks.py, large Java classes)."
+        ),
+    )
+    simple_mode_large_file_user_stories_chars: int = Field(
+        6_000,
+        description="Higher user_stories char budget for complex/large file targets.",
+    )
+    simple_mode_large_file_related_chars: int = Field(
+        16_384,
+        description=(
+            "Max chars per related dependency file injected when generating a "
+            "complex/large target (default prompt limit is 8192)."
+        ),
+    )
+
+
 class PlanReviewConfig(BaseModel):
     """Plan review gate configuration"""
     enabled: bool = Field(False, description="Enable human-in-the-loop plan review gate")
@@ -144,6 +218,7 @@ class SecretConfig(BaseModel):
     skills: SkillsConfig = Field(default_factory=SkillsConfig)
     tools: ToolsConfig = Field(default_factory=ToolsConfig)
     plan_review: PlanReviewConfig = Field(default_factory=PlanReviewConfig)
+    generation: GenerationConfig = Field(default_factory=GenerationConfig)
     
     # Encryption key for encrypted values
     _encryption_key: Optional[bytes] = None
