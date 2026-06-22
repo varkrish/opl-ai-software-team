@@ -29,7 +29,7 @@ TASK — Create design_spec.md
 
 CRITICAL — Use the FRAMEWORK REFERENCE above to:
 - Name components and modules using the framework's actual terminology (e.g. DocType, Page, Report for Frappe; Component, Service, Hook for React).
-- Describe domain entities using the framework's data modelling approach (e.g. DocType JSON + controller.py for Frappe, Prisma schema for Node).
+- Describe domain entities using the framework's data modelling approach (e.g. DocType JSON + <doctype_name>.py for Frappe, Prisma schema for Node).
 - Specify UI patterns the framework actually supports (e.g. Frappe Page, Workspace, Dialog; React Router, Context).
 - List framework-specific integration points (e.g. hooks.py, fixtures, whitelisted APIs for Frappe).
 - When showing file paths, use the EXACT nesting from the FRAMEWORK REFERENCE. Copy the folder hierarchy verbatim.

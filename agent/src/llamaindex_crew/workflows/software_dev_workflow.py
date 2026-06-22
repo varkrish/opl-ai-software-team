@@ -25,6 +25,18 @@ from ..utils.feature_parser import parse_features_from_files
 from ..utils.document_indexer import DocumentIndexer
 from ..utils.rag_context import get_phase_rag_context
 from ..utils.llm_config import get_embedding_model
+from ..utils.output_parser import (
+    is_valid_gherkin_feature,
+    product_owner_format_instruction,
+    simple_mode_format_instruction,
+    write_files_from_response,
+)
+from ..utils.generation_prompt_utils import (
+    filter_retry_issues,
+    is_likely_large_file,
+    trim_tech_stack_for_prompt,
+    trim_user_stories_for_prompt,
+)
 from .epic_story_loop import (
     StoryAssessment,
     assess_epic_stories,
@@ -282,12 +294,22 @@ def _extract_gherkin_features(text: str) -> Dict[str, str]:
 
 
 def _ensure_feature_files(workspace: Path, user_stories_text: str) -> int:
-    """Guarantee that features/ contains .feature files.
+    """Guarantee that features/ contains valid .feature files.
 
-    If none exist, attempt to extract Gherkin blocks from *user_stories_text*
-    and write them.  Returns the number of feature files present after the call.
+    Removes invalid/stub feature files, then extracts Gherkin from *user_stories_text*
+    when needed. Returns the count of valid feature files after the call.
     """
     features_dir = workspace / "features"
+    if features_dir.exists():
+        for path in list(features_dir.glob("*.feature")):
+            try:
+                content = path.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                content = ""
+            if not is_valid_gherkin_feature(content):
+                logger.warning("Removing invalid feature file: %s", path.name)
+                path.unlink(missing_ok=True)
+
     existing = list(features_dir.glob("*.feature")) if features_dir.exists() else []
     if existing:
         return len(existing)
@@ -1774,18 +1796,25 @@ class SoftwareDevWorkflow:
                 raise
     
     _PO_FEATURE_RETRY_PROMPT = (
-        "CRITICAL: You MUST use the file_writer tool to create EACH file individually. "
-        "Do NOT describe what you would create — actually call file_writer for every file.\n\n"
+        "CRITICAL: Create ALL product-owner artifacts for this project.\n\n"
         "Project Vision: {vision}\n"
         "Project Context: {context_digest}\n\n"
-        "Create these files using file_writer:\n"
-        "1. 'requirements.md' — high-level requirements\n"
+        "Required files:\n"
+        "1. 'requirements.md' — high-level requirements (complete, not truncated)\n"
         "2. 'user_stories.md' — detailed user stories with acceptance criteria "
         "(As a… I want… So that… / Given… When… Then…)\n"
-        "3. One 'features/<name>.feature' file per feature in proper Gherkin syntax "
-        "(Feature / Scenario / Given / When / Then)\n\n"
-        "Call file_writer once for EACH file. Do not skip any."
+        "3. One 'features/<domain_name>.feature' file per major feature in proper Gherkin "
+        "(Feature / Scenario / Given / When / Then). Use domain-specific names.\n"
     )
+
+    def _po_materialize_response(self, response_str: str, label: str = "ProductOwner-retry") -> None:
+        """Parse PO response and write requirements, stories, and feature files."""
+        write_files_from_response(
+            response_str,
+            self.workspace_path,
+            raw_fallback_path="user_stories.md",
+            label=label,
+        )
 
     def run_product_owner_phase(self) -> str:
         """Run Product Owner phase to create user stories and BDD feature files."""
@@ -1840,8 +1869,10 @@ class SoftwareDevWorkflow:
                 vision=self.vision,
                 context_digest=self.project_context or "",
             )
-            result = self.product_owner_agent.agent.chat(retry_prompt)
-            result = str(result)
+            if not self.product_owner_agent.supports_react:
+                retry_prompt += product_owner_format_instruction()
+            result = str(self.product_owner_agent.agent.chat(retry_prompt))
+            self._po_materialize_response(result, label="ProductOwner-retry-gate1")
             _persist_phase_artifact(self.workspace_path, "user_stories.md", result)
             _persist_phase_artifact(self.workspace_path, "requirements.md", result)
 
@@ -1878,18 +1909,20 @@ class SoftwareDevWorkflow:
                 config=self.config,
             )
             feature_prompt = (
-                "You MUST create Gherkin .feature files using the file_writer tool.\n\n"
+                "Create Gherkin .feature files for this project.\n\n"
                 f"Project Vision: {self.vision}\n\n"
                 f"User Stories:\n{self.user_stories or 'Not available — create them too.'}\n\n"
-                "For each feature, call file_writer with path 'features/<name>.feature' "
+                "For each major feature, output a file at features/<domain_specific_name>.feature "
                 "containing proper Gherkin:\n"
                 "  Feature: <title>\n"
                 "    Scenario: <scenario name>\n"
                 "      Given …\n      When …\n      Then …\n\n"
-                "Create at least one .feature file per major feature. "
-                "Call file_writer for EACH file."
+                "Create at least one .feature file per major feature."
             )
+            if not self.product_owner_agent.supports_react:
+                feature_prompt += product_owner_format_instruction()
             result = str(self.product_owner_agent.agent.chat(feature_prompt))
+            self._po_materialize_response(result, label="ProductOwner-retry-features")
             feature_count = _ensure_feature_files(self.workspace_path, result)
 
         logger.info(
@@ -2161,6 +2194,111 @@ class SoftwareDevWorkflow:
         ext = Path(file_path).suffix.lower()
         return ext in cls._FRONTEND_ONLY_EXTENSIONS
 
+    # ── File materialization from LLM response ───────────────────────────────
+
+    def _resolve_task_file_on_disk(self, file_path: str) -> Path:
+        """Return the workspace path for *file_path*, with basename fallback."""
+        full_path = self.workspace_path / file_path
+        if full_path.exists():
+            return full_path
+        by_name = {
+            p.name: p
+            for p in self.workspace_path.rglob("*")
+            if p.is_file()
+        }
+        if Path(file_path).name in by_name:
+            return by_name[Path(file_path).name]
+        return full_path
+
+    def _materialize_file_from_response(
+        self,
+        result_str: str,
+        file_path: str,
+        label: str,
+        *,
+        agent_simple: bool,
+    ) -> bool:
+        """Parse *result_str* and write *file_path* when tools did not.
+
+        Simple mode: primary write path (always runs).
+        ReAct mode: safety net only — runs when ``file_writer`` did not create the file.
+
+        Returns True if the file exists on disk after this call.
+        """
+        if not file_path:
+            return False
+
+        exists_before = self._resolve_task_file_on_disk(file_path).exists()
+        if not agent_simple and exists_before:
+            return True
+
+        write_label = label if agent_simple else f"{label}-safetynet"
+        if not agent_simple:
+            logger.info(
+                "[%s] safety net: %s missing after ReAct — parsing response",
+                label, file_path,
+            )
+
+        result = write_files_from_response(
+            result_str,
+            self.workspace_path,
+            target_file_path=file_path,
+            label=write_label,
+        )
+        if result.written_paths:
+            logger.info(
+                "[%s] materialized %s via %s (%s)",
+                label, file_path, result.parse_strategy, write_label,
+            )
+        return self._resolve_task_file_on_disk(file_path).exists()
+
+    # ── Parallel-worker count resolution ─────────────────────────────────────
+
+    def _resolve_parallel_workers(self) -> int:
+        """Return the number of parallel file-generation workers.
+
+        Resolution order (first match wins):
+        1. ``PARALLEL_FILE_WORKERS`` environment variable (runtime override).
+        2. ``generation.parallel_file_workers`` from the loaded config.yaml.
+        3. Hard-coded default of 5.
+        """
+        env_val = os.environ.get("PARALLEL_FILE_WORKERS")
+        if env_val:
+            return max(1, int(env_val))
+        if self.config is not None:
+            gen = getattr(self.config, "generation", None)
+            if gen is not None:
+                return max(1, int(gen.parallel_file_workers))
+        return 5
+
+    def _generation_settings(self):
+        """Return generation config or sensible defaults."""
+        gen = getattr(self.config, "generation", None) if self.config else None
+        return gen
+
+    def _dev_prompt_context(
+        self, agent_simple: bool, file_path: str = "",
+    ) -> tuple[str, str]:
+        """Return (tech_stack, user_stories) sized for the agent mode."""
+        ts = self.tech_stack or ""
+        us = self.user_stories or ""
+        if not agent_simple:
+            return ts, us
+
+        gen = self._generation_settings()
+        large = is_likely_large_file(file_path)
+        if large:
+            max_ts = int(getattr(gen, "simple_mode_large_file_tech_stack_chars", 24_000) if gen else 24_000)
+            max_us = int(getattr(gen, "simple_mode_large_file_user_stories_chars", 6_000) if gen else 6_000)
+        else:
+            max_ts = int(getattr(gen, "simple_mode_max_tech_stack_chars", 12_000) if gen else 12_000)
+            max_us = int(getattr(gen, "simple_mode_max_user_stories_chars", 3_000) if gen else 3_000)
+
+        return (
+            trim_tech_stack_for_prompt(ts, max_ts),
+            trim_user_stories_for_prompt(us, max_us),
+        )
+
     # ── Reusable task-processing loop ────────────────────────────────────────
 
     def _process_file_tasks(
@@ -2171,21 +2309,32 @@ class SoftwareDevWorkflow:
         completed_files: dict,
         export_registry: dict,
         lock: "threading.Lock",
+        *,
+        agent_factory=None,
     ) -> int:
-        """Process a batch of file-creation tasks using the given agent.
+        """Process file-creation tasks using *agent* (or a pool from *agent_factory*).
 
-        Only tasks whose ID is in ``task_id_set`` are picked up; dependency
-        ordering is still respected via ``get_next_actionable_task``.
+        Pass ``agent_factory`` (a zero-arg callable that returns a fresh agent)
+        to enable parallel mode.  The number of worker threads is controlled by
+        the ``PARALLEL_FILE_WORKERS`` environment variable (default 3).
 
-        Returns the number of tasks processed. ``completed_files`` and
-        ``export_registry`` are shared dicts protected by ``lock``.
+        Sequential mode is used as a fallback when no factory is provided or
+        when ``PARALLEL_FILE_WORKERS=1``.
         """
-        from ..orchestrator.code_validator import CodeCompletenessValidator
         from ..tools.file_tools import set_thread_workspace, set_allowed_file_paths
 
         set_thread_workspace(str(self.workspace_path))
         set_allowed_file_paths(None, workspace=str(self.workspace_path))
 
+        num_workers = self._resolve_parallel_workers()
+
+        if agent_factory is not None and num_workers > 1:
+            return self._process_file_tasks_parallel(
+                agent_factory, task_id_set, label,
+                completed_files, export_registry, lock, num_workers,
+            )
+
+        # ── Sequential path (backward-compatible) ────────────────────────────
         count = 0
         max_tasks = 100
         stall_counter = 0
@@ -2201,150 +2350,295 @@ class SoftwareDevWorkflow:
                 stall_counter += 1
                 continue
             stall_counter = 0
-
-            count += 1
-            file_path = (task.metadata or {}).get("file_path", "")
-            if isinstance(file_path, str):
-                file_path = file_path.strip()
-            else:
-                file_path = ""
-            auto_content = (task.metadata or {}).get("auto_content")
-
-            if task.task_type == "file_creation" and (not file_path or file_path.lower() == "unknown"):
-                self.task_manager.update_task_status(
-                    task.task_id, "skipped",
-                    "No file_path in task metadata (feature/other task)",
-                )
-                logger.info("[%s] Task %d: skipped (no file_path) %s", label, count, task.task_id)
-                continue
-
-            logger.info("[%s] Task %d: generating %s", label, count, file_path or task.description)
-            self._report_progress(
-                'development',
-                65 + min(20, count),
-                f"[{label}] Creating {file_path or task.description}...",
-            )
             self.task_manager.mark_task_started(task.task_id)
+            count += 1
+            self._process_claimed_task(
+                task, agent, label, completed_files, export_registry, lock, count,
+            )
 
-            if auto_content is not None and file_path:
-                target = self.workspace_path / file_path
-                target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_text(auto_content, encoding="utf-8")
-                self.task_manager.update_task_status(
-                    task.task_id, "completed", f"Auto-generated: {file_path}"
+        return count
+
+    def _process_file_tasks_parallel(
+        self,
+        agent_factory,
+        task_id_set: set,
+        label: str,
+        completed_files: dict,
+        export_registry: dict,
+        lock: "threading.Lock",
+        num_workers: int,
+    ) -> int:
+        """Parallel variant of _process_file_tasks.
+
+        Spins up *num_workers* threads, each with its own agent instance.
+        Tasks are claimed atomically from the shared queue so no two workers
+        ever process the same file.  Workers wait briefly when all remaining
+        tasks have unmet dependencies (a sibling may complete them soon).
+        """
+        import concurrent.futures as _cf
+        import threading as _threading
+        from ..tools.file_tools import set_thread_workspace, set_allowed_file_paths
+
+        count_lock = _threading.Lock()
+        total = [0]
+
+        logger.info(
+            "[%s] ⚡ Parallel file generation: %d workers for %d tasks",
+            label, num_workers, len(task_id_set),
+        )
+
+        def worker(worker_id: int) -> int:
+            set_thread_workspace(str(self.workspace_path))
+            set_allowed_file_paths(None, workspace=str(self.workspace_path))
+
+            agent = agent_factory()
+            local_count = 0
+            stall = 0
+
+            while True:
+                task = self.task_manager.get_and_claim_actionable_task(
+                    "development", task_id_filter=task_id_set,
                 )
-                logger.info("[%s] ✅ Auto-generated %s", label, file_path)
+                if task is None:
+                    if not self.task_manager.has_pending_or_active_tasks(
+                        "development", task_id_set
+                    ):
+                        break  # All tasks done or claimed
+                    if stall > 40:  # 20 s with no new work
+                        logger.warning(
+                            "[%s] Worker %d: stalled 20 s with no new tasks — exiting",
+                            label, worker_id,
+                        )
+                        break
+                    stall += 1
+                    time.sleep(0.5)
+                    continue
+                stall = 0
+                local_count += 1
+                self._process_claimed_task(
+                    task, agent, label, completed_files, export_registry, lock, local_count,
+                )
+
+            with count_lock:
+                total[0] += local_count
+            logger.info("[%s] Worker %d finished: %d tasks", label, worker_id, local_count)
+            return local_count
+
+        with _cf.ThreadPoolExecutor(max_workers=num_workers) as pool:
+            futures = [pool.submit(worker, i) for i in range(num_workers)]
+            for fut in _cf.as_completed(futures):
+                try:
+                    fut.result()
+                except Exception as exc:
+                    logger.error("[%s] Parallel worker raised: %s", label, exc)
+
+        logger.info("[%s] ⚡ Parallel generation complete: %d total tasks", label, total[0])
+        return total[0]
+
+    def _process_claimed_task(
+        self,
+        task,
+        agent,
+        label: str,
+        completed_files: dict,
+        export_registry: dict,
+        lock: "threading.Lock",
+        task_num: int,
+    ) -> None:
+        """Execute one already-claimed task with the given agent.
+
+        Called by both the sequential loop (after ``mark_task_started``) and
+        the parallel workers (after ``get_and_claim_actionable_task``).
+        Handles auto-generated files, LLM generation, validation, and retries.
+        """
+        from ..orchestrator.code_validator import CodeCompletenessValidator
+
+        file_path = (task.metadata or {}).get("file_path", "")
+        if isinstance(file_path, str):
+            file_path = file_path.strip()
+        else:
+            file_path = ""
+        auto_content = (task.metadata or {}).get("auto_content")
+
+        if task.task_type == "file_creation" and (not file_path or file_path.lower() == "unknown"):
+            self.task_manager.update_task_status(
+                task.task_id, "skipped",
+                "No file_path in task metadata (feature/other task)",
+            )
+            logger.info("[%s] Task %d: skipped (no file_path) %s", label, task_num, task.task_id)
+            return
+
+        logger.info("[%s] Task %d: generating %s", label, task_num, file_path or task.description)
+        self._report_progress(
+            'development',
+            65 + min(20, task_num),
+            f"[{label}] Creating {file_path or task.description}...",
+        )
+
+        if auto_content is not None and file_path:
+            target = self.workspace_path / file_path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(auto_content, encoding="utf-8")
+            self.task_manager.update_task_status(
+                task.task_id, "completed", f"Auto-generated: {file_path}"
+            )
+            logger.info("[%s] ✅ Auto-generated %s", label, file_path)
+            return
+
+        MAX_FILE_RETRIES = 2
+        retry_prompt = None
+        agent_simple = not getattr(agent, "supports_react", True)
+        gen = self._generation_settings()
+        skip_rag = False
+        retry_critical_only = False
+        if agent_simple:
+            skip_rag = getattr(gen, "simple_mode_skip_rag", True) if gen else True
+            MAX_FILE_RETRIES = int(getattr(gen, "simple_mode_max_retries", 2) if gen else 2)
+            retry_critical_only = bool(
+                getattr(gen, "simple_mode_retry_critical_only", False) if gen else False
+            )
+            # Complex targets benefit from RAG snippets even in simple mode.
+            if skip_rag and is_likely_large_file(file_path):
+                skip_rag = False
+
+        for attempt in range(MAX_FILE_RETRIES + 1):
+            agent.agent.reset_chat()
+
+            with lock:
+                snap_exports = dict(export_registry)
+
+            pl = getattr(self.config, "prompt_limits", None) if self.config else None
+            max_pvc = getattr(pl, "max_project_vision_chars", None) if pl else None
+            max_dep_chars = int(getattr(pl, "max_completed_file_chars", 8192)) if pl else 8192
+            if agent_simple and is_likely_large_file(file_path):
+                large_dep = int(
+                    getattr(gen, "simple_mode_large_file_related_chars", 16_384) if gen else 16_384
+                )
+                max_dep_chars = max(max_dep_chars, large_dep)
+            with lock:
+                related_files = self.task_manager.get_related_existing_files(
+                    task, completed_files, max_chars_per_file=max_dep_chars,
+                )
+            file_rag = ""
+            if file_path and not (agent_simple and skip_rag):
+                file_rag = get_phase_rag_context(
+                    self.document_indexer,
+                    "development",
+                    self.config,
+                    extra_query=f"Implement file {file_path}. {(task.description or '')[:500]}",
+                )
+            prompt_ts, prompt_us = self._dev_prompt_context(agent_simple, file_path)
+            prompt = self.task_manager.build_file_prompt(
+                task,
+                tech_stack=prompt_ts,
+                user_stories=prompt_us,
+                existing_files=related_files,
+                project_vision=self.vision or "",
+                max_project_vision_chars=max_pvc,
+                interface_contract=snap_exports if snap_exports else None,
+                api_contract=self.api_contract,
+                rag_context=file_rag,
+                simple_mode=agent_simple,
+            )
+
+            if attempt > 0 and retry_prompt:
+                prompt = retry_prompt
+
+            if agent_simple:
+                prompt = prompt + simple_mode_format_instruction(file_path or None)
+
+            try:
+                result = agent.agent.chat(prompt)
+                result_str = str(result)
+
+                if not agent_simple:
+                    self.task_manager.update_task_status_by_output(result_str)
+
+                if file_path:
+                    self._materialize_file_from_response(
+                        result_str, file_path, label, agent_simple=agent_simple,
+                    )
+                    if agent_simple:
+                        result_str += f"\n✅ Successfully wrote to {file_path}"
+            except Exception as e:
+                logger.error("[%s] Task %s failed: %s", label, task.task_id, e)
+                self.task_manager.mark_task_executed(task.task_id, TaskStatus.FAILED, str(e))
+                return
+
+            if not file_path:
+                self.task_manager.update_task_status(
+                    task.task_id,
+                    "completed",
+                    f"Feature implemented: {task.description or task.task_id}",
+                )
+                return
+
+            full_path = self._resolve_task_file_on_disk(file_path)
+            if not full_path.exists():
+                if attempt == MAX_FILE_RETRIES:
+                    self.task_manager.update_task_status(
+                        task.task_id, "skipped",
+                        f"File {file_path} was not created by the agent",
+                    )
                 continue
 
-            MAX_FILE_RETRIES = 2
-            retry_prompt = None
+            integration = CodeCompletenessValidator.validate_file_integration(
+                full_path, self.workspace_path
+            )
+            completeness = CodeCompletenessValidator.validate_file(full_path)
+            all_issues = integration.get("issues", []) + completeness.get("issues", [])
+            retry_issues = filter_retry_issues(all_issues, critical_only=retry_critical_only)
 
-            for attempt in range(MAX_FILE_RETRIES + 1):
-                agent.agent.reset_chat()
-
-                with lock:
-                    snap_exports = dict(export_registry)
-
-                pl = getattr(self.config, "prompt_limits", None) if self.config else None
-                max_pvc = getattr(pl, "max_project_vision_chars", None) if pl else None
-                max_dep_chars = int(getattr(pl, "max_completed_file_chars", 8192)) if pl else 8192
-                with lock:
-                    related_files = self.task_manager.get_related_existing_files(
-                        task, completed_files, max_chars_per_file=max_dep_chars,
-                    )
-                file_rag = ""
-                if file_path:
-                    file_rag = get_phase_rag_context(
-                        self.document_indexer,
-                        "development",
-                        self.config,
-                        extra_query=f"Implement file {file_path}. {(task.description or '')[:500]}",
-                    )
-                prompt = self.task_manager.build_file_prompt(
-                    task,
-                    tech_stack=self.tech_stack or "",
-                    user_stories=self.user_stories or "",
-                    existing_files=related_files,
-                    project_vision=self.vision or "",
-                    max_project_vision_chars=max_pvc,
-                    interface_contract=snap_exports if snap_exports else None,
-                    api_contract=self.api_contract,
-                    rag_context=file_rag,
-                )
-
-                if attempt > 0 and retry_prompt:
-                    prompt = retry_prompt
-
+            if not retry_issues or attempt == MAX_FILE_RETRIES:
+                self.task_manager.update_task_status(task.task_id, "completed", f"File created: {file_path}")
                 try:
-                    result = agent.agent.chat(prompt)
-                    result_str = str(result)
-                    self.task_manager.update_task_status_by_output(result_str)
-                except Exception as e:
-                    logger.error("[%s] Task %s failed: %s", label, task.task_id, e)
-                    self.task_manager.mark_task_executed(task.task_id, TaskStatus.FAILED, str(e))
-                    break
-
-                if not file_path:
-                    self.task_manager.update_task_status(
-                        task.task_id,
-                        "completed",
-                        f"Feature implemented: {task.description or task.task_id}",
-                    )
-                    break
-
-                full_path = self.workspace_path / file_path
-                if not full_path.exists():
-                    all_files_map = {p.name: p for p in self.workspace_path.rglob("*") if p.is_file()}
-                    if Path(file_path).name in all_files_map:
-                        full_path = all_files_map[Path(file_path).name]
-
-                if not full_path.exists():
-                    if attempt == MAX_FILE_RETRIES:
-                        self.task_manager.update_task_status(
-                            task.task_id, "skipped",
-                            f"File {file_path} was not created by the agent",
-                        )
-                    continue
-
-                integration = CodeCompletenessValidator.validate_file_integration(
-                    full_path, self.workspace_path
-                )
-                completeness = CodeCompletenessValidator.validate_file(full_path)
-                all_issues = integration.get("issues", []) + completeness.get("issues", [])
-
-                if not all_issues or attempt == MAX_FILE_RETRIES:
-                    self.task_manager.update_task_status(task.task_id, "completed", f"File created: {file_path}")
-                    try:
-                        content = full_path.read_text(encoding="utf-8", errors="replace")
-                        pl = getattr(self.config, "prompt_limits", None) if self.config else None
-                        max_dep = int(getattr(pl, "max_completed_file_chars", 8192)) if pl else 8192
-                        if len(content) <= max_dep:
-                            with lock:
-                                completed_files[file_path] = content
-                        else:
-                            with lock:
-                                completed_files[file_path] = content[:max_dep] + "\n# ... truncated ..."
-                    except Exception:
-                        pass
-                    try:
-                        summary = CodeCompletenessValidator.extract_export_summary(full_path)
+                    content = full_path.read_text(encoding="utf-8", errors="replace")
+                    pl = getattr(self.config, "prompt_limits", None) if self.config else None
+                    max_dep = int(getattr(pl, "max_completed_file_chars", 8192)) if pl else 8192
+                    if len(content) <= max_dep:
                         with lock:
-                            export_registry[file_path] = summary.get("exports", [])
-                    except Exception:
-                        pass
-                    if all_issues:
-                        logger.warning("[%s] ⚠️ File %s still has issues after retry: %s", label, file_path, all_issues)
-                    break
+                            completed_files[file_path] = content
+                    else:
+                        with lock:
+                            completed_files[file_path] = content[:max_dep] + "\n# ... truncated ..."
+                except Exception:
+                    pass
+                try:
+                    summary = CodeCompletenessValidator.extract_export_summary(full_path)
+                    with lock:
+                        export_registry[file_path] = summary.get("exports", [])
+                except Exception:
+                    pass
+                if all_issues and not retry_issues:
+                    logger.info(
+                        "[%s] File %s has non-critical issues (accepted): %s",
+                        label, file_path, all_issues,
+                    )
+                elif all_issues:
+                    logger.warning(
+                        "[%s] ⚠️ File %s still has issues after retry: %s",
+                        label, file_path, all_issues,
+                    )
+                return
 
-                logger.warning("[%s] ⚠️ File %s has issues (attempt %d), retrying: %s",
-                               label, file_path, attempt + 1, all_issues)
+            logger.warning(
+                "[%s] ⚠️ File %s has critical issues (attempt %d), retrying: %s",
+                label, file_path, attempt + 1, retry_issues,
+            )
+            if agent_simple:
+                retry_prompt = (
+                    f"The file `{file_path}` you just created has these CRITICAL issues:\n"
+                    + "\n".join(f"- {i}" for i in retry_issues)
+                    + f"\n\nPlease fix and output the COMPLETE corrected `{file_path}` as a JSON array. "
+                    + "Do NOT truncate the file — include every line of the full implementation:\n"
+                    + '[{"file_path": "' + file_path + '", "content": "...complete fixed content..."}]'
+                )
+            else:
                 retry_prompt = (
                     f"The file `{file_path}` you just created has these issues:\n"
                     + "\n".join(f"- {i}" for i in all_issues)
                     + f"\n\nPlease fix and rewrite `{file_path}` using file_writer."
                 )
-
-        return count
 
     def run_development_phase(self) -> str:
         """Run Development phase: iterate per-task, generating one file at a time.
@@ -2360,10 +2654,16 @@ class SoftwareDevWorkflow:
 
 
         if self.state_machine.get_current_state() != ProjectState.DEVELOPMENT:
-            self.state_machine.transition(
-                ProjectState.DEVELOPMENT,
-                TransitionContext(phase="development", data={})
-            )
+            if self.state_machine.can_transition(ProjectState.DEVELOPMENT):
+                self.state_machine.transition(
+                    ProjectState.DEVELOPMENT,
+                    TransitionContext(phase="development", data={})
+                )
+            else:
+                self.state_machine.force_transition(
+                    ProjectState.DEVELOPMENT,
+                    TransitionContext(phase="development", data={})
+                )
 
         # BDD gate
         features = parse_features_from_files(str(self.workspace_path))
@@ -2393,13 +2693,20 @@ class SoftwareDevWorkflow:
                     "Reset for development retry",
                 )
 
-        # Create backend dev agent
+        # Create the primary dev agent (also used as the first parallel worker)
         backstory = self.agent_backstories.get('developer')
         self.dev_agent = DevAgent(
             custom_backstory=backstory,
             budget_tracker=self.budget_tracker,
             workspace_path=self.workspace_path,
         )
+
+        def _make_dev_agent():
+            return DevAgent(
+                custom_backstory=backstory,
+                budget_tracker=self.budget_tracker,
+                workspace_path=self.workspace_path,
+            )
 
         from ..tools.file_tools import set_allowed_file_paths
         from ..utils.manifest_guard import dev_phase_write_guard_enabled
@@ -2433,18 +2740,29 @@ class SoftwareDevWorkflow:
         is_fullstack = bool(backend_task_ids and frontend_task_ids)
 
         if is_fullstack:
-            logger.info("⚡ Fullstack project detected — running backend (%d tasks) "
-                        "and frontend (%d tasks) in parallel",
-                        len(backend_task_ids), len(frontend_task_ids))
-            self._report_progress('development', 65,
-                                  f"Parallel build: {len(backend_task_ids)} backend + "
-                                  f"{len(frontend_task_ids)} frontend tasks...")
-
             fe_backstory = self.agent_backstories.get('frontend_developer')
             self.frontend_agent = FrontendAgent(
                 custom_backstory=fe_backstory,
                 budget_tracker=self.budget_tracker,
                 workspace_path=self.workspace_path,
+            )
+
+            def _make_fe_agent():
+                return FrontendAgent(
+                    custom_backstory=fe_backstory,
+                    budget_tracker=self.budget_tracker,
+                    workspace_path=self.workspace_path,
+                )
+
+            logger.info(
+                "⚡ Fullstack project: backend (%d) + frontend (%d) tasks, "
+                "each lane parallelised with PARALLEL_FILE_WORKERS workers",
+                len(backend_task_ids), len(frontend_task_ids),
+            )
+            self._report_progress(
+                'development', 65,
+                f"Parallel build: {len(backend_task_ids)} backend + "
+                f"{len(frontend_task_ids)} frontend tasks...",
             )
 
             import concurrent.futures
@@ -2453,11 +2771,13 @@ class SoftwareDevWorkflow:
                     self._process_file_tasks,
                     self.dev_agent, backend_task_ids, "backend",
                     completed_files, export_registry, lock,
+                    agent_factory=_make_dev_agent,
                 )
                 fe_future = pool.submit(
                     self._process_file_tasks,
                     self.frontend_agent, frontend_task_ids, "frontend",
                     completed_files, export_registry, lock,
+                    agent_factory=_make_fe_agent,
                 )
                 be_count = be_future.result()
                 fe_count = fe_future.result()
@@ -2469,6 +2789,7 @@ class SoftwareDevWorkflow:
             task_count = self._process_file_tasks(
                 self.dev_agent, all_task_ids, "dev",
                 completed_files, export_registry, lock,
+                agent_factory=_make_dev_agent,
             )
 
         self._export_registry = export_registry
@@ -2634,10 +2955,16 @@ class SoftwareDevWorkflow:
         self._report_progress('frontend', 90, "Building user interface...")
         
         if self.state_machine.get_current_state() != ProjectState.FRONTEND:
-            self.state_machine.transition(
-                ProjectState.FRONTEND,
-                TransitionContext(phase="frontend", data={})
-            )
+            if self.state_machine.can_transition(ProjectState.FRONTEND):
+                self.state_machine.transition(
+                    ProjectState.FRONTEND,
+                    TransitionContext(phase="frontend", data={})
+                )
+            else:
+                self.state_machine.force_transition(
+                    ProjectState.FRONTEND,
+                    TransitionContext(phase="frontend", data={})
+                )
         
         backstory = self.agent_backstories.get('frontend_developer')
         self.frontend_agent = FrontendAgent(

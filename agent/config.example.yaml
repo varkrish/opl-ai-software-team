@@ -14,7 +14,7 @@
 llm:
   # API key for your LLM provider (REQUIRED)
   api_key: "your_api_key_here"
-  
+
   # Base URL for API endpoint (optional, defaults to OpenAI)
   # Examples:
   #   Red Hat MaaS: "https://litellm-prod.apps.maas.redhatworkshops.io"
@@ -22,23 +22,29 @@ llm:
   #   Azure OpenAI: "https://YOUR_RESOURCE.openai.azure.com"
   #   OpenAI:       (leave unset for default)
   api_base_url: "https://litellm-prod.apps.maas.redhatworkshops.io"
-  
+
   # Environment: "production" or "local" (Ollama)
   environment: "production"
-  
+
   # Model configuration
   model_manager: "gpt-4o-mini"
   model_worker: "gpt-4o-mini"
   model_reviewer: "gpt-4o-mini"
-  
+
   # LLM parameters
   max_tokens: 2048
   temperature: 0.7
   embedding_model: "text-embedding-3-small"
-  
+
   # Ollama configuration (when environment: local)
   ollama_base_url: "http://localhost:11434"
   ollama_model: "llama3.2:latest"
+
+  # ReAct capability override (optional — auto-detected from model name by default).
+  # Set to false for weak/free/small models (e.g. openrouter :free tier, 7B/8B models)
+  # to use single-shot structured JSON output instead of multi-turn tool loops.
+  # Auto-detection matches patterns: ":free", "8b", "7b", "phi-3", "mistral-7b" etc.
+  # supports_react: true
 
 # Budget Configuration
 budget:
@@ -105,3 +111,22 @@ tools:
     #     config:
     #       service_url: "http://skills-service:8090"
     #       default_tags: ["react", "frontend"]
+
+# ── Generation Performance ─────────────────────────────────────────────────────
+# Controls how many files are generated concurrently during the development phase.
+# Can also be set via the PARALLEL_FILE_WORKERS environment variable (env var wins).
+generation:
+  parallel_file_workers: 5
+
+  # Simple mode (supports_react=false) — small/weak models
+  simple_mode_max_retries: 2              # 3 attempts total; keep for small models
+  simple_mode_retry_critical_only: false  # retry on stubs/placeholders too
+  simple_mode_skip_rag: true              # skip per-file RAG for speed (large files auto-opt-in)
+
+  # Prompt size limits (simple mode). Large targets (DocTypes, hooks.py, etc.) use the
+  # simple_mode_large_file_* budgets automatically.
+  simple_mode_max_tech_stack_chars: 12000
+  simple_mode_max_user_stories_chars: 3000
+  simple_mode_large_file_tech_stack_chars: 24000
+  simple_mode_large_file_user_stories_chars: 6000
+  simple_mode_large_file_related_chars: 16384

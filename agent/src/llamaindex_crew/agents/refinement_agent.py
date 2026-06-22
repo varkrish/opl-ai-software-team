@@ -20,26 +20,23 @@ You MUST use the provided tools to accomplish the task. Do NOT just describe wha
 Available tools:
 - file_lister: Recursively list all files in a directory to discover project structure.
 - file_reader: Read the current content of a file before modifying it.
-- file_writer: Write the modified content back to a file. You MUST call this for EVERY file you want to change (create or update).
-- file_deleter: Delete a file from the workspace. Use this when the user asks to remove, delete, or get rid of a file. The file will be removed from the filesystem.
+- replace_file_content: Replace a specific range of lines in an existing file. You MUST use this to update files. NEVER overwrite the entire file.
+- file_writer: Write NEW files from scratch. Do NOT use this for updating existing files.
+- file_deleter: Delete a file from the workspace. Use this when the user asks to remove, delete, or get rid of a file.
 - code_search: Search the codebase for a regex pattern. Returns matching lines with context.
   Use BEFORE editing to find all usages of a function, class, or variable you plan to change.
 - code_structure: Show classes, functions, and exports across the entire project.
-  Use when making cross-cutting changes to understand the full project layout.
-- code_context: Get the call-chain context for a function or method (e.g. "MyClass.my_method").
-  Use to understand what a function calls before modifying it.
+- code_context: Get the call-chain context for a function or method.
 - code_impact: Find all callers of a function (reverse call graph).
-  Use BEFORE renaming, deleting, or changing a function signature to locate every call site.
 
 CRITICAL RULES:
-- You MUST call file_writer for every file you modify (create or update). Without file_writer, NO changes are saved.
-- When the user asks to DELETE, REMOVE, or get rid of a file: call file_deleter with that file_path. Do NOT empty the file with file_writer — that leaves an empty file; file_deleter actually removes the file.
-- When writing files, write the COMPLETE file content, not just a snippet or diff.
+- You MUST call replace_file_content for every existing file you want to update.
+- Do NOT use file_writer for updating files! It will delete the rest of the file. Use replace_file_content with start_line and end_line.
+- When the user asks to DELETE, REMOVE, or get rid of a file: call file_deleter with that file_path.
 - Make minimal, targeted changes that satisfy the user's request.
 - Do not invent new features or refactor beyond what was asked.
-- Respect the technology stack and patterns already in the project.
-- BEFORE modifying or deleting any function or class, call code_search or code_impact to find all usages. Update every call site, not just the definition.
-- NEVER say "I have made the changes" without actually calling file_writer or file_deleter first.
+- BEFORE modifying or deleting any function or class, call code_search or code_impact to find all usages. Update every call site.
+- NEVER say "I have made the changes" without actually calling replace_file_content, file_writer, or file_deleter first.
 """
 
 
@@ -233,21 +230,21 @@ Follow these steps exactly:
 0. Use code_impact / code_search BEFORE renaming or deleting functions to find call sites.
 1. Call file_reader with file_path="{file_path}" to load the COMPLETE current content.
 2. If the user explicitly asks to DELETE THE ENTIRE FILE: call file_deleter with file_path="{file_path}".
-3. Otherwise apply changes and call file_writer with the FULL updated file.
+3. Otherwise apply changes using replace_file_content to patch specific line ranges.
 4. Provide a Final Answer summarizing what you changed.
 
 CRITICAL RULES:{allowed_note}
-- You MUST call file_writer with the COMPLETE file — without it, nothing is saved.""")
+- You MUST use replace_file_content with start_line and end_line for existing files. DO NOT use file_writer!""")
             else:
                 sections.append(f"""
 ## Instructions
 0. Use code_impact / code_search BEFORE renaming or deleting functions to find call sites.
 1. Read the content of **{file_path}** above (or via file_reader if needed).
-2. Apply the user's changes; call file_writer with COMPLETE updated content for each file you change.
+2. Apply the user's changes using replace_file_content for specific line ranges.
 3. Provide a Final Answer summarizing what you changed.
 
 CRITICAL RULES:{allowed_note}
-- You MUST call file_writer — without it, nothing is saved.""")
+- You MUST use replace_file_content. DO NOT use file_writer to overwrite the file!""")
         else:
             sections.append("""
 ## Instructions
@@ -255,12 +252,12 @@ CRITICAL RULES:{allowed_note}
    Use code_search or code_impact BEFORE renaming/deleting functions to find all call sites.
 1. Call file_lister(".") to discover all files in the project.
 2. Use file_reader to read each relevant source file.
-3. Requests to "remove lines", "delete code", "remove functions/tools" mean EDIT the file with file_writer — keep the file, just remove the specified content.
-4. Only use file_deleter if the user explicitly asks to DELETE AN ENTIRE FILE (e.g. "delete this file", "remove this file entirely").
-5. For each file to modify: call file_writer with the COMPLETE updated content (entire file).
+3. Requests to "remove lines", "delete code" mean EDIT the file with replace_file_content using a blank replacement_content.
+4. Only use file_deleter if the user explicitly asks to DELETE AN ENTIRE FILE (e.g. "delete this file").
+5. For each file to modify: call replace_file_content with start_line and end_line.
 6. Provide a Final Answer listing all files you modified.
 
-CRITICAL: "Remove code/lines/functions" = file_writer with edited content. file_deleter = only for deleting entire files on explicit request. Without calling file_writer, nothing is saved.""")
+CRITICAL: "Remove code/lines/functions" = replace_file_content with empty replacement. file_deleter = only for deleting entire files. DO NOT use file_writer for existing files!""")
 
         return "\n".join(sections)
 

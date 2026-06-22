@@ -130,8 +130,8 @@ class MetaAgent:
                 and getattr(t.metadata, "name", None) == "git"
                 for t in meta_tools
             )
-            if not has_git:
-                meta_tools = [GitTool, *meta_tools]
+            # DO NOT automatically inject GitTool. It causes the agent to hallucinate
+            # and clone massive repositories (like frappe) unnecessarily.
             logger.info("MetaAgent: loaded %d extra tool(s) from config", len(meta_tools))
         except Exception:
             logger.warning("MetaAgent: failed to load extra tools — continuing without", exc_info=True)
@@ -150,9 +150,8 @@ Output Format: A concise textual summary titled "Project Context Digest".""")
         vision_tool_hint = ""
         if meta_tools:
             vision_tool_hint = (
-                "\n\nYou have access to tools including `git` (clone, init, status, …) and "
-                "`skill_query` when present. Use `git` to fetch or inspect repositories when "
-                "the vision references a URL; use skill_query for framework patterns."
+                "\n\nYou have access to tools to inspect the environment if absolutely necessary. "
+                "Do NOT clone or download any external repositories unless explicitly instructed by a URL in the vision."
             )
 
         self.vision_agent = BaseLlamaIndexAgent(

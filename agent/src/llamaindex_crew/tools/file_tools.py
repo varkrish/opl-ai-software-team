@@ -142,7 +142,7 @@ def set_allowed_file_paths(paths: Optional[set], workspace: Optional[str] = None
     # If workspace is None but paths is not None, ignore (no global guard).
 
 
-def file_writer(file_path: str, content: str, workspace_path: Optional[str] = None) -> str:
+def file_writer(file_path: str, content: str, workspace_path: Optional[str] = None, **kwargs) -> str:
     """Write content to a file. Creates parent directories if needed. Use this tool to create or update any file in the workspace.
     CRITICAL: Do NOT pass file keys (like 'version' or 'dependencies') as extra arguments. Provide the entire file text inside the 'content' string argument.
     
@@ -412,12 +412,109 @@ def file_deleter(file_path: str, workspace_path: Optional[str] = None) -> str:
         logger.error(f"Error deleting {file_path}: {e}")
         return f"❌ Error deleting {file_path}: {str(e)}"
 
+def bulk_file_writer(files: list, workspace_path: Optional[str] = None, **kwargs) -> str:
+    """Write multiple files at once. Use this to create or update several files in the workspace simultaneously.
+    CRITICAL: Pass a list of objects, where each object has 'file_path' and 'content'.
+    
+    Args:
+        files: A list of dicts. Each dict must have 'file_path' (string) and 'content' (string). Example: [{"file_path": "src/main.py", "content": "print('hello')"}]
+        workspace_path: Optional workspace root.
+    
+    Returns:
+        Success or error message detailing which files were written.
+    """
+    import json
+    
+    if isinstance(files, str):
+        try:
+            files = json.loads(files)
+        except Exception as e:
+            return f"❌ Error: 'files' argument must be a JSON list. Parse error: {e}"
+            
+    if not isinstance(files, list):
+        return f"❌ Error: 'files' argument must be a JSON list of dictionaries, not {type(files)}."
+
+    results = []
+    for f in files:
+        if not isinstance(f, dict):
+            results.append(f"❌ Error: invalid file entry {f}")
+            continue
+        path = f.get('file_path')
+        content = f.get('content', '')
+        if not path:
+            results.append("❌ Error: missing file_path")
+            continue
+        res = file_writer(file_path=path, content=content, workspace_path=workspace_path)
+        results.append(res)
+    
+    return "\n".join(results)
+
+def replace_file_content(file_path: str, start_line: int, end_line: int, replacement_content: str, workspace_path: Optional[str] = None, **kwargs) -> str:
+    """Replace a specific range of lines in an existing file.
+    
+    Args:
+        file_path: The path to the file.
+        start_line: The starting line number (1-indexed) to replace.
+        end_line: The ending line number (1-indexed) to replace.
+        replacement_content: The new content that will replace the lines from start_line to end_line inclusive.
+        workspace_path: Optional workspace root.
+    """
+    try:
+        ws_path = _resolve_workspace(workspace_path)
+        full_path = (ws_path / file_path).resolve()
+        
+        try:
+            full_path.relative_to(ws_path.resolve())
+        except ValueError:
+            return f"❌ Refused: {file_path} is outside the workspace."
+            
+        if ".." in file_path or file_path.startswith("/"):
+            return f"❌ Refused: invalid path {file_path}."
+        if not full_path.exists():
+            return f"❌ File not found: {file_path}. Cannot patch a non-existent file."
+            
+        with open(full_path, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+            
+        if start_line < 1 or end_line < start_line:
+            return "❌ Error: Invalid line numbers. start_line must be >= 1, and end_line must be >= start_line."
+            
+        # 1-indexed to 0-indexed
+        start_idx = start_line - 1
+        end_idx = end_line
+        
+        # If the file is smaller than start_idx, we just append to the end.
+        if start_idx > len(lines):
+            start_idx = len(lines)
+            end_idx = len(lines)
+            
+        replacement_lines = replacement_content.splitlines(keepends=True)
+        # Ensure the last line has a newline if there are subsequent lines
+        if replacement_lines and not replacement_lines[-1].endswith("\n") and end_idx < len(lines):
+            replacement_lines[-1] += "\n"
+            
+        new_lines = lines[:start_idx] + replacement_lines + lines[end_idx:]
+        
+        with open(full_path, "w", encoding="utf-8") as f:
+            f.writelines(new_lines)
+            
+        return f"✅ Successfully patched {file_path} (replaced lines {start_line}-{end_line})"
+    except Exception as e:
+        logger.error(f"Error patching {file_path}: {e}")
+        return f"❌ Error patching {file_path}: {str(e)}"
+
 
 # Create FunctionTool instances (use env WORKSPACE_PATH when called by agent)
 FileWriterTool = FunctionTool.from_defaults(
     fn=file_writer,
     name="file_writer",
     description="Write content to a file. Creates parent directories if needed. CRITICAL: Pass the entire file text in the 'content' string. Do NOT pass file keys like 'version' as extra arguments."
+)
+
+BulkFileWriterTool = FunctionTool.from_defaults(
+    fn=bulk_file_writer,
+    name="bulk_file_writer",
+    description="Write multiple files at once. CRITICAL: Pass a list of dicts, each with 'file_path' and 'content' keys. Use this to create all your implementation files in one turn."
 )
 
 FileReaderTool = FunctionTool.from_defaults(
@@ -438,6 +535,12 @@ FileDeleterTool = FunctionTool.from_defaults(
     description="Delete a file from the workspace. Use when the user asks to remove or delete a file. Do NOT empty the file with file_writer — use file_deleter to remove it from the filesystem."
 )
 
+ReplaceFileContentTool = FunctionTool.from_defaults(
+    fn=replace_file_content,
+    name="replace_file_content",
+    description="Replace a specific range of lines in an existing file. CRITICAL: Use line numbers (start_line, end_line) and provide the exact replacement text."
+)
+
 
 def create_workspace_file_tools(workspace_path: Path):
     """Create file tools bound to a specific workspace path (thread-safe, no env).
@@ -447,26 +550,31 @@ def create_workspace_file_tools(workspace_path: Path):
         FunctionTool.from_defaults(
             fn=partial(file_writer, workspace_path=ws),
             name="file_writer",
-            description="Write content to a file. Creates parent directories if needed. CRITICAL: Pass the entire file text in the 'content' string. Do NOT pass file keys like 'version' as extra arguments."
+            description=FileWriterTool.metadata.description
+        ),
+        FunctionTool.from_defaults(
+            fn=partial(bulk_file_writer, workspace_path=ws),
+            name="bulk_file_writer",
+            description=BulkFileWriterTool.metadata.description
         ),
         FunctionTool.from_defaults(
             fn=partial(file_reader, workspace_path=ws),
             name="file_reader",
-            description="Read content from a file in the workspace."
+            description=FileReaderTool.metadata.description
         ),
         FunctionTool.from_defaults(
             fn=partial(file_lister, workspace_path=ws),
             name="file_lister",
-            description="Recursively list all files in a directory. Returns file paths relative to workspace and sizes."
+            description=FileListTool.metadata.description
         ),
         FunctionTool.from_defaults(
             fn=partial(file_deleter, workspace_path=ws),
             name="file_deleter",
-            description="Delete a file from the workspace. Use when the user asks to remove or delete a file. Do NOT empty the file with file_writer — use file_deleter to remove it from the filesystem."
+            description=FileDeleterTool.metadata.description
         ),
         FunctionTool.from_defaults(
-            fn=partial(file_line_replacer, workspace_path=ws),
-            name="file_line_replacer",
-            description="Replace a range of lines in a file. start_line and end_line are 1-indexed and inclusive."
+            fn=partial(replace_file_content, workspace_path=ws),
+            name="replace_file_content",
+            description=ReplaceFileContentTool.metadata.description
         ),
     ]

@@ -15,9 +15,9 @@ CRITICAL: Analyze the requirements FIRST to determine the appropriate technology
   → Test with manual browser testing or simple JS test files
 
 - **Web application with backend API?**
-  → Choose appropriate backend: Python (FastAPI/Django/Flask), Node.js, etc.
-  → Create API endpoints, database models if needed
-  → Files: src/ (backend code), tests/ (backend tests)
+  → Choose appropriate backend: Python (FastAPI/Django/Frappe), Node.js, etc.
+  → Create API endpoints, database models, or backend logic as needed
+  → Structure files exactly as specified by the tech stack
 
 - **Static website?**
   → Use HTML + CSS + JavaScript
@@ -25,7 +25,6 @@ CRITICAL: Analyze the requirements FIRST to determine the appropriate technology
 
 - **Command-line tool or library?**
   → Use appropriate language (Python, Node.js, etc.)
-  → Create src/ and tests/ directories
 
 IMPORTANT: If design specifications are provided, follow them closely:
 - Use the architecture patterns specified

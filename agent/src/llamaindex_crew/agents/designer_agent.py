@@ -10,6 +10,8 @@ from ..tools import FileWriterTool, create_workspace_file_tools, prefetch_skills
 from ..tools.tool_loader import load_tools
 from ..config import ConfigLoader
 from ..utils.prompt_loader import load_prompt
+from ..utils.llm_config import get_supports_react
+from ..utils.output_parser import simple_mode_format_instruction, write_files_from_response
 
 logger = logging.getLogger(__name__)
 
@@ -96,15 +98,20 @@ Your goal is to design logical architecture without committing to specific techn
 You use Domain-Driven Design (DDD), identify Bounded Contexts, define Data Flow and Domain Events.
 You create C4 Model diagrams and define component capabilities."""
         )
-        
+
         backstory = custom_backstory or default_backstory
 
-        if workspace_path is not None:
-            ws_tools = create_workspace_file_tools(self.workspace_path)
-            tools = [ws_tools[0]]  # file_writer
-            append_tldr_tools(tools, self.workspace_path)
-        else:
-            tools = [FileWriterTool]
+        # Determine whether the configured model can handle ReAct tool loops.
+        # Weak/free models crash in multi-turn ReAct; for them we use SimpleAgent
+        # and write design_spec.md manually from the raw response.
+        self.supports_react = get_supports_react("manager")
+        logger.info("DesignerAgent: supports_react=%s", self.supports_react)
+
+        tools = []
+        if self.supports_react and workspace_path is not None:
+            ws_tools = create_workspace_file_tools(Path(workspace_path))
+            tools = [ws_tools[0]]  # file_writer only (design_spec.md is a single file)
+            append_tldr_tools(tools, Path(workspace_path))
 
         try:
             config = ConfigLoader.load()
@@ -179,9 +186,34 @@ You create C4 Model diagrams and define component capabilities."""
                 f"{reference_context.strip()}\n\n{prompt}"
             )
 
-        response = self.agent.chat(prompt)
-        
-        return str(response)
+        if not self.supports_react:
+            prompt += simple_mode_format_instruction("design_spec.md")
+
+        response_str = str(self.agent.chat(prompt))
+
+        from ..tools.file_tools import _resolve_workspace
+        ws_path = self.workspace_path or _resolve_workspace()
+        out_file = ws_path / "design_spec.md"
+
+        if not self.supports_react:
+            write_files_from_response(
+                response_str,
+                ws_path,
+                target_file_path="design_spec.md",
+                raw_fallback_path="design_spec.md",
+                label="DesignerAgent",
+            )
+        elif not out_file.exists():
+            logger.info("DesignerAgent: ReAct safety net — parsing response for design_spec.md")
+            write_files_from_response(
+                response_str,
+                ws_path,
+                target_file_path="design_spec.md",
+                raw_fallback_path="design_spec.md",
+                label="DesignerAgent-safetynet",
+            )
+
+        return response_str
     
     def run(self, user_stories: str, context_digest: Optional[str] = None,
             vision: Optional[str] = None, reference_context: Optional[str] = None) -> str:

@@ -19,6 +19,81 @@ from .prompt_budget import trim_text, estimate_tokens
 
 logger = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------------
+# ReAct capability inference
+# ---------------------------------------------------------------------------
+
+# Model name substrings that indicate a weak/free model unable to sustain
+# multi-turn ReAct tool loops reliably. Add patterns here as new free tiers
+# or small quantised models are introduced. Matching is case-insensitive and
+# uses substring search so "8b" catches "llama-3.1-8b-instruct" etc.
+_WEAK_MODEL_PATTERNS: frozenset = frozenset({
+    ":free",        # openrouter free tier  (e.g. "openai/gpt-4o:free")
+    "/free",        # alternative separator (e.g. "meta-llama/llama-3:free")
+    "-free",        # yet another separator
+    "8b",           # 8-billion-parameter models
+    "7b",           # 7-billion-parameter models
+    "3b",           # 3-billion-parameter models
+    "1b",           # 1-billion-parameter models
+    "phi-3",        # Microsoft Phi-3 family (3.8B / 7B)
+    "phi3",
+    "gemma-2b",
+    "gemma-7b",
+    "mistral-7b",
+    "codellama-7b",
+    "deepseek-r1-distill-qwen-1",   # 1.5B distil
+    "deepseek-r1-distill-qwen-7",   # 7B distil
+})
+
+
+def infer_supports_react(model_name: str) -> bool:
+    """Return True if *model_name* is likely capable of ReAct tool loops.
+
+    Uses a conservative substring-match heuristic against known weak-model
+    patterns.  When in doubt, returns True so frontier models are not
+    accidentally downgraded to single-shot mode.
+    """
+    name = (model_name or "").lower()
+    for pattern in _WEAK_MODEL_PATTERNS:
+        if pattern in name:
+            logger.debug("infer_supports_react: model %r matched weak pattern %r → False", model_name, pattern)
+            return False
+    return True
+
+
+def get_supports_react(agent_type: str = "worker", config: Optional["SecretConfig"] = None) -> bool:
+    """Return True if the model assigned to *agent_type* can handle ReAct loops.
+
+    Resolution order:
+    1. Explicit ``config.llm.supports_react`` override (not None) → use as-is.
+    2. Auto-infer from the model name for *agent_type*.
+
+    Config is resolved from the thread-local override first, then loaded from
+    disk — matching the same lookup order used by ``get_llm_for_agent()``.
+    """
+    if config is None:
+        config = getattr(_thread_config, "config", None)
+    if config is None:
+        from ..config import ConfigLoader
+        config = ConfigLoader.load()
+
+    # Explicit global override takes precedence
+    explicit = getattr(config.llm, "supports_react", None)
+    if explicit is not None:
+        return bool(explicit)
+
+    # Auto-infer from per-role model name
+    model_map = {
+        "manager": config.llm.model_manager,
+        "worker": config.llm.model_worker,
+        "reviewer": config.llm.model_reviewer,
+    }
+    model = model_map.get(agent_type, config.llm.model_worker)
+    result = infer_supports_react(model)
+    logger.debug("get_supports_react(agent_type=%r, model=%r) → %s", agent_type, model, result)
+    return result
+
+
 # Global safety net: cap every OS-level socket read at 300 s.
 # httpx.Timeout handles the httpx layer, but if TLS session state resets the
 # per-socket timeout after the handshake, Python's ssl._SSLObject.read() can
@@ -27,37 +102,51 @@ logger = logging.getLogger(__name__)
 socket.setdefaulttimeout(300)
 
 
-def _trim_payload_for_context(payload: dict, trim_fraction: float = 0.25) -> dict:
+def _trim_payload_for_context(payload: dict) -> dict:
     """
-    Return a copy of *payload* with the longest message trimmed by *trim_fraction*.
-
-    Called when the API returns a 400 context-length error so we can retry
-    without rebuilding the entire call stack.
+    Return a copy of *payload* with the context trimmed to fit.
     
-    Prioritizes trimming 'user' or 'assistant' messages over 'system' messages 
-    to preserve critical agent instructions (tool schemas, persona).
-    Returns the original payload unchanged if there is nothing to trim.
+    Strategy:
+    1. First, try to drop the oldest intermediate conversation history.
+    2. If there is no history to drop (e.g., initial prompt is too large), 
+       trim the longest message from the MIDDLE. This preserves the start 
+       (the main task) and the end (the tool definitions and formatting rules), 
+       ensuring the agent doesn't hallucinate tool usage.
     """
     import copy
     messages = payload.get("messages", [])
     if not messages:
         return payload
 
+    # Strategy 1: Drop old conversation history
+    if len(messages) > 2:
+        new_messages = []
+        dropped = False
+        for i, msg in enumerate(messages):
+            if i > 0 and i < len(messages) - 1 and not dropped:
+                logger.warning(
+                    "Context chunker: dropping oldest intermediate message (role=%s) to free context",
+                    msg.get("role")
+                )
+                dropped = True
+                continue
+            new_messages.append(msg)
+        
+        if dropped:
+            new_payload = dict(payload)
+            new_payload["messages"] = new_messages
+            return new_payload
+
+    # Strategy 2: Middle-trim the longest message (preserves tools at the end)
     best_idx = -1
     best_score = -1
     
-    # Find the longest message, preferring user/assistant over system
     for i, msg in enumerate(messages):
         content = msg.get("content", "")
-        if not content:
-            continue
-            
-        role = msg.get("role", "")
+        if not content: continue
         score = len(content)
-        
-        # Penalize system messages so we heavily favor trimming history/user input first
-        if role == "system":
-            score = score * 0.3 
+        if msg.get("role") == "system":
+            score = score * 0.3  # Penalize trimming system
             
         if score > best_score:
             best_score = score
@@ -65,31 +154,30 @@ def _trim_payload_for_context(payload: dict, trim_fraction: float = 0.25) -> dic
 
     if best_idx >= 0:
         original = messages[best_idx]["content"]
-        keep_chars = int(len(original) * (1.0 - trim_fraction))
-        trimmed = original[:keep_chars] + "\n[... trimmed to fit context window ...]"
-        new_payload = dict(payload)
-        new_messages = []
-        for i, msg in enumerate(messages):
-            if i == best_idx:
-                new_msg = dict(msg)
-                new_msg["content"] = trimmed
-                new_messages.append(new_msg)
-            else:
-                new_messages.append(msg)
-        new_payload["messages"] = new_messages
+        keep_chars = int(len(original) * 0.75)  # drop 25%
         
-        # We need logger from the outer module scope, but just to be safe, print it too or rely on module logger
-        try:
-            logger.warning(
-                "Context chunker triggered: trimmed longest message (role=%s) %d → %d chars (%.0f%%)",
-                messages[best_idx].get("role"), len(original), len(trimmed), trim_fraction * 100,
-            )
-        except Exception:
-            pass
+        if keep_chars > 100:
+            half = keep_chars // 2
+            trimmed = original[:half] + "\n\n[... TRUNCATED TO FIT CONTEXT WINDOW ...]\n\n" + original[-half:]
             
-        return new_payload
+            new_payload = dict(payload)
+            new_messages = []
+            for i, msg in enumerate(messages):
+                if i == best_idx:
+                    new_msg = dict(msg)
+                    new_msg["content"] = trimmed
+                    new_messages.append(new_msg)
+                else:
+                    new_messages.append(msg)
+            new_payload["messages"] = new_messages
+            
+            logger.warning(
+                "Context chunker: Middle-trimmed longest message (role=%s) %d → %d chars (25%% drop) to preserve tool schemas",
+                messages[best_idx].get("role"), len(original), len(trimmed)
+            )
+            return new_payload
 
-    return payload  # nothing to trim
+    return payload
 
 
 class GenericLlamaLLM(LLM):
@@ -166,6 +254,27 @@ class GenericLlamaLLM(LLM):
             **api_kwargs
         }
         
+        # --- Pre-flight token trimming to avoid 400 errors ---
+        from .prompt_budget import PromptBudget, estimate_tokens
+        budget = PromptBudget.from_context(self.context_window, self.max_tokens)
+        
+        def _get_payload_text(p: dict) -> str:
+            return "\n".join(m.get("content", "") for m in p.get("messages", []) if isinstance(m.get("content"), str))
+            
+        estimated_tokens = estimate_tokens(_get_payload_text(payload))
+        if estimated_tokens > budget.input_token_budget:
+            logger.info(
+                "Pre-trimming context: Estimated %d tokens > budget %d. Trimming locally to save API roundtrip.",
+                estimated_tokens, budget.input_token_budget
+            )
+            while estimate_tokens(_get_payload_text(payload)) > budget.input_token_budget:
+                trimmed = _trim_payload_for_context(payload)
+                if trimmed is payload:
+                    logger.warning("Pre-trimming: Cannot trim payload any further safely.")
+                    break
+                payload = trimmed
+        # -----------------------------------------------------
+        
         max_retries = 5
         base_delay = 5
         max_delay = 120
@@ -222,7 +331,7 @@ class GenericLlamaLLM(LLM):
                             )
                             if _ctx_overflow:
                                 # Trim the last user message in the payload to free up tokens
-                                _trimmed = _trim_payload_for_context(payload, trim_fraction=0.25)
+                                _trimmed = _trim_payload_for_context(payload)
                                 if _trimmed is not payload:
                                     payload = _trimmed
                                     logger.warning(
@@ -231,12 +340,18 @@ class GenericLlamaLLM(LLM):
                                     )
                                     continue
                         logger.error(f"LLM API Error: {response.status_code} - {response.text[:500]}")
+                        raise ValueError(f"HTTP {response.status_code}: {response.text[:200]}")
                     
                     response.raise_for_status()
                     data = response.json()
                     
+                    if not data or not data.get("choices"):
+                        err_msg = data.get("error", {}).get("message") if isinstance(data.get("error"), dict) else str(data)
+                        logger.error(f"Missing 'choices' in LLM response. Raw data: {data}")
+                        raise ValueError(f"LLM returned invalid format: {err_msg}")
+                        
                     choice = data["choices"][0]
-                    content = choice["message"]["content"]
+                    content = choice.get("message", {}).get("content", "")
                     logger.debug(f"LLM Response: {content[:200]}...")
                     
                     return ChatResponse(
@@ -340,9 +455,15 @@ class GenericLlamaLLM(LLM):
         _async_timeout = httpx.Timeout(connect=30.0, write=60.0, read=240.0, pool=10.0)
         async with httpx.AsyncClient(timeout=_async_timeout) as client:
             response = await client.post(url, headers=headers, json=payload)
+            if response.status_code != 200:
+                raise ValueError(f"HTTP {response.status_code}: {response.text[:200]}")
             response.raise_for_status()
             data = response.json()
             
+            if not data or not data.get("choices"):
+                err_msg = data.get("error", {}).get("message") if isinstance(data.get("error"), dict) else str(data)
+                raise ValueError(f"LLM returned invalid format: {err_msg}")
+                
             choice = data["choices"][0]
             return ChatResponse(
                 message=ChatMessage(
@@ -397,8 +518,15 @@ class GenericLlamaLLM(LLM):
                         logger.warning(f"⚠️ LLM complete() got {response.status_code}, retrying in {delay:.1f}s...")
                         time.sleep(delay)
                         continue
+                    if response.status_code != 200:
+                        raise ValueError(f"HTTP {response.status_code}: {response.text[:200]}")
                     response.raise_for_status()
                     data = response.json()
+                    
+                    if not data or not data.get("choices"):
+                        err_msg = data.get("error", {}).get("message") if isinstance(data.get("error"), dict) else str(data)
+                        raise ValueError(f"LLM returned invalid format: {err_msg}")
+                        
                     return CompletionResponse(
                         text=data["choices"][0]["text"],
                         raw=data
@@ -434,9 +562,15 @@ class GenericLlamaLLM(LLM):
         _acomplete_timeout = httpx.Timeout(connect=30.0, write=60.0, read=180.0, pool=10.0)
         async with httpx.AsyncClient(timeout=_acomplete_timeout) as client:
             response = await client.post(url, headers=headers, json=payload)
+            if response.status_code != 200:
+                raise ValueError(f"HTTP {response.status_code}: {response.text[:200]}")
             response.raise_for_status()
             data = response.json()
             
+            if not data or not data.get("choices"):
+                err_msg = data.get("error", {}).get("message") if isinstance(data.get("error"), dict) else str(data)
+                raise ValueError(f"LLM returned invalid format: {err_msg}")
+                
             return CompletionResponse(
                 text=data["choices"][0]["text"],
                 raw=data
@@ -596,6 +730,7 @@ def _get_production_llm(agent_type: str, config: SecretConfig, budget_callback: 
 
         if db_model_ctx is not None:
             llm_kwargs["context_window"] = db_model_ctx
+            llm_kwargs["max_tokens"] = min(llm_kwargs["max_tokens"], max(1024, db_model_ctx // 2))
             logger.info("   Resolved context window from database: %d", db_model_ctx)
         elif is_maas:
             m = model.lower()
@@ -641,6 +776,9 @@ def _get_production_llm(agent_type: str, config: SecretConfig, budget_callback: 
             else:
                 # Sensible default context window for custom models
                 llm_kwargs["context_window"] = 128_000
+            
+            # Ensure max_tokens never consumes more than half the context window
+            llm_kwargs["max_tokens"] = min(llm_kwargs["max_tokens"], max(1024, llm_kwargs["context_window"] // 2))
             
         return GenericLlamaLLM(**llm_kwargs)
     

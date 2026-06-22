@@ -1078,6 +1078,11 @@ async def delete_llm_config(user: CurrentUser = Depends(get_current_user)):
     deleted = job_db.delete_llm_config(user.user_id)
     return {"deleted": deleted}
 
+@app.get("/api/llm/models")
+async def get_llm_models(user: CurrentUser = Depends(get_current_user)):
+    """Return all supported LLM models."""
+    models = job_db.get_all_model_context_windows()
+    return {"models": [m["model_pattern"] for m in models]}
 
 class LLMTestConnectionRequest(BaseModel):
     api_base_url: str
@@ -1118,13 +1123,14 @@ async def test_llm_connection(
             continue
 
         try:
+            from llama_index.core.llms import ChatMessage, MessageRole
             llm = GenericLlamaLLM(
                 model=model_name,
                 api_key=api_key,
                 api_base=body.api_base_url,
                 max_tokens=5,
             )
-            resp = llm.complete("ping")
+            resp = llm.chat([ChatMessage(role=MessageRole.USER, content="ping")])
             if resp:
                 tested_models[model_name] = {"ok": True}
             else:

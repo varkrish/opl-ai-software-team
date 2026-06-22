@@ -89,8 +89,32 @@ class BaseLlamaIndexAgent:
         # Use ReActAgent (available in all versions)
         # ReActAgent is instantiated directly with tools and llm
         
-        # We use a simplified context for the agent to prevent it from hallucinating tools
-        # or getting confused by complex thought patterns.
+        if not self.tools:
+            class SimpleAgent:
+                def __init__(self, llm, system_prompt):
+                    self.llm = llm
+                    self.system_prompt = system_prompt
+                    self.chat_history = []
+                def reset(self):
+                    self.chat_history.clear()
+                def chat(self, message: str, **kwargs):
+                    from llama_index.core.llms import ChatMessage
+                    messages = [ChatMessage(role="system", content=self.system_prompt)]
+                    messages.extend(self.chat_history)
+                    messages.append(ChatMessage(role="user", content=message))
+                    resp = self.llm.chat(messages)
+                    self.chat_history.append(ChatMessage(role="user", content=message))
+                    self.chat_history.append(ChatMessage(role="assistant", content=str(resp)))
+                    return resp
+
+            agent_context = f"""{self._build_system_prompt()}
+
+You are an AI assistant. You have NO tools available.
+Provide your response directly. Do NOT use Thought/Action/Observation formats.
+Do NOT explain your reasoning. Output ONLY the structured format requested in the user message.
+"""
+            return SimpleAgent(self.llm, agent_context)
+
         agent_context = f"""{self._build_system_prompt()}
 
 You are an AI assistant that uses tools to accomplish tasks.

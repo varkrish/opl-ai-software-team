@@ -479,7 +479,8 @@ class TaskManager:
     _SOURCE_FILE_EXTENSIONS = frozenset({
         '.java', '.py', '.pyw', '.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs',
         '.go', '.rs', '.rb', '.php', '.swift', '.kt', '.scala', '.html', '.css',
-        '.vue', '.svelte',
+        '.vue', '.svelte', '.yaml', '.yml', '.sh', '.bash', '.sql', '.tf', '.hcl',
+        '.json'
     })
     _CONFIG_ARTIFACT_NAMES = frozenset({
         'pom.xml', 'build.gradle', 'build.gradle.kts', 'package.json',
@@ -503,9 +504,18 @@ class TaskManager:
     })
 
     @staticmethod
-    def _is_source_file_path(path: str) -> bool:
+    def _is_source_file_path(path: str, description: str = "") -> bool:
         if not path or path.lower() == "unknown":
             return False
+            
+        # 1. Smart Tagging (Overrides hardcoded extensions)
+        desc_upper = description.upper()
+        if "[SOURCE]" in desc_upper:
+            return True
+        if "[CONFIG]" in desc_upper:
+            return False
+            
+        # 2. Fallback to hardcoded extensions if no tag is provided
         lower = path.lower()
         if "/test/" in lower or lower.startswith("test/") or "/tests/" in lower:
             return False
@@ -738,8 +748,7 @@ class TaskManager:
             }
 
         file_entries = self._extract_files_with_descriptions(tech_stack_content)
-        files = [f["path"] for f in file_entries]
-        src_files = [f for f in files if self._is_source_file_path(f)]
+        src_files = [f["path"] for f in file_entries if self._is_source_file_path(f["path"], f.get("description", ""))]
 
         if len(src_files) == 0:
             return {
@@ -1214,52 +1223,58 @@ class TaskManager:
     def _inject_framework_scaffolding_tasks(
         self, tasks: List[TaskDefinition], tech_stack_content: str, design_spec: str
     ) -> List[TaskDefinition]:
-        """Inject missing structural-layer files when the tech stack tree is incomplete."""
+        """Inject missing structural-layer files by reading scaffolding trees from skills."""
         existing_paths = {(t.metadata or {}).get("file_path", "") for t in tasks}
-        src_paths = [p for p in existing_paths if p and self._is_source_file_path(p)]
-        if len(src_paths) < 2:
-            return tasks
+        
+        workspace_path = self.db_path.parent
+        prefetch_file = workspace_path / "skill_prefetch.json"
+        skill_scaffold_paths = set()
+        
+        if prefetch_file.exists():
+            try:
+                import json
+                data = json.loads(prefetch_file.read_text(encoding="utf-8"))
+                all_entries = []
+                if isinstance(data, dict):
+                    for role_entries in data.values():
+                        if isinstance(role_entries, list):
+                            all_entries.extend(role_entries)
+                
+                for entry in all_entries:
+                    content = entry.get("content", "")
+                    if content:
+                        # Extract any ASCII tree structures present in the skill documentation
+                        paths = self._extract_structure_paths(content)
+                        skill_scaffold_paths.update(paths)
+            except Exception as e:
+                logger.warning("Error parsing skills for scaffolding: %s", e)
 
         contexts = self._extract_bounded_contexts(design_spec)
-        base, ext = self._infer_scaffolding_base_and_ext(list(existing_paths))
-        if not base:
-            return tasks
-
-        needed_tiers: List[int] = []
-        workspace_path = self.db_path.parent
-        for tier in self._STRUCTURE_LAYER_TIERS:
-            if tier == 8:
-                if self._has_entrypoint_in_paths(list(existing_paths)):
-                    continue
-            else:
-                if self._tier_keywords_present(list(existing_paths), tier):
-                    continue
-
-            if self._is_tier_applicable(tier, workspace_path, tech_stack_content):
-                needed_tiers.append(tier)
-
-        for tier in needed_tiers:
-            fp = self._scaffolding_path_for_tier(base, ext, tier)
+        
+        # Inject the exact files defined in the framework skills
+        for fp in skill_scaffold_paths:
+            if not self._is_source_file_path(fp):
+                continue
             if fp in existing_paths:
                 continue
-            desc = self._TIER_SCaffolding_DESCRIPTIONS.get(tier, "Structural layer file")
+                
             task_id = f"file_{self.normalize_file_path_for_task_id(fp)}"
             domain = self._match_domain_context(fp, contexts)
             task = TaskDefinition(
                 task_id=task_id,
                 phase="development",
                 task_type="file_creation",
-                description=f"Create structural scaffolding file: {fp}",
-                source="structure_scaffolding",
+                description=f"Create framework scaffolding file: {fp}",
+                source="skill_scaffolding",
                 metadata={
                     "file_path": fp,
                     "domain_context": domain,
-                    "file_description": desc,
+                    "file_description": "Framework scaffolding file derived from skills",
                 },
             )
             tasks.append(task)
             existing_paths.add(fp)
-            logger.info("Auto-injected structure scaffolding task: %s", fp)
+            logger.info("Auto-injected skill-based scaffolding task: %s", fp)
 
         return tasks
 
@@ -1767,6 +1782,115 @@ class TaskManager:
         conn.close()
         return None
 
+    def get_and_claim_actionable_task(
+        self, phase: str, *, task_id_filter: Optional[set] = None,
+    ) -> Optional["TaskDefinition"]:
+        """Atomically find and claim the next actionable task in a single transaction.
+
+        Uses ``BEGIN IMMEDIATE`` so only one worker can claim a task at a time,
+        preventing double-dispatch when multiple worker threads call this method
+        concurrently.  Returns None when no task is ready (either all remaining
+        tasks have unmet dependencies, or the queue is empty).
+        """
+        conn = sqlite3.connect(self.db_path, timeout=15.0)
+        conn.row_factory = sqlite3.Row
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            cursor = conn.execute("""
+                SELECT task_id, phase, task_type, description, required, source, status, metadata
+                FROM tasks
+                WHERE project_id = ? AND phase = ? AND status = ?
+                ORDER BY created_at ASC
+            """, (self.project_id, phase, TaskStatus.REGISTERED.value))
+
+            for row in cursor.fetchall():
+                task_id = row["task_id"]
+                if task_id_filter is not None and task_id not in task_id_filter:
+                    continue
+
+                dep_rows = conn.execute(
+                    "SELECT depends_on_task_id FROM task_dependencies WHERE task_id = ?",
+                    (task_id,),
+                ).fetchall()
+
+                all_deps_met = all(
+                    conn.execute(
+                        "SELECT status FROM tasks WHERE task_id = ?",
+                        (dr["depends_on_task_id"],),
+                    ).fetchone()["status"] in (TaskStatus.COMPLETED.value, TaskStatus.SKIPPED.value)
+                    for dr in dep_rows
+                ) if dep_rows else True
+
+                if not all_deps_met:
+                    continue
+
+                # Atomically claim the task
+                conn.execute("""
+                    UPDATE tasks
+                    SET status = ?, started_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+                    WHERE task_id = ?
+                """, (TaskStatus.IN_PROGRESS.value, task_id))
+                conn.commit()
+
+                return TaskDefinition(
+                    task_id=row["task_id"],
+                    phase=row["phase"],
+                    task_type=row["task_type"],
+                    description=row["description"] or "",
+                    required=bool(row["required"]),
+                    source=row["source"],
+                    status=TaskStatus.IN_PROGRESS.value,
+                    metadata=json.loads(row["metadata"]) if row["metadata"] else None,
+                    dependencies=[dr["depends_on_task_id"] for dr in dep_rows] if dep_rows else [],
+                )
+
+            conn.rollback()
+            return None
+        except Exception:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            raise
+        finally:
+            conn.close()
+
+    def has_pending_or_active_tasks(
+        self, phase: str, task_id_filter: Optional[set] = None,
+    ) -> bool:
+        """Return True if any tasks in *task_id_filter* are REGISTERED or IN_PROGRESS.
+
+        Used by parallel workers to decide whether to wait for new tasks to
+        become actionable (a running task might complete and unblock its
+        dependants) or to exit.
+        """
+        conn = sqlite3.connect(self.db_path, timeout=10.0)
+        try:
+            cursor = conn.execute("""
+                SELECT COUNT(*) FROM tasks
+                WHERE project_id = ? AND phase = ?
+                AND status IN (?, ?)
+            """, (self.project_id, phase,
+                  TaskStatus.REGISTERED.value, TaskStatus.IN_PROGRESS.value))
+            total = cursor.fetchone()[0]
+            if total == 0:
+                return False
+            if task_id_filter is None:
+                return True
+            # Check whether any of the active tasks are in our filter
+            placeholders = ",".join("?" * len(task_id_filter))
+            cursor = conn.execute(f"""
+                SELECT COUNT(*) FROM tasks
+                WHERE project_id = ? AND phase = ?
+                AND status IN (?, ?)
+                AND task_id IN ({placeholders})
+            """, (self.project_id, phase,
+                  TaskStatus.REGISTERED.value, TaskStatus.IN_PROGRESS.value,
+                  *task_id_filter))
+            return cursor.fetchone()[0] > 0
+        finally:
+            conn.close()
+
     def get_related_existing_files(
         self,
         task: TaskDefinition,
@@ -1817,6 +1941,7 @@ class TaskManager:
         rag_context: Optional[str] = None,
         context_window: Optional[int] = None,
         max_tokens: Optional[int] = None,
+        simple_mode: bool = False,
     ) -> str:
         """Build a focused prompt for generating a single file.
 
@@ -1986,7 +2111,20 @@ class TaskManager:
             "- Implement ALL methods with real logic (no `pass`, no TODO, no console.log stubs).",
             "- Follow the patterns and conventions of the tech stack.",
         ]
-        if file_path:
+        if simple_mode:
+            if file_path:
+                req += [
+                    f"- Output ONLY a JSON array with one object for `{file_path}`.",
+                    f'- Keys: "file_path" (exactly `{file_path}`) and "content" (full file body).',
+                    "- Escape newlines inside content as \\n. Do NOT truncate large files.",
+                    f"- Do NOT create any file other than `{file_path}`.",
+                ]
+            else:
+                req += [
+                    "- Output a JSON array: [{\"file_path\": \"...\", \"content\": \"...\"}, ...]",
+                    "- Include every required source file with complete, untruncated content.",
+                ]
+        elif file_path:
             req += [
                 f"- You MUST call file_writer(file_path='{file_path}', content='...') to create the file.",
                 "- Do NOT just show code in your response; you must use the file_writer tool.",

@@ -1424,3 +1424,9 @@ class JobDatabase:
             )
             return cursor.rowcount > 0
 
+    def get_all_model_context_windows(self) -> List[Dict[str, Any]]:
+        """Return all model patterns and their context windows."""
+        with self._get_conn() as conn:
+            cursor = conn.execute("SELECT model_pattern, context_window FROM model_context_windows ORDER BY model_pattern ASC")
+            return [{"model_pattern": row["model_pattern"], "context_window": row["context_window"]} for row in cursor.fetchall()]
+
