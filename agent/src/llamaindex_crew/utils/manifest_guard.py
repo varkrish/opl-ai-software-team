@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import logging
 import os
-import re
 from enum import Enum
 from pathlib import Path
 from typing import Optional, Set
@@ -22,10 +21,7 @@ logger = logging.getLogger(__name__)
 
 _ENV_VAR = "TECH_STACK_MANIFEST_GUARD"
 
-_TEST_PATH_RE = re.compile(
-    r"(?:test[_/]|[_/]test\.|\.test\.|\.spec\.|__tests__|tests/|spec/)",
-    re.IGNORECASE,
-)
+from .test_companion import is_test_file_path
 
 
 class ManifestGuardMode(str, Enum):
@@ -49,7 +45,7 @@ def get_manifest_guard_mode() -> ManifestGuardMode:
 
 def companion_test_paths(source_path: str) -> list[str]:
     """Return conventional test file paths colocated with a source file."""
-    if _TEST_PATH_RE.search(source_path):
+    if is_test_file_path(source_path):
         return []
     p = Path(source_path)
     stem = p.stem
@@ -58,13 +54,21 @@ def companion_test_paths(source_path: str) -> list[str]:
     if parent == ".":
         parent = ""
     base = f"{parent}/" if parent else ""
-    return [
+    candidates = [
         f"{base}__tests__/{stem}.test{ext}",
         f"{base}{stem}.test{ext}",
         f"{base}{stem}.spec{ext}",
+        f"{base}test_{stem}{ext}",
+        f"{base}{stem}_test{ext}",
         f"tests/{stem}.test{ext}",
+        f"tests/test_{stem}{ext}",
         f"test/{stem}.test{ext}",
     ]
+    if ext.lower() == ".java":
+        candidates.append(f"{base}{stem}Test.java")
+    if ext.lower() == ".kt":
+        candidates.append(f"{base}{stem}Test.kt")
+    return candidates
 
 
 def expand_remediation_paths(allowed: Set[str], workspace: Path) -> Set[str]:
@@ -90,18 +94,10 @@ def expand_remediation_paths(allowed: Set[str], workspace: Path) -> Set[str]:
 
 def is_companion_test_file(rel: str, registered: Set[str]) -> bool:
     """True when *rel* is a test file paired with a registered source path."""
-    if not _TEST_PATH_RE.search(rel):
+    if not is_test_file_path(rel):
         return False
-    stem = Path(rel).stem
-    for suffix in (".test", ".spec"):
-        if stem.endswith(suffix):
-            stem = stem[: -len(suffix)]
-            break
-    ext = Path(rel).suffix
-    for src in registered:
-        if Path(src).stem == stem and Path(src).suffix == ext:
-            return True
-    return False
+    from .test_companion import resolve_companion_source
+    return resolve_companion_source(rel, registered) is not None
 
 
 def effective_manifest_paths(
