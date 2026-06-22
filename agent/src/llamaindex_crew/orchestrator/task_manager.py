@@ -14,6 +14,11 @@ from datetime import datetime
 import re
 from ..tools.file_tools import _sanitize_java_package_path
 from ..utils.prompt_budget import PromptBudget, estimate_tokens, trim_text
+from ..utils.test_companion import (
+    companion_source_exists_on_disk,
+    is_test_file_path,
+    resolve_companion_source,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -1443,11 +1448,6 @@ class TaskManager:
         ],
     }
 
-    _TEST_FILE_RE = re.compile(
-        r"(?:test[_/]|[_/]test\.|\.test\.|\.spec\.|__tests__|tests/|spec/)",
-        re.IGNORECASE,
-    )
-
     _TEST_FRAMEWORK_RULES: Dict[str, List[str]] = {
         "vanilla-jest": [
             "TEST IMPORTS — This is a Vanilla JS project tested with Jest + jsdom.",
@@ -1703,22 +1703,57 @@ class TaskManager:
         services which depend on models which depend on config.  Within the
         same domain, a higher-tier file depends on all lower-tier files whose
         name stem appears in the file path.
-        """
-        fp = (task.metadata or {}).get("file_path", "").lower()
-        task_tier = self._classify_file_tier(fp)
-        deps: List[str] = []
 
+        Test files depend only on their companion source module (resolved via
+        language-agnostic naming conventions), not on every file whose stem
+        appears in the path.
+        """
+        fp = (task.metadata or {}).get("file_path", "")
+        fp_lower = fp.lower()
+        task_tier = self._classify_file_tier(fp_lower)
+
+        if is_test_file_path(fp_lower):
+            registered = [
+                (et.metadata or {}).get("file_path", "")
+                for et in earlier_tasks
+                if (et.metadata or {}).get("file_path")
+            ]
+            companion = resolve_companion_source(fp, registered)
+            if companion:
+                for et in earlier_tasks:
+                    if (et.metadata or {}).get("file_path", "") == companion:
+                        return [et.task_id]
+            return []
+
+        deps: List[str] = []
         for et in earlier_tasks:
             et_fp = (et.metadata or {}).get("file_path", "").lower()
             et_tier = self._classify_file_tier(et_fp)
             if et_tier >= task_tier:
                 continue
             et_stem = Path(et_fp).stem.replace("_", "")
-            fp_flat = fp.replace("_", "")
+            fp_flat = fp_lower.replace("_", "")
             if et_stem in fp_flat or et_stem.rstrip("s") in fp_flat:
                 deps.append(et.task_id)
 
         return deps
+
+    def _dependency_met_for_claim(
+        self,
+        dependent_fp: str,
+        dep_task_id: str,
+        dep_status: str,
+        workspace: Path,
+    ) -> bool:
+        """Return True if *dep_task_id* is satisfied for claiming *dependent_fp*."""
+        if dep_status in (TaskStatus.COMPLETED.value, TaskStatus.SKIPPED.value):
+            return True
+        if dep_status != TaskStatus.FAILED.value:
+            return False
+        # Unblock tests when the companion source exists even if that task failed
+        if not is_test_file_path(dependent_fp.lower()):
+            return False
+        return companion_source_exists_on_disk(dependent_fp, workspace)
 
     # ── Per-task execution helpers ───────────────────────────────────────────
 
@@ -1794,6 +1829,7 @@ class TaskManager:
         """
         conn = sqlite3.connect(self.db_path, timeout=15.0)
         conn.row_factory = sqlite3.Row
+        workspace = self.db_path.parent
         try:
             conn.execute("BEGIN IMMEDIATE")
             cursor = conn.execute("""
@@ -1813,11 +1849,23 @@ class TaskManager:
                     (task_id,),
                 ).fetchall()
 
+                dependent_fp = ""
+                if row["metadata"]:
+                    try:
+                        dependent_fp = json.loads(row["metadata"]).get("file_path", "") or ""
+                    except Exception:
+                        pass
+
                 all_deps_met = all(
-                    conn.execute(
-                        "SELECT status FROM tasks WHERE task_id = ?",
-                        (dr["depends_on_task_id"],),
-                    ).fetchone()["status"] in (TaskStatus.COMPLETED.value, TaskStatus.SKIPPED.value)
+                    self._dependency_met_for_claim(
+                        dependent_fp,
+                        dr["depends_on_task_id"],
+                        conn.execute(
+                            "SELECT status FROM tasks WHERE task_id = ?",
+                            (dr["depends_on_task_id"],),
+                        ).fetchone()["status"],
+                        workspace,
+                    )
                     for dr in dep_rows
                 ) if dep_rows else True
 
@@ -2084,7 +2132,7 @@ class TaskManager:
                 parts.extend(self._MODULE_SYSTEM_INSTRUCTIONS[mod_sys])
                 parts.append("")
 
-        if self._TEST_FILE_RE.search(file_path):
+        if is_test_file_path(file_path):
             fw = self._detect_test_framework(tech_stack)
             if fw and fw in self._TEST_FRAMEWORK_RULES:
                 parts.extend(self._TEST_FRAMEWORK_RULES[fw])
