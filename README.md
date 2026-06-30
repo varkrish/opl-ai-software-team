@@ -16,6 +16,8 @@ An intelligent software development crew that transforms your vision into produc
 - **TDD/BDD Workflow** — Test-Driven Development with Gherkin scenarios
 - **Secure Configuration** — File-based config with encryption support
 - **Refinement** — Natural-language refinements after a job completes ([docs](docs/REFINEMENT_AND_UI.md))
+- **Solutioning loop** — Optional research + architect + critique phase before Product Owner; human review gate at `pending_solution_review` ([CHANGELOG](CHANGELOG.md))
+- **Workflow settings (UI or YAML)** — Per-user plan review, solutioning, and auto-approve via Settings → Workflow or `~/.crew-ai/config.yaml` `plan_review` / `solutioning` sections
 - **MTA Migration** — Upload an MTA report and auto-migrate legacy code with per-file issue tracking ([docs](docs/migration.md))
 - **Refactor** — Target-stack refactoring with same task-tracking and validation as builds
 - **Restart & resume** — For failed/cancelled build jobs: full restart or resume from last phase ([docs](docs/dashboard-and-ui.md#restart-and-resume-build-jobs))
@@ -350,6 +352,22 @@ npm run cy:e2e         # E2E tests (requires dev server + backend)
 - **[Secure Config Patterns](agent/docs/deployment/secure-config-patterns.md)** — Production security best practices
 - **[Using Ollama](agent/docs/getting-started/ollama.md)** — Free local development setup
 - **[Full Agent Documentation](agent/README.md)** — Complete framework documentation
+- **[CHANGELOG](CHANGELOG.md)** — Release notes (solutioning loop, workflow settings API)
+
+### Workflow and solutioning
+
+Enable from the studio UI (**Settings → Workflow**) or in `~/.crew-ai/config.yaml`:
+
+```yaml
+plan_review:
+  enabled: true
+solutioning:
+  enabled: true
+  max_passes: 3
+  max_github_searches: 10
+```
+
+Per-user UI settings are stored in the job database and merged at runtime (override YAML defaults). Connect **Settings → GitHub** for solutioning repo search.
 
 ## Contributing
 

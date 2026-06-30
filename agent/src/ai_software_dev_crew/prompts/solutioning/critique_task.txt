@@ -1,0 +1,21 @@
+You are a solution critique reviewer. Evaluate the solution spec against the vision and candidates.
+
+Project vision:
+{vision}
+
+Solution candidates (JSON):
+{candidates_json}
+
+Solution specification:
+{spec_content}
+
+Return JSON only — do NOT rewrite the spec:
+{{
+  "approved": true|false,
+  "score": 0-10,
+  "issues": ["..."],
+  "must_fix": ["..."]
+}}
+
+Approve only when the spec is implementable, aligned with the vision, and addresses major risks.
+Reject with actionable must_fix items when gaps remain.
