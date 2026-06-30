@@ -1320,34 +1320,34 @@ class TestEnhancedDependencyOrdering:
     """_classify_file_tier and enhanced _infer_dependencies."""
 
     def test_classify_file_tier_config(self, task_mgr):
-        assert task_mgr._classify_file_tier("config/database.py") <= 1
+        assert task_mgr._classify_file_tier("config/database.py") <= 10
 
     def test_classify_file_tier_model(self, task_mgr):
-        assert task_mgr._classify_file_tier("models/user.py") <= 2
+        assert task_mgr._classify_file_tier("models/user.py") <= 20
 
     def test_classify_file_tier_service(self, task_mgr):
-        assert task_mgr._classify_file_tier("services/user_service.py") >= 2
+        assert task_mgr._classify_file_tier("services/user_service.py") >= 20
 
     def test_classify_file_tier_controller(self, task_mgr):
-        assert task_mgr._classify_file_tier("controllers/user_controller.py") >= 3
+        assert task_mgr._classify_file_tier("controllers/user_controller.py") >= 30
 
     def test_classify_file_tier_route(self, task_mgr):
-        assert task_mgr._classify_file_tier("routes/api.py") >= 5
+        assert task_mgr._classify_file_tier("routes/api.py") >= 50
 
     def test_classify_file_tier_server(self, task_mgr):
-        assert task_mgr._classify_file_tier("server.js") >= 7
+        assert task_mgr._classify_file_tier("server.js") >= 70
 
     def test_classify_file_tier_java_entity(self, task_mgr):
         tier = task_mgr._classify_file_tier("src/main/java/com/example/entity/User.java")
-        assert tier <= 2
+        assert tier <= 20
 
     def test_classify_file_tier_java_repository(self, task_mgr):
         tier = task_mgr._classify_file_tier("src/main/java/com/example/repository/UserRepository.java")
-        assert tier >= 2
+        assert tier >= 20
 
     def test_classify_file_tier_java_controller(self, task_mgr):
         tier = task_mgr._classify_file_tier("src/main/java/com/example/controller/UserController.java")
-        assert tier >= 3
+        assert tier >= 30
 
     def test_config_before_model_before_controller(self, task_mgr):
         """Tier ordering: config < model < controller."""

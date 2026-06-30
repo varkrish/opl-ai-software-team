@@ -6,9 +6,59 @@ Project Context: {context_digest}
 Your task:
 1. Extract high-level requirements.
 2. Create detailed user stories in Gherkin format (Given/When/Then) from user perspective.
-3. Add clear acceptance Criteria.
+3. Add clear acceptance criteria.
 4. Identify features and scenarios.
 5. Add use cases for non-functional requirements like operations, security and so on.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+FEATURE FILE RULES — DATA-DRIVEN BDD (MANDATORY)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Every feature file MUST follow these rules. They are not optional.
+
+RULE 1 — USE SCENARIO OUTLINE + EXAMPLES FOR ALL DATA-VARYING SCENARIOS
+Any scenario that involves amounts, quantities, statuses, IDs, dates, roles, or any
+other values that could vary MUST be written as a Scenario Outline with an Examples table.
+Do NOT write multiple separate Scenarios that repeat the same structure with different values.
+Collapse them into one Scenario Outline.
+
+RULE 2 — EXAMPLES TABLE MUST HAVE AT LEAST 3 ROWS
+Every Examples table must include:
+  Row 1: Happy path — valid data, expected success outcome
+  Row 2: Boundary case — edge value (zero, max, minimum valid, empty, etc.)
+  Row 3: Failure case — invalid or rejected data, expected error or rejection outcome
+Add more rows if additional domain-specific cases are important.
+
+RULE 3 — USE REALISTIC DOMAIN VALUES
+Examples tables must contain real-looking domain data — not "test-user", "id=1", "amount=100".
+Use values that reflect the actual business domain described in the project vision.
+Example for an invoicing app: customer names, monetary amounts in correct currency/unit,
+realistic statuses, proper date formats.
+
+RULE 4 — PLACEHOLDER NAMES MUST MATCH COLUMN HEADERS EXACTLY
+Every <placeholder> in the Scenario Outline steps must match the corresponding
+column header in the Examples table exactly (case-sensitive).
+
+RULE 5 — SIMPLE NON-DATA SCENARIOS MAY USE PLAIN Scenario
+Scenarios that test a single fixed condition with no varying data (e.g. "unauthenticated
+user is redirected to login") may use plain Scenario without Examples.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+EXAMPLE — CORRECT PATTERN
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  Scenario Outline: Create invoice within customer credit limit
+    Given a customer "<customer_name>" with credit limit <credit_limit>
+    When I submit an invoice for amount <amount>
+    Then the response HTTP status is <http_status>
+    And the invoice status is "<invoice_status>"
+
+    Examples:
+      | customer_name | credit_limit | amount | http_status | invoice_status |
+      | Acme Corp     | 10000        | 5000   | 201         | draft          |
+      | Beta Ltd      | 5000         | 5000   | 201         | draft          |
+      | Gamma Inc     | 2000         | 5001   | 422         | rejected       |
+      | Delta Co      | 10000        | 0      | 400         | error          |
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 TOOL MODE (when you have the bulk_file_writer tool)

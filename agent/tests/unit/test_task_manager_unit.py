@@ -2,6 +2,13 @@ import unittest
 from pathlib import Path
 from src.llamaindex_crew.orchestrator.task_manager import TaskManager, TaskDefinition
 
+
+def make_task_manager(db_name: str = "tier_tasks.db") -> TaskManager:
+    db_path = Path("tests/unit") / db_name
+    if db_path.exists():
+        db_path.unlink()
+    return TaskManager(db_path, "tier_proj")
+
 class TestTaskManagerUnit(unittest.TestCase):
     def setUp(self):
         self.db_path = Path("tests/unit/test_tasks.db")
@@ -204,27 +211,50 @@ class TestStructureScaffolding(unittest.TestCase):
             metadata={"file_path": file_path},
         )
 
-    def test_inject_structure_scaffolding_from_controller_only(self):
+    def test_inject_structure_scaffolding_from_skill_tree(self):
+        """Scaffolding is injected from skill_prefetch.json ASCII tree, not keyword detection."""
+        import json
+        # Write a skill with an ASCII tree containing files to inject
+        (self.db_path.parent / "skill_prefetch.json").write_text(json.dumps({
+            "tech_architect": [
+                {
+                    "skill_name": "java_spring_guidelines",
+                    "content": (
+                        "Java Spring Boot app structure:\n"
+                        "```text\n"
+                        "src/\n"
+                        "├── main/\n"
+                        "│   └── java/\n"
+                        "│       └── com/\n"
+                        "│           └── example/\n"
+                        "│               ├── Application.java\n"
+                        "│               ├── model/\n"
+                        "│               │   └── User.java\n"
+                        "│               └── service/\n"
+                        "│                   └── UserService.java\n"
+                        "```\n"
+                    )
+                }
+            ]
+        }))
         tasks = [
             self._task("src/main/java/com/example/app/controller/Core.java"),
-            self._task("src/main/java/com/example/app/config/AppConfig.java"),
         ]
+        original_count = len(tasks)
         new_tasks = self.manager._inject_framework_scaffolding_tasks(tasks, "Java REST API", "Domain")
-        paths = [t.metadata["file_path"] for t in new_tasks]
-        self.assertIn("src/main/java/com/example/app/Application.java", paths)
-        self.assertIn("src/main/java/com/example/app/model/core.java", paths)
-        self.assertIn("src/main/java/com/example/app/service/core.java", paths)
+        # With skill tree present, new files from the tree should be injected
+        self.assertGreater(len(new_tasks), original_count)
 
-    def test_inject_structure_scaffolding_python_layout(self):
+    def test_inject_structure_scaffolding_no_skill_no_injection(self):
+        """Without skill_prefetch.json, no scaffolding is injected (behaviour since skills-first refactor)."""
         tasks = [
             self._task("src/api/handlers.py"),
             self._task("src/utils/helpers.py"),
         ]
+        before = len(tasks)
         new_tasks = self.manager._inject_framework_scaffolding_tasks(tasks, "Python API", "Domain")
-        paths = [t.metadata["file_path"] for t in new_tasks]
-        self.assertIn("src/main.py", paths)
-        self.assertIn("src/model/core.py", paths)
-        self.assertIn("src/service/core.py", paths)
+        # No skill prefetch — task list unchanged
+        self.assertEqual(len(new_tasks), before)
 
     def test_no_scaffolding_if_skills_not_applicable(self):
         import json
@@ -255,6 +285,150 @@ class TestStructureScaffolding(unittest.TestCase):
         before = len(tasks)
         new_tasks = self.manager._inject_framework_scaffolding_tasks(tasks, "Spring", "Domain")
         self.assertEqual(len(new_tasks), before)
+
+
+class TestFileTierClassification(unittest.TestCase):
+    """Scaled tier values and test-file pre-check ordering."""
+
+    def tearDown(self):
+        db_path = Path("tests/unit/tier_tasks.db")
+        if db_path.exists():
+            db_path.unlink()
+
+    def test_model_tier_scaled(self):
+        assert TaskManager._classify_file_tier("models/invoice.py") == 10
+
+    def test_service_tier_scaled(self):
+        assert TaskManager._classify_file_tier("services/invoice_service.py") == 30
+
+    def test_test_file_tier_dedicated(self):
+        assert TaskManager._classify_file_tier("tests/test_invoice.py") == 15
+
+    def test_entrypoint_tier_scaled(self):
+        assert TaskManager._classify_file_tier("src/main.py") == 80
+
+    def test_test_file_sorts_before_service(self):
+        assert TaskManager._classify_file_tier("tests/test_invoice.py") < \
+               TaskManager._classify_file_tier("services/invoice_service.py")
+
+    def test_test_file_sorts_after_model(self):
+        assert TaskManager._classify_file_tier("tests/test_invoice.py") > \
+               TaskManager._classify_file_tier("models/invoice.py")
+
+    def test_repository_tier_scaled(self):
+        assert TaskManager._classify_file_tier("repositories/invoice_repo.py") == 20
+
+    def test_mock_file_tier_last(self):
+        assert TaskManager._classify_file_tier("mocks/invoice_mock.py") == 90
+
+    def test_default_tier_controller_level(self):
+        assert TaskManager._classify_file_tier("lib/helpers.py") == 50
+
+    def test_entrypoint_detection_still_works(self):
+        assert TaskManager._has_entrypoint_in_paths(["src/main.py"]) is True
+        assert TaskManager._has_entrypoint_in_paths(["tests/test_main.py"]) is False
+
+    def test_scaffolding_path_entrypoint_tier(self):
+        tm = make_task_manager()
+        assert "main" in tm._scaffolding_path_for_tier("src", ".py", 80)
+
+    def test_scaffolding_path_model_tier(self):
+        tm = make_task_manager()
+        assert "model" in tm._scaffolding_path_for_tier("src", ".py", 10)
+
+
+class TestMatchFeatureFiles(unittest.TestCase):
+    def setUp(self):
+        self.db_path = Path("tests/unit/feature_match_tasks.db")
+        if self.db_path.exists():
+            self.db_path.unlink()
+        self.manager = TaskManager(self.db_path, "feature_match_proj")
+
+    def tearDown(self):
+        if self.db_path.exists():
+            self.db_path.unlink()
+
+    def test_match_feature_files_returns_empty_when_no_features(self):
+        result = self.manager._match_feature_files("services/invoice.py", {})
+        self.assertEqual(result, [])
+
+    def test_match_feature_files_matches_by_stem_keyword(self):
+        features = {
+            "features/invoice.feature": (
+                "Feature: Invoice Management\n  Scenario: Create invoice\n"
+            ),
+        }
+        result = self.manager._match_feature_files(
+            "services/invoice_service.py", features,
+        )
+        self.assertIn("features/invoice.feature", result)
+
+    def test_match_feature_files_no_false_positive(self):
+        features = {
+            "features/payment.feature": "Feature: Payment Processing\n",
+        }
+        result = self.manager._match_feature_files(
+            "services/user_service.py", features,
+        )
+        self.assertEqual(result, [])
+
+
+class TestBuildFilePromptFeatureInjection(unittest.TestCase):
+    def setUp(self):
+        self.db_path = Path("tests/unit/feature_prompt_tasks.db")
+        if self.db_path.exists():
+            self.db_path.unlink()
+        self.workspace = self.db_path.parent
+        self.manager = TaskManager(self.db_path, "feature_prompt_proj")
+        features_dir = self.workspace / "features"
+        features_dir.mkdir(exist_ok=True)
+        (features_dir / "invoice.feature").write_text(
+            "Feature: Invoice\n  Scenario: Create\n    Given a user\n",
+            encoding="utf-8",
+        )
+
+    def tearDown(self):
+        if self.db_path.exists():
+            self.db_path.unlink()
+        feat = self.workspace / "features" / "invoice.feature"
+        if feat.exists():
+            feat.unlink()
+        feat_dir = self.workspace / "features"
+        if feat_dir.exists():
+            feat_dir.rmdir()
+
+    def test_prompt_injects_acceptance_criteria_from_feature_files(self):
+        task = TaskDefinition(
+            task_id="file_services_invoice_py",
+            phase="development",
+            task_type="file_creation",
+            description="Create invoice service",
+            metadata={
+                "file_path": "services/invoice_service.py",
+                "feature_files": ["features/invoice.feature"],
+            },
+        )
+        prompt = self.manager.build_file_prompt(
+            task, user_stories="As a user I want invoices",
+        )
+        self.assertIn("ACCEPTANCE CRITERIA", prompt)
+        self.assertIn("Feature: Invoice", prompt)
+        self.assertNotIn("As a user I want invoices", prompt)
+
+    def test_prompt_keeps_user_stories_without_feature_files(self):
+        task = TaskDefinition(
+            task_id="file_services_invoice_py",
+            phase="development",
+            task_type="file_creation",
+            description="Create invoice service",
+            metadata={"file_path": "services/invoice_service.py"},
+        )
+        prompt = self.manager.build_file_prompt(
+            task, user_stories="As a user I want invoices",
+        )
+        self.assertIn("As a user I want invoices", prompt)
+        self.assertNotIn("ACCEPTANCE CRITERIA", prompt)
+
 
 if __name__ == '__main__':
     unittest.main()
