@@ -112,6 +112,18 @@ tools:
     #       service_url: "http://skills-service:8090"
     #       default_tags: ["react", "frontend"]
 
+# ── Plan Review Gate ────────────────────────────────────────────────────────────
+# When enabled, the workflow pauses after TA for human plan review before coding.
+plan_review:
+  enabled: false
+
+# ── Solutioning Loop ────────────────────────────────────────────────────────────
+# Research + architect + critique loop between Meta and PO phases.
+solutioning:
+  enabled: false
+  max_passes: 3
+  max_github_searches: 10
+
 # ── Generation Performance ─────────────────────────────────────────────────────
 # Controls how many files are generated concurrently during the development phase.
 # Can also be set via the PARALLEL_FILE_WORKERS environment variable (env var wins).

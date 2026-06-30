@@ -58,6 +58,18 @@ def _get_config():
     return _config
 
 
+def _config_for_job(job_id: str):
+    """Server config merged with the job owner's saved workflow preferences."""
+    from crew_studio.workflow_config import config_for_job_owner
+
+    base = _get_config()
+    if not base:
+        return base
+    job = job_db.get_job(job_id)
+    owner_id = job.get("owner_id") if job else None
+    return config_for_job_owner(base, job_db, owner_id)
+
+
 # ---------------------------------------------------------------------------
 # Job runner — imported lazily to avoid heavy imports at module level
 # ---------------------------------------------------------------------------
@@ -218,7 +230,7 @@ def _resolve_backend(name: str):
 
 def _dispatch_job(job_id: str, vision: str, backend_name: str, resume: bool = False):
     """Runs in executor thread — safe to do slow imports/work here."""
-    config_obj = _get_config()
+    config_obj = _config_for_job(job_id)
     if backend_name != "opl-ai-team":
         backend, _ = _resolve_backend(backend_name)
         if backend:
@@ -500,7 +512,7 @@ async def get_job_progress(job_id: str, user: CurrentUser = Depends(get_current_
 
 @app.post("/api/jobs/{job_id}/approve")
 async def approve_job(job_id: str, user: CurrentUser = Depends(get_current_user)):
-    """Resume a pending_approval or pending_review job."""
+    """Resume a pending_approval, pending_review, or pending_solution_review job."""
     job = job_db.get_job(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
@@ -513,19 +525,36 @@ async def approve_job(job_id: str, user: CurrentUser = Depends(get_current_user)
         if not has_access:
             raise HTTPException(status_code=404, detail="Job not found")
 
-    if job.get("status") not in ("pending_approval", "pending_review"):
+    status = job.get("status")
+    if status not in ("pending_approval", "pending_review", "pending_solution_review"):
         raise HTTPException(
             status_code=400,
-            detail=f"Job is not pending approval/review (status={job.get('status')})",
+            detail=f"Job is not pending approval/review (status={status})",
         )
     raw_meta = job.get("metadata") or {}
     meta = raw_meta if isinstance(raw_meta, dict) else {}
-    meta["pending_review_approved"] = True
-    job_db.update_job(job_id, {
-        "status": "queued",
-        "current_phase": "development",
-        "metadata": json.dumps(meta),
-    })
+    if isinstance(raw_meta, str):
+        try:
+            meta = json.loads(raw_meta) if raw_meta else {}
+        except (json.JSONDecodeError, TypeError):
+            meta = {}
+
+    if status == "pending_solution_review":
+        meta["solution_approved"] = True
+        updates = {
+            "status": "queued",
+            "current_phase": "product_owner",
+            "metadata": json.dumps(meta),
+        }
+    else:
+        meta["pending_review_approved"] = True
+        updates = {
+            "status": "queued",
+            "current_phase": "development",
+            "metadata": json.dumps(meta),
+        }
+
+    job_db.update_job(job_id, updates)
     if os.getenv("CREW_TEST_NO_EXECUTOR", "").strip().lower() not in ("1", "true", "yes"):
         loop = asyncio.get_running_loop()
         loop.run_in_executor(
@@ -577,7 +606,7 @@ async def refine_plan(job_id: str, body: RefinePlanRequest, user: CurrentUser = 
 
         workspace = _Path(job["workspace_path"])
         set_thread_workspace(str(workspace))
-        cfg = _get_config()
+        cfg = _config_for_job(job_id)
         with user_llm_context(job_id, job_db, cfg):
             workflow = SoftwareDevWorkflow(
                 project_id=job_id,
@@ -631,6 +660,118 @@ async def get_job_plan(job_id: str, user: CurrentUser = Depends(get_current_user
         "epic_judge_reasoning": meta.get("epic_judge_reasoning"),
         "plan_feedback_history": meta.get("plan_feedback_history", []),
     }
+
+
+class RefineSolutionRequest(BaseModel):
+    feedback: str
+
+
+@app.get("/api/jobs/{job_id}/solution")
+async def get_job_solution(job_id: str, user: CurrentUser = Depends(get_current_user)):
+    """Return solutioning artifacts for a job."""
+    job = job_db.get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    if not user.is_admin:
+        has_access = (
+            (job.get("owner_id") == user.user_id) or
+            (job.get("team_id") and job.get("team_id").lstrip("/") in user.teams)
+        )
+        if not has_access:
+            raise HTTPException(status_code=404, detail="Job not found")
+
+    from pathlib import Path as _Path
+    workspace = _Path(job["workspace_path"])
+    artifacts: dict[str, str] = {}
+    spec_path = workspace / "solution_spec.md"
+    if spec_path.exists():
+        try:
+            artifacts["solution_spec.md"] = spec_path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            pass
+
+    candidates: list = []
+    candidates_path = workspace / "solution_candidates.json"
+    if candidates_path.exists():
+        try:
+            candidates = json.loads(candidates_path.read_text(encoding="utf-8", errors="replace"))
+            if not isinstance(candidates, list):
+                candidates = []
+        except (json.JSONDecodeError, OSError):
+            candidates = []
+
+    critique_history: list = []
+    for critique_file in sorted(workspace.glob("solution_critique_pass_*.json")):
+        try:
+            critique_history.append(
+                json.loads(critique_file.read_text(encoding="utf-8", errors="replace"))
+            )
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    raw_meta = job.get("metadata") or {}
+    meta = raw_meta if isinstance(raw_meta, dict) else {}
+    if isinstance(raw_meta, str):
+        try:
+            meta = json.loads(raw_meta) if raw_meta else {}
+        except (json.JSONDecodeError, TypeError):
+            meta = {}
+
+    return {
+        "artifacts": artifacts,
+        "solution_candidates": candidates,
+        "critique_history": critique_history,
+        "solution_feedback_history": meta.get("solution_feedback_history", []),
+    }
+
+
+@app.post("/api/jobs/{job_id}/refine-solution")
+async def refine_solution(job_id: str, body: RefineSolutionRequest, user: CurrentUser = Depends(get_current_user)):
+    """Re-run solution architect + critique while job is pending_solution_review."""
+    job = job_db.get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    if not user.is_admin:
+        has_access = (
+            (job.get("owner_id") == user.user_id) or
+            (job.get("team_id") and job.get("team_id").lstrip("/") in user.teams)
+        )
+        if not has_access:
+            raise HTTPException(status_code=404, detail="Job not found")
+
+    if job.get("status") != "pending_solution_review":
+        raise HTTPException(
+            status_code=400,
+            detail=f"Job is not in solution review state (status={job.get('status')})",
+        )
+    if not body.feedback or not body.feedback.strip():
+        raise HTTPException(status_code=400, detail="feedback is required")
+
+    def _run_refine():
+        from pathlib import Path as _Path
+        from src.llamaindex_crew.workflows.software_dev_workflow import SoftwareDevWorkflow
+        from src.llamaindex_crew.tools.file_tools import set_thread_workspace
+        from src.llamaindex_crew.utils.llm_config import user_llm_context
+
+        workspace = _Path(job["workspace_path"])
+        set_thread_workspace(str(workspace))
+        cfg = _config_for_job(job_id)
+        with user_llm_context(job_id, job_db, cfg):
+            workflow = SoftwareDevWorkflow(
+                project_id=job_id,
+                workspace_path=workspace,
+                vision=job.get("vision", ""),
+                config=cfg,
+                progress_callback=lambda phase, prog, msg=None: job_db.update_progress(job_id, phase, prog, msg),
+                job_db=job_db,
+            )
+            return workflow.refine_solution(body.feedback.strip())
+
+    loop = asyncio.get_running_loop()
+    result = await loop.run_in_executor(None, _run_refine)
+    return {**result, "job_id": job_id}
 
 
 @app.post("/api/jobs/{job_id}/refine-epic-stories")
@@ -999,6 +1140,73 @@ async def test_github_connection_endpoint(
         return {"ok": False, "error": "Cannot reach GitHub API — check your network."}
     except Exception as e:
         return {"ok": False, "error": str(e)}
+
+
+# ---------------------------------------------------------------------------
+# Workflow configuration endpoints (plan review, solutioning, auto-approve)
+# ---------------------------------------------------------------------------
+
+class WorkflowConfigRequest(BaseModel):
+    plan_review_enabled: bool = False
+    solutioning_enabled: bool = False
+    solutioning_max_passes: int = 3
+    solutioning_max_github_searches: int = 10
+    auto_approve_plan: bool = False
+
+
+class WorkflowConfigResponse(BaseModel):
+    configured: bool
+    plan_review_enabled: bool = False
+    solutioning_enabled: bool = False
+    solutioning_max_passes: int = 3
+    solutioning_max_github_searches: int = 10
+    auto_approve_plan: bool = False
+    updated_at: Optional[str] = None
+
+
+@app.get("/api/workflow/config", response_model=WorkflowConfigResponse)
+async def get_workflow_config(user: CurrentUser = Depends(get_current_user)):
+    """Return the current user's workflow preferences."""
+    from crew_studio.workflow_config import DEFAULT_WORKFLOW_PREFS, normalize_workflow_prefs
+
+    stored = job_db.get_workflow_config(user.user_id) if user.user_id else None
+    if not stored:
+        defaults = normalize_workflow_prefs(DEFAULT_WORKFLOW_PREFS)
+        return {
+            "configured": False,
+            **{k: defaults[k] for k in DEFAULT_WORKFLOW_PREFS},
+            "updated_at": None,
+        }
+    return {"configured": True, **normalize_workflow_prefs(stored), "updated_at": stored.get("updated_at")}
+
+
+@app.post("/api/workflow/config", status_code=201)
+async def save_workflow_config(
+    body: WorkflowConfigRequest,
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Save workflow preferences for the current user."""
+    if not user.user_id:
+        raise HTTPException(status_code=401, detail="Authenticated user has no identity")
+    job_db.save_workflow_config(
+        owner_id=user.user_id,
+        plan_review_enabled=body.plan_review_enabled,
+        solutioning_enabled=body.solutioning_enabled,
+        solutioning_max_passes=body.solutioning_max_passes,
+        solutioning_max_github_searches=body.solutioning_max_github_searches,
+        auto_approve_plan=body.auto_approve_plan,
+    )
+    stored = job_db.get_workflow_config(user.user_id)
+    from crew_studio.workflow_config import normalize_workflow_prefs
+
+    return {"saved": True, **normalize_workflow_prefs(stored)}
+
+
+@app.delete("/api/workflow/config", status_code=200)
+async def delete_workflow_config(user: CurrentUser = Depends(get_current_user)):
+    """Reset workflow preferences to server defaults."""
+    deleted = job_db.delete_workflow_config(user.user_id)
+    return {"deleted": deleted}
 
 
 # ---------------------------------------------------------------------------

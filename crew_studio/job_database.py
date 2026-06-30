@@ -225,6 +225,19 @@ class JobDatabase:
                 )
             """)
 
+            # Per-user workflow preferences (plan review, solutioning, auto-approve)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS user_workflow_configs (
+                    owner_id TEXT PRIMARY KEY,
+                    plan_review_enabled INTEGER NOT NULL DEFAULT 0,
+                    solutioning_enabled INTEGER NOT NULL DEFAULT 0,
+                    solutioning_max_passes INTEGER NOT NULL DEFAULT 3,
+                    solutioning_max_github_searches INTEGER NOT NULL DEFAULT 10,
+                    auto_approve_plan INTEGER NOT NULL DEFAULT 0,
+                    updated_at TEXT NOT NULL
+                )
+            """)
+
             # Model context windows dictionary (maps model substrings to context sizes)
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS model_context_windows (
@@ -1385,6 +1398,73 @@ class JobDatabase:
         with self._get_conn() as conn:
             cursor = conn.execute(
                 "DELETE FROM user_llm_configs WHERE owner_id = ?", (owner_id,)
+            )
+        return cursor.rowcount > 0
+
+    # ------------------------------------------------------------------
+    # Workflow preferences — per-user UI settings
+    # ------------------------------------------------------------------
+
+    def save_workflow_config(
+        self,
+        owner_id: str,
+        *,
+        plan_review_enabled: bool = False,
+        solutioning_enabled: bool = False,
+        solutioning_max_passes: int = 3,
+        solutioning_max_github_searches: int = 10,
+        auto_approve_plan: bool = False,
+    ) -> None:
+        """Persist workflow preferences for owner_id."""
+        now = datetime.now().isoformat()
+        with self._get_conn() as conn:
+            conn.execute("""
+                INSERT INTO user_workflow_configs (
+                    owner_id, plan_review_enabled, solutioning_enabled,
+                    solutioning_max_passes, solutioning_max_github_searches,
+                    auto_approve_plan, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(owner_id) DO UPDATE SET
+                    plan_review_enabled = excluded.plan_review_enabled,
+                    solutioning_enabled = excluded.solutioning_enabled,
+                    solutioning_max_passes = excluded.solutioning_max_passes,
+                    solutioning_max_github_searches = excluded.solutioning_max_github_searches,
+                    auto_approve_plan = excluded.auto_approve_plan,
+                    updated_at = excluded.updated_at
+            """, (
+                owner_id,
+                1 if plan_review_enabled else 0,
+                1 if solutioning_enabled else 0,
+                max(1, min(5, int(solutioning_max_passes))),
+                max(1, min(50, int(solutioning_max_github_searches))),
+                1 if auto_approve_plan else 0,
+                now,
+            ))
+
+    def get_workflow_config(self, owner_id: str) -> Optional[Dict[str, Any]]:
+        """Return workflow prefs for owner_id, or None if not saved."""
+        with self._get_conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM user_workflow_configs WHERE owner_id = ?",
+                (owner_id,),
+            ).fetchone()
+        if not row:
+            return None
+        return {
+            "plan_review_enabled": bool(row["plan_review_enabled"]),
+            "solutioning_enabled": bool(row["solutioning_enabled"]),
+            "solutioning_max_passes": int(row["solutioning_max_passes"]),
+            "solutioning_max_github_searches": int(row["solutioning_max_github_searches"]),
+            "auto_approve_plan": bool(row["auto_approve_plan"]),
+            "updated_at": row["updated_at"],
+        }
+
+    def delete_workflow_config(self, owner_id: str) -> bool:
+        """Remove stored workflow prefs for owner_id."""
+        with self._get_conn() as conn:
+            cursor = conn.execute(
+                "DELETE FROM user_workflow_configs WHERE owner_id = ?", (owner_id,)
             )
         return cursor.rowcount > 0
 

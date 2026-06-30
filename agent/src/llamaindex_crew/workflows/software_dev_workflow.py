@@ -387,6 +387,7 @@ class SoftwareDevWorkflow:
         self.design_spec = None
         self.tech_stack = None
         self.api_contract = None  # OpenAPI 3.0 dict (populated for fullstack projects)
+        self.solution_spec = None
         self._export_registry: Dict[str, Any] = {}  # file_path -> export summary from dev phase
     
     def _report_progress(self, phase: str, progress: int, message: str = None):
@@ -453,6 +454,154 @@ class SoftwareDevWorkflow:
             return not bool(auto_approve)
         pr_cfg = getattr(self.config, "plan_review", None) if self.config else None
         return bool(getattr(pr_cfg, "enabled", False))
+
+    def _solutioning_enabled(self) -> bool:
+        """Return True when the solutioning loop should run before PO phase."""
+        metadata = self._load_job_metadata()
+        auto_approve = metadata.get("auto_approve_solution")
+        if auto_approve is not None:
+            return not bool(auto_approve)
+        sol_cfg = getattr(self.config, "solutioning", None) if self.config else None
+        return bool(getattr(sol_cfg, "enabled", False))
+
+    def _run_solutioning_loop(self):
+        """Run research → architect → critique loop and persist artifacts."""
+        from .solutioning_loop import run_solutioning_loop
+
+        max_passes = 3
+        max_github = 10
+        sol_cfg = getattr(self.config, "solutioning", None) if self.config else None
+        if sol_cfg:
+            max_passes = int(getattr(sol_cfg, "max_passes", 3) or 3)
+            max_github = int(getattr(sol_cfg, "max_github_searches", 10) or 10)
+
+        github_token = None
+        if self.job_db:
+            job = self.job_db.get_job(self.project_id)
+            owner_id = job.get("owner_id") if job else None
+            if owner_id:
+                gh_cfg = self.job_db.get_github_config(owner_id)
+                if gh_cfg:
+                    github_token = gh_cfg.get("token")
+
+        result = run_solutioning_loop(
+            vision=self.vision,
+            project_context=self.project_context or "",
+            workspace_path=self.workspace_path,
+            config=self.config,
+            budget_tracker=self.budget_tracker,
+            document_indexer=self.document_indexer,
+            max_passes=max_passes,
+            progress_callback=self.progress_callback,
+            max_github_searches=max_github,
+            github_token=github_token,
+        )
+        if result.spec_path.exists():
+            try:
+                self.solution_spec = result.spec_path.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                pass
+        self._report_progress(
+            "solutioning",
+            28,
+            f"Solutioning complete ({result.pass_count} pass(es), approved={result.approved})",
+        )
+        return result
+
+    def _pause_for_solution_review(self, feedback_history: list | None = None) -> dict:
+        """Set job to pending_solution_review and return a pause result dict."""
+        metadata = self._load_job_metadata()
+        metadata["solution_pending_review"] = True
+        metadata["solution_feedback_history"] = feedback_history or []
+        self._update_job_metadata(metadata)
+        if self.job_db:
+            self.job_db.update_job(self.project_id, {
+                "status": "pending_solution_review",
+                "current_phase": "pending_solution_review",
+                "progress": 25,
+            })
+        self._append_job_event({
+            "type": "solution_pending_review",
+            "message": "Solution spec ready — awaiting human review before planning",
+        })
+        self._report_progress("pending_solution_review", 25, "Solution ready — awaiting review")
+        return {
+            "status": "pending_solution_review",
+            "project_id": self.project_id,
+            "budget_report": self.budget_tracker.get_report(self.project_id),
+            "state": self.state_machine.get_current_state().value,
+        }
+
+    def refine_solution(self, feedback: str) -> dict:
+        """Re-run solution architect + critique passes with user feedback."""
+        logger.info("Solution refinement requested for job %s: %r", self.project_id, feedback[:120])
+        self._report_progress("pending_solution_review", 20, "Refining solution with your feedback…")
+
+        metadata = self._load_job_metadata()
+        history = metadata.get("solution_feedback_history") or []
+        history.append({"feedback": feedback, "at": _json.dumps(datetime.now(timezone.utc).isoformat())})
+        metadata["solution_feedback_history"] = history
+        self._update_job_metadata(metadata)
+
+        candidates_path = self.workspace_path / "solution_candidates.json"
+        candidates_json = ""
+        if candidates_path.exists():
+            candidates_json = candidates_path.read_text(encoding="utf-8", errors="replace")
+
+        from ..agents.solution_agents import SolutionArchitectAgent, SolutionCritiqueAgent
+
+        architect = SolutionArchitectAgent(
+            budget_tracker=self.budget_tracker,
+            workspace_path=self.workspace_path,
+            config=self.config,
+        )
+        critique_agent = SolutionCritiqueAgent(
+            budget_tracker=self.budget_tracker,
+            config=self.config,
+        )
+
+        combined_feedback = feedback
+        if history[:-1]:
+            prior = "\n".join(h.get("feedback", "") for h in history[:-1] if h.get("feedback"))
+            if prior.strip():
+                combined_feedback = f"{prior.strip()}\n\nLatest feedback:\n{feedback}"
+
+        architect.run(self.vision, self.project_context or "", candidates_json, feedback=combined_feedback)
+        spec_path = self.workspace_path / "solution_spec.md"
+        spec_content = spec_path.read_text(encoding="utf-8", errors="replace") if spec_path.exists() else ""
+        critique_raw = critique_agent.run(self.vision, spec_content, candidates_json)
+
+        pass_num = len(list(self.workspace_path.glob("solution_critique_pass_*.json"))) + 1
+        try:
+            import re as _re
+            match = _re.search(r"\{[\s\S]*\}", critique_raw or "")
+            critique = _json.loads(match.group(0)) if match else {"approved": False, "score": 0, "issues": [], "must_fix": []}
+        except Exception:
+            critique = {"approved": False, "score": 0, "issues": ["Invalid critique JSON"], "must_fix": []}
+        critique_path = self.workspace_path / f"solution_critique_pass_{pass_num}.json"
+        critique_path.write_text(_json.dumps(critique, indent=2) + "\n", encoding="utf-8")
+
+        if spec_path.exists():
+            self.solution_spec = spec_path.read_text(encoding="utf-8", errors="replace")
+
+        metadata["solution_pending_review"] = True
+        self._update_job_metadata(metadata)
+        if self.job_db:
+            self.job_db.update_job(self.project_id, {
+                "status": "pending_solution_review",
+                "current_phase": "pending_solution_review",
+                "progress": 25,
+            })
+
+        artifacts = self._load_plan_artifacts()
+        if spec_path.exists():
+            artifacts["solution_spec.md"] = self.solution_spec or spec_content
+        return {
+            "status": "pending_solution_review",
+            "artifacts": artifacts,
+            "feedback_rounds": len(history),
+            "solution_approved_by_critique": bool(critique.get("approved")),
+        }
 
     def _load_plan_artifacts(self) -> dict[str, str]:
         """Read planning artifacts from workspace for plan review."""
@@ -661,6 +810,12 @@ class SoftwareDevWorkflow:
 
         if start_index == 0 and not resume:
             self.run_meta_phase()
+
+            if self._solutioning_enabled():
+                metadata = self._load_job_metadata()
+                if not metadata.get("solution_approved"):
+                    self._run_solutioning_loop()
+                    return self._pause_for_solution_review()
 
             # Assess existing stories to decide whether to skip PO
             assessment = assess_epic_stories(
@@ -1655,6 +1810,7 @@ class SoftwareDevWorkflow:
             ("user_stories.md", "user_stories"),
             ("design_spec.md", "design_spec"),
             ("tech_stack.md", "tech_stack"),
+            ("solution_spec.md", "solution_spec"),
         ]:
             fpath = self.workspace_path / path
             if fpath.exists():
@@ -1694,6 +1850,8 @@ class SoftwareDevWorkflow:
                 return ProjectState.TECH_ARCHITECT
             if (wp / "user_stories.md").exists():
                 return ProjectState.DESIGNER
+            if (wp / "solution_spec.md").exists():
+                return ProjectState.PRODUCT_OWNER
             if (wp / "agent_backstories.json").exists():
                 return ProjectState.PRODUCT_OWNER
         except Exception as e:
@@ -1820,6 +1978,16 @@ class SoftwareDevWorkflow:
         """Run Product Owner phase to create user stories and BDD feature files."""
         logger.info("🚀 Starting Product Owner phase...")
         self._report_progress('product_owner', 30, "Creating user stories...")
+
+        solution_spec_file = self.workspace_path / "solution_spec.md"
+        if solution_spec_file.exists():
+            try:
+                spec_content = solution_spec_file.read_text(encoding="utf-8", errors="replace")
+                if spec_content.strip():
+                    section = f"\n\n## SOLUTION SPECIFICATION\n\n{spec_content.strip()}\n"
+                    self.project_context = (self.project_context or "") + section
+            except OSError as exc:
+                logger.warning("Could not read solution_spec.md for PO context: %s", exc)
 
         if self.state_machine.get_current_state() != ProjectState.PRODUCT_OWNER:
             self.state_machine.transition(
@@ -3393,6 +3561,12 @@ class SoftwareDevWorkflow:
             else:
                 # Phase 1: Meta (has its own retry logic)
                 self.run_meta_phase()
+                # Solutioning loop (config-gated)
+                if self._solutioning_enabled():
+                    metadata = self._load_job_metadata()
+                    if not metadata.get("solution_approved"):
+                        self._run_solutioning_loop()
+                        return self._pause_for_solution_review()
                 # Phases 2–4: planning — can be paused for human review
                 self._run_phase_with_retry("product_owner", self.run_product_owner_phase)
                 self._run_phase_with_retry("designer", self.run_designer_phase)

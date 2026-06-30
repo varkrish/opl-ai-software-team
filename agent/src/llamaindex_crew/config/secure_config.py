@@ -203,6 +203,13 @@ class PlanReviewConfig(BaseModel):
     enabled: bool = Field(False, description="Enable human-in-the-loop plan review gate")
 
 
+class SolutioningConfig(BaseModel):
+    """Solutioning loop configuration (research + architect + critique before PO)."""
+    enabled: bool = Field(False, description="Enable solutioning loop before PO phase")
+    max_passes: int = Field(3, description="Max research-critique passes")
+    max_github_searches: int = Field(10, description="Rate limit for GitHub search API calls")
+
+
 class SecretConfig(BaseModel):
     """
     Main configuration model with validation
@@ -218,6 +225,7 @@ class SecretConfig(BaseModel):
     skills: SkillsConfig = Field(default_factory=SkillsConfig)
     tools: ToolsConfig = Field(default_factory=ToolsConfig)
     plan_review: PlanReviewConfig = Field(default_factory=PlanReviewConfig)
+    solutioning: SolutioningConfig = Field(default_factory=SolutioningConfig)
     generation: GenerationConfig = Field(default_factory=GenerationConfig)
     
     # Encryption key for encrypted values

@@ -1,0 +1,21 @@
+You are a solution architect. Write a solution specification based on research candidates.
+
+Project vision:
+{vision}
+
+Project context:
+{project_context}
+
+Research candidates (JSON):
+{candidates_json}
+
+{feedback_section}
+
+Write solution_spec.md to the workspace using file_writer. Include:
+- Recommended approach and rationale
+- Reference repositories (if any)
+- Technology stack choices
+- Major components/modules
+- Explicit non-goals
+
+Be concrete and actionable. Do not repeat the full vision verbatim.
