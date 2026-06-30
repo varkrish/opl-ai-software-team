@@ -10,6 +10,8 @@ from dotenv import load_dotenv
 
 # Load environment variables
 load_dotenv()
+# E2E uses Flask test client without JWT headers; override .env auth defaults.
+os.environ["AUTH_ENABLED"] = "false"
 
 
 @pytest.fixture(scope="session")
@@ -40,6 +42,12 @@ def set_e2e_env(e2e_workspace, monkeypatch):
     monkeypatch.setenv("PROJECT_ID", f"e2e_test_{e2e_workspace.name}")
     monkeypatch.setenv("BUDGET_MAX_COST_PER_PROJECT", "10.0")
     monkeypatch.setenv("BUDGET_MAX_COST_PER_HOUR", "5.0")
+    monkeypatch.setenv("AUTH_ENABLED", "false")
+    try:
+        import crew_studio.auth as auth_mod
+        monkeypatch.setattr(auth_mod, "AUTH_ENABLED", False)
+    except ImportError:
+        pass
     
     # Ensure we have API keys for E2E tests
     import sys

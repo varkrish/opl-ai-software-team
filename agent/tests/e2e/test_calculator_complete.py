@@ -10,7 +10,10 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Add src to path
-sys.path.insert(0, str(Path(__file__).parent / "src"))
+_root = Path(__file__).resolve().parent.parent.parent
+sys.path.insert(0, str(_root))
+sys.path.insert(0, str(_root / "agent"))
+sys.path.insert(0, str(_root / "agent" / "src"))
 
 from llamaindex_crew.main import run_workflow
 

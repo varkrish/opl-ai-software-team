@@ -2,19 +2,156 @@
 Test execution tools for AI agents
 Migrated from CrewAI BaseTool to LlamaIndex FunctionTool
 """
+import json
 import logging
 import os
+import re
 import subprocess
 import time
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import Optional
+from typing import Any, Dict, Optional
 
 from llama_index.core.tools import FunctionTool
 
 from .file_tools import _resolve_workspace
 
 logger = logging.getLogger(__name__)
+
+
+def _read_test_plan(workspace: Path) -> Dict[str, str]:
+    """Parse test_plan.md key-value lines. Returns {} if the file is missing."""
+    plan_file = workspace / "test_plan.md"
+    if not plan_file.is_file():
+        return {}
+    result: Dict[str, str] = {}
+    for line in plan_file.read_text(encoding="utf-8", errors="replace").splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if ":" not in stripped:
+            continue
+        key, _, value = stripped.partition(":")
+        key = key.strip()
+        value = value.strip()
+        if key:
+            result[key] = value
+    return result
+
+
+def _find_container_runtime() -> Optional[str]:
+    for rt in ("podman", "docker"):
+        try:
+            subprocess.run([rt, "--version"], capture_output=True, timeout=5)
+            return rt
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            continue
+    return None
+
+
+def _run_test_command_in_container(workspace: Path, command: str) -> tuple[int, str]:
+    """Run *command* in an isolated container with the workspace mounted at /app."""
+    project_type = _detect_project_type(workspace)
+    image = CONTAINER_IMAGES.get(project_type)
+    if not image:
+        return 1, f"No container image for project type '{project_type}'"
+
+    runtime = _find_container_runtime()
+    if not runtime:
+        return 1, "No container runtime found (tried podman, docker)"
+
+    cmd = [
+        runtime, "run", "--rm",
+        "--network=none",
+        "-v", f"{workspace}:/app:Z",
+        "-w", "/app",
+        image,
+        "sh", "-c", command,
+    ]
+    try:
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=600,
+        )
+        output = (result.stdout or "") + (result.stderr or "")
+        return result.returncode, output
+    except subprocess.TimeoutExpired:
+        return 1, "Test command timed out after 600s"
+    except Exception as exc:
+        return 1, f"Container test error: {exc}"
+
+
+def _parse_test_output_with_llm(raw_output: str) -> Dict[str, Any]:
+    """Use LLM to parse arbitrary test-runner output into structured results."""
+    from ..utils.llm_config import get_llm_for_agent
+
+    prompt = (
+        "Parse the test runner output below into JSON with exactly these keys:\n"
+        '  "passed" (bool), "total" (int), "passed_count" (int), '
+        '"failed_count" (int), "failures" (list of {"test": str, "error": str})\n'
+        "Output ONLY valid JSON — no markdown fences, no prose.\n\n"
+        f"Test output:\n{raw_output[:8000]}"
+    )
+    llm = get_llm_for_agent("worker")
+    response = str(llm.complete(prompt))
+
+    json_match = re.search(r"\{.*\}", response, re.DOTALL)
+    if not json_match:
+        passed = "passed" in raw_output.lower() and "failed" not in raw_output.lower()
+        return {
+            "passed": passed,
+            "total": 0,
+            "passed_count": 0,
+            "failed_count": 0 if passed else 1,
+            "failures": [] if passed else [{"test": "unknown", "error": raw_output[:500]}],
+        }
+    try:
+        parsed = json.loads(json_match.group(0))
+        parsed.setdefault("passed", parsed.get("failed_count", 0) == 0)
+        parsed.setdefault("total", 0)
+        parsed.setdefault("passed_count", 0)
+        parsed.setdefault("failed_count", 0)
+        parsed.setdefault("failures", [])
+        return parsed
+    except json.JSONDecodeError:
+        return {
+            "passed": False,
+            "total": 0,
+            "passed_count": 0,
+            "failed_count": 1,
+            "failures": [{"test": "parse_error", "error": response[:500]}],
+        }
+
+
+def run_feature_tests(
+    layer: str,
+    workspace_path: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Run backend or frontend tests from test_plan.md inside a container.
+
+    Gated by SMOKE_TEST_BACKEND — default ``syntax_only`` skips execution.
+    """
+    if os.getenv("SMOKE_TEST_BACKEND", "syntax_only") == "syntax_only":
+        return {"passed": True, "skipped": True, "reason": "syntax_only backend"}
+
+    workspace = Path(workspace_path).resolve() if workspace_path else _resolve_workspace()
+    plan = _read_test_plan(workspace)
+    if not plan:
+        return {"passed": True, "skipped": True, "reason": "no test_plan.md"}
+
+    cmd_key = f"{layer}_test_command"
+    command = plan.get(cmd_key, "").strip()
+    if not command or command.lower().startswith("echo no"):
+        return {"passed": True, "skipped": True, "reason": f"no {cmd_key}"}
+
+    exit_code, raw_output = _run_test_command_in_container(workspace, command)
+    parsed = _parse_test_output_with_llm(raw_output)
+    if exit_code != 0 and parsed.get("passed"):
+        parsed["passed"] = False
+        if not parsed.get("failures"):
+            parsed["failures"] = [{"test": "runner", "error": raw_output[:500]}]
+    parsed["layer"] = layer
+    parsed["raw_output"] = raw_output[:4000]
+    return parsed
 
 
 def pytest_runner(

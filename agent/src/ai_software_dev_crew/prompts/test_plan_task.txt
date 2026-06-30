@@ -1,0 +1,25 @@
+You are a test architect. Given the project tech stack and skill context below, produce a
+test execution plan as EXACTLY six key-value lines — no prose, no markdown fences.
+
+PROJECT VISION:
+{vision}
+
+TECH STACK:
+{tech_stack}
+
+SKILL CONTEXT (framework test conventions):
+{skill_context}
+
+Output ONLY these six lines (replace values with commands/paths appropriate for this stack):
+backend_test_command: <shell command to install deps and run backend tests>
+frontend_test_command: <shell command to install deps and run frontend tests>
+backend_test_dir: <relative path to backend test directory>
+frontend_test_dir: <relative path to frontend test directory>
+test_framework_backend: <e.g. pytest, JUnit, go test>
+test_framework_frontend: <e.g. Jest, Vitest, Cypress, or "none" if no frontend>
+
+Rules:
+- Commands must be runnable inside a Linux container with the project mounted at /app.
+- Use relative paths from the project root.
+- If there is no frontend, set frontend_test_command to "echo no frontend tests" and frontend_test_dir to "."
+- Do NOT invent test directories that are absent from the tech stack file tree.

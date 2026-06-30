@@ -1,10 +1,10 @@
-YOUR ONLY JOB: Implement the specific feature requested in the requirements.
+YOUR ONLY JOB: Implement the specific feature requested in the requirements, following strict TDD.
 
 Requirements: {feature_desc}
 {feature_context}
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-TOOL MODE — MANDATORY 5-STEP ITERATIVE PROCESS (when file_writer tools are available)
+TOOL MODE — MANDATORY 6-STEP TDD PROCESS (when file_writer tools are available)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 STEP 1: ARCHITECTURAL MAP & CONTEXT DISCOVERY
@@ -13,15 +13,38 @@ STEP 1: ARCHITECTURAL MAP & CONTEXT DISCOVERY
    - Do NOT build the entire tech_stack.md. Treat it strictly as a map.
 2. Use `code_search` or `code_impact` to discover where the current feature logic should be injected into existing code.
 
-STEP 2: READ EXISTING FILES
+STEP 2: READ THE FEATURE FILE (TDD CONTRACT)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Before modifying any file, check if it already exists:
-1. Call `file_lister(directory='.')` or `file_reader` on the target files.
-2. If the file exists, you MUST read its content to understand its current state.
+1. Call file_reader on the feature file for this requirement (e.g. features/invoice_management.feature).
+2. Read EVERY Scenario and Scenario Outline carefully.
+3. For Scenario Outlines: read the Examples table — each row is one test case you MUST cover.
+4. The feature file is the acceptance contract. Your implementation is complete only when all
+   scenarios and all Examples rows pass.
 
-STEP 3: IMPLEMENT FEATURE (PATCH VS CREATE)
+STEP 3: READ EXISTING FILES
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-You MUST choose the correct tool based on file existence:
+Before writing any code, check if target files already exist:
+1. For each target file, call `code_search(pattern="<filename or class name>")` FIRST to locate
+   and read relevant snippets from the codebase.
+2. Only if `code_search` returns nothing useful, fall back to `file_reader` on the target file.
+3. If the file exists, you MUST understand its current state before patching it.
+
+STEP 4: WRITE TESTS FIRST (RED PHASE — before any implementation)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Write the test file BEFORE writing any implementation code.
+
+- Derive one test function per Scenario / per Examples row from the feature file.
+- Test function names MUST reflect the scenario name and data (e.g. test_create_invoice_acme_corp_happy_path).
+- For Scenario Outlines with Examples: write parameterised tests covering EVERY row in the table.
+- Tests must call the implementation functions/endpoints that do NOT exist yet (they will fail — that is correct).
+- Include realistic test data from the Examples table — not placeholder values.
+- Use `replace_file_content` if adding to an existing test file.
+- Use `bulk_file_writer` if creating a brand new test file.
+- CRITICAL MANIFEST RULE: Only create test files listed in the PROJECT FILE TREE.
+
+STEP 5: IMPLEMENT TO MAKE TESTS PASS (GREEN PHASE)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Now write the minimum implementation code to make all tests from Step 4 pass.
 
 SCENARIO A: The file ALREADY EXISTS (Brownfield/Updates)
 - You MUST use `replace_file_content` with a `start_line` and `end_line` to patch specific methods or classes.
@@ -29,22 +52,23 @@ SCENARIO A: The file ALREADY EXISTS (Brownfield/Updates)
 
 SCENARIO B: The file is BRAND NEW (Greenfield)
 - You MUST use `bulk_file_writer` or `file_writer` to create the new file from scratch.
-- CRITICAL MANIFEST RULE: You MUST ONLY create files that are explicitly listed in the "PROJECT FILE TREE" in your prompt context. The file system enforces this. If you invent new file paths (e.g. 'tests/test_feature_x.py' instead of 'tests/core.py'), the tool will REJECT your write.
 - CRITICAL JSON RULE: Escape all newlines inside the `content` string as `\n` to prevent truncation.
 
-STEP 4: WRITE TESTS FOR YOUR FEATURE
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-- Only write tests relevant to the feature you just implemented.
-- Use `replace_file_content` if adding to an existing test file.
-- Use `bulk_file_writer` if creating a brand new test file.
+Test import rule: ONLY import test libraries that are declared in requirements.txt or package.json.
+Module system rule: follow the module system declared in tech_stack.md (ES modules vs CommonJS vs imports).
+Do NOT mix require() and import/export in the same project.
 
-STEP 5: VERIFY
+STEP 6: VERIFY
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Confirm that your changes correctly implemented the feature described in the requirements.
+Confirm that:
+- Every scenario in the feature file has a corresponding test function.
+- Every Examples row has a corresponding parameterised test case.
+- The implementation covers all rows — not just the happy path.
 
 CRITICAL RULES (tool mode):
 - You MUST ONLY call ONE tool per turn! After outputting `Action:` and `Action Input:`, STOP generating text. Wait for the Observation.
 - For existing files, ONLY use `replace_file_content`.
+- TESTS COME BEFORE IMPLEMENTATION. Never write implementation code before its test exists.
 
-✅ SUCCESS: Implemented the feature correctly using patches and writes.
-Your final answer MUST list the files you patched or created.
+✅ SUCCESS: Tests written first, implementation makes all scenarios and Examples rows pass.
+Your final answer MUST list the test files and implementation files you patched or created.

@@ -26,8 +26,8 @@ def web_server():
     
     # Start Flask server in background
     server_process = subprocess.Popen(
-        ["python", "-m", "llamaindex_crew.web.web_app"],
-        env={**os.environ, "FLASK_ENV": "testing"},
+        ["python", "-m", "crew_studio.llamaindex_web_app"],
+        env={**os.environ, "FLASK_ENV": "testing", "AUTH_ENABLED": "false"},
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE
     )

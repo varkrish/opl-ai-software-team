@@ -492,11 +492,13 @@ class TaskManager:
         'requirements.txt', 'pyproject.toml', 'go.mod', 'cargo.toml',
         'composer.json', 'gemfile',
     })
+    _TEST_FILE_TIER = 15  # after models (10), before repository (20)
+
     _STRUCTURE_LAYER_TIERS: Dict[int, str] = {
-        1: "data/model/persistence",
-        3: "service/business-logic",
-        5: "API/controller/handler",
-        8: "application entrypoint",
+        10: "data/model/persistence",
+        30: "service/business-logic",
+        50: "API/controller/handler",
+        80: "application entrypoint",
     }
     _LAYER_DIRECTORY_SEGMENTS = frozenset({
         "model", "models", "entity", "entities", "schema", "schemas", "domain",
@@ -550,7 +552,7 @@ class TaskManager:
             stem = Path(fp).stem.lower()
             if stem in cls._ENTRYPOINT_NAMES:
                 return True
-            if cls._classify_file_tier(fp) >= 8:
+            if cls._classify_file_tier(fp) >= 80:
                 return True
         return False
 
@@ -693,17 +695,17 @@ class TaskManager:
         return None, ext
 
     def _scaffolding_path_for_tier(self, base: str, ext: str, tier: int) -> str:
-        folder_map = {1: "model", 3: "service", 5: "controller"}
-        if tier == 8:
+        folder_map = {10: "model", 30: "service", 50: "controller"}
+        if tier == 80:
             return f"{base}/{self._default_entrypoint_filename(ext)}"
         folder = folder_map.get(tier, "core")
         return f"{base}/{folder}/core{ext}"
 
     _TIER_SCaffolding_DESCRIPTIONS = {
-        1: "Data/persistence layer — entity, model, or schema definition",
-        3: "Business logic layer — service or use-case implementation",
-        5: "API/request handling layer — controller, handler, or route module",
-        8: "Application entrypoint that starts the runtime",
+        10: "Data/persistence layer — entity, model, or schema definition",
+        30: "Business logic layer — service or use-case implementation",
+        50: "API/request handling layer — controller, handler, or route module",
+        80: "Application entrypoint that starts the runtime",
     }
 
     def detect_workspace_structure_gaps(self, workspace: Path) -> List[str]:
@@ -720,7 +722,7 @@ class TaskManager:
 
         gaps: List[str] = []
         for tier, label in self._STRUCTURE_LAYER_TIERS.items():
-            if tier == 8:
+            if tier == 80:
                 if self._has_entrypoint_in_paths(paths):
                     continue
             else:
@@ -728,7 +730,7 @@ class TaskManager:
                     continue
 
             if self._is_tier_applicable(tier, workspace):
-                if tier == 8:
+                if tier == 80:
                     gaps.append(
                         "Create the missing application entrypoint/bootstrap file following "
                         "your tech stack conventions."
@@ -1044,6 +1046,7 @@ class TaskManager:
 
         file_entries = self._extract_files_with_descriptions(tech_stack_content)
         contexts = self._extract_bounded_contexts(design_spec)
+        feature_contents = self._load_workspace_feature_files()
 
         raw_tasks: List[TaskDefinition] = []
 
@@ -1067,6 +1070,7 @@ class TaskManager:
                     "file_path": fp,
                     "domain_context": domain,
                     "file_description": file_desc,
+                    "feature_files": self._match_feature_files(fp, feature_contents),
                 },
             )
             raw_tasks.append(task)
@@ -1666,22 +1670,24 @@ class TaskManager:
     # all same-domain files in tiers < N.
     _FILE_TIERS: Dict[int, List[str]] = {
         0: ["config", "settings", "env", "properties", "application", "db", "database"],
-        1: ["model", "models", "entity", "entities", "schema", "schemas", "migration"],
-        2: ["repository", "repositories", "dao", "store", "manager"],
-        3: ["service", "services", "usecase", "use_case", "business", "logic"],
-        4: ["serializer", "serializers", "dto", "mapper", "converter"],
-        5: ["controller", "controllers", "handler", "handlers", "view", "views",
-            "resource", "resources", "endpoint", "api"],
-        6: ["middleware", "middlewares", "interceptor", "filter", "guard", "auth"],
-        7: ["route", "routes", "router", "urls", "urlconf"],
-        8: ["server", "app", "main", "index", "application", "wsgi", "asgi",
-            "startup", "bootstrap"],
+        10: ["model", "models", "entity", "entities", "schema", "schemas", "migration"],
+        20: ["repository", "repositories", "dao", "store", "manager"],
+        30: ["service", "services", "usecase", "use_case", "business", "logic"],
+        40: ["serializer", "serializers", "dto", "mapper", "converter"],
+        50: ["controller", "controllers", "handler", "handlers", "view", "views",
+             "resource", "resources", "endpoint", "api"],
+        60: ["middleware", "middlewares", "interceptor", "filter", "guard", "auth"],
+        70: ["route", "routes", "router", "urls", "urlconf"],
+        80: ["server", "app", "main", "index", "application", "wsgi", "asgi",
+             "startup", "bootstrap"],
     }
 
     @staticmethod
     def _classify_file_tier(file_path: str) -> int:
         """Assign a generation-order tier to a file based on its path components."""
         fp_lower = file_path.lower()
+        if is_test_file_path(fp_lower):
+            return TaskManager._TEST_FILE_TIER
         stem = Path(file_path).stem.lower()
         parent = Path(file_path).parent.name.lower() if "/" in file_path else ""
 
@@ -1689,10 +1695,62 @@ class TaskManager:
             for kw in keywords:
                 if kw == stem or kw == parent or kw in fp_lower.split("/"):
                     return tier
-        # Tests and static assets go last
-        if "test" in fp_lower or "spec" in fp_lower or "mock" in fp_lower:
-            return 9
-        return 5  # default: controller-level
+        if "mock" in fp_lower:
+            return 90
+        return 50  # default: controller-level
+
+    def _load_workspace_feature_files(self) -> Dict[str, str]:
+        """Load all Gherkin feature files from the workspace features/ directory."""
+        workspace_path = self.db_path.parent
+        features_dir = workspace_path / "features"
+        if not features_dir.is_dir():
+            return {}
+        contents: Dict[str, str] = {}
+        for path in sorted(features_dir.glob("*.feature")):
+            try:
+                rel = str(path.relative_to(workspace_path)).replace("\\", "/")
+                contents[rel] = path.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+        return contents
+
+    def _match_feature_files(
+        self, file_path: str, features_content: Dict[str, str],
+    ) -> List[str]:
+        """Return feature file paths whose titles/scenarios match *file_path* keywords."""
+        if not features_content or not file_path:
+            return []
+
+        stop_words = frozenset({
+            "src", "main", "java", "com", "org", "net", "test", "tests", "spec",
+            "lib", "app", "api", "www", "bin", "obj", "out", "tmp",
+        })
+        keywords: set[str] = set()
+        for segment in file_path.lower().replace("\\", "/").split("/"):
+            for word in re.split(r"[_\-.]", segment):
+                if len(word) >= 3 and word not in stop_words:
+                    keywords.add(word)
+
+        matched: List[str] = []
+        for feat_path, content in features_content.items():
+            feat_stem = Path(feat_path).stem.lower()
+            title_match = re.search(r"Feature:\s*(.+)", content, re.IGNORECASE)
+            feature_title = (
+                title_match.group(1).strip().lower() if title_match else feat_stem
+            )
+            content_lower = content.lower()
+
+            hit = False
+            for kw in keywords:
+                if kw in feature_title or kw in feat_stem:
+                    hit = True
+                    break
+                if len(kw) >= 4 and kw in content_lower:
+                    hit = True
+                    break
+            if hit:
+                matched.append(feat_path)
+        return matched
 
     def _infer_dependencies(
         self, task: TaskDefinition, earlier_tasks: List[TaskDefinition]
@@ -2071,7 +2129,22 @@ class TaskManager:
             parts.append(f"Technology stack:\n{tech_stack}")
             parts.append("")
 
-        if user_stories:
+        feature_file_paths = meta.get("feature_files") or []
+        if feature_file_paths:
+            workspace_path = self.db_path.parent
+            parts.append("ACCEPTANCE CRITERIA (from Gherkin feature files):")
+            for ff in feature_file_paths:
+                feat_path = workspace_path / ff
+                if not feat_path.is_file():
+                    continue
+                try:
+                    feat_content = feat_path.read_text(encoding="utf-8", errors="replace")
+                except OSError:
+                    continue
+                parts.append(f"--- {ff} ---")
+                parts.append(feat_content)
+            parts.append("")
+        elif user_stories:
             parts.append(f"User stories:\n{user_stories}")
             parts.append("")
 

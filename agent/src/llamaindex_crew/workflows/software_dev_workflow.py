@@ -1686,9 +1686,9 @@ class SoftwareDevWorkflow:
         """Infer the last completed planning phase from persisted workspace files."""
         wp = self.workspace_path
         try:
-            if (wp / "tech_stack.md").exists() and (wp / "tech_stack.md").read_text(
-                encoding="utf-8", errors="replace"
-            ).strip():
+            ts = wp / "tech_stack.md"
+            if ts.exists() and ts.read_text(encoding="utf-8", errors="replace").strip():
+                # Checkpoint: tech_stack.md (+ optional test_plan.md) → development
                 return ProjectState.DEVELOPMENT
             if (wp / "design_spec.md").exists():
                 return ProjectState.TECH_ARCHITECT
@@ -2072,6 +2072,9 @@ class SoftwareDevWorkflow:
                 self.design_spec or "",
                 self.tech_stack,
             )
+
+            # Skills-first test plan (2nd pass — non-fatal, reuses existing test_plan.md)
+            self._generate_test_plan()
             
             # Index tech stack for RAG
             self.document_indexer.index_artifacts(["tech_stack.md"])
@@ -2177,6 +2180,144 @@ class SoftwareDevWorkflow:
                 self.api_contract = None
         else:
             logger.warning("⚠️ api_contract.yaml was not created — continuing without contract")
+
+    def _generate_test_plan(self) -> None:
+        """Skills-first 2nd pass that writes test_plan.md after Tech Architect (non-fatal)."""
+        try:
+            plan_file = self.workspace_path / "test_plan.md"
+            if plan_file.exists():
+                existing = plan_file.read_text(encoding="utf-8", errors="replace").strip()
+                if existing:
+                    logger.info("test_plan.md exists — skipping regeneration")
+                    return
+
+            from ..tools.skill_tools import prefetch_skills
+            from ..utils.prompt_loader import load_prompt
+
+            skill_context = prefetch_skills(
+                self.vision or "",
+                role="tech_architect",
+                extra_queries=[
+                    "test framework pytest jest vitest junit test directory structure",
+                ],
+                workspace_path=self.workspace_path,
+            )
+
+            tech_stack = self.tech_stack or ""
+            ts_file = self.workspace_path / "tech_stack.md"
+            if ts_file.exists():
+                tech_stack = ts_file.read_text(encoding="utf-8", errors="replace")
+
+            prompt_template = load_prompt("test_plan_task.txt")
+            prompt = prompt_template.format(
+                vision=(self.vision or "")[:4000],
+                tech_stack=tech_stack[:12000],
+                skill_context=skill_context or "(none)",
+            )
+
+            llm = self._get_manager_llm()
+            result = str(llm.complete(prompt))
+            _persist_phase_artifact(self.workspace_path, "test_plan.md", result)
+            logger.info("✅ test_plan.md generated")
+        except Exception as exc:
+            logger.warning("Test plan generation failed (non-fatal): %s", exc)
+
+    def _build_test_critique(
+        self,
+        backend_result: Dict[str, Any],
+        frontend_result: Dict[str, Any],
+        failures: List[Dict[str, Any]],
+    ) -> str:
+        lines = ["TEST FAILURES — fix these before continuing:"]
+        if not backend_result.get("skipped"):
+            lines.append(
+                f"Backend: {backend_result.get('passed_count', 0)}/"
+                f"{backend_result.get('total', '?')} passed"
+            )
+        if not frontend_result.get("skipped"):
+            lines.append(
+                f"Frontend: {frontend_result.get('passed_count', 0)}/"
+                f"{frontend_result.get('total', '?')} passed"
+            )
+        for failure in failures[:20]:
+            lines.append(
+                f"  - {failure.get('test', 'unknown')}: "
+                f"{str(failure.get('error', ''))[:300]}"
+            )
+        return "\n".join(lines)
+
+    def _run_feature_test_bed_loop(self) -> None:
+        """Run container-isolated tests after file tasks; loop DevAgent on RED."""
+        if os.getenv("SMOKE_TEST_BACKEND", "syntax_only") == "syntax_only":
+            return
+
+        from ..tools.test_tools import run_feature_tests
+
+        max_iters = int(os.getenv("MAX_TEST_ITERATIONS", "3"))
+        ws = str(self.workspace_path)
+
+        for iteration in range(max_iters):
+            backend_result = run_feature_tests("backend", ws)
+            frontend_result = run_feature_tests("frontend", ws)
+
+            if backend_result.get("skipped") and frontend_result.get("skipped"):
+                logger.info("Test bed skipped — no commands in test_plan.md")
+                return
+
+            if backend_result.get("passed", True) and frontend_result.get("passed", True):
+                logger.info("Test bed GREEN (iteration %d)", iteration + 1)
+                return
+
+            failures = list(backend_result.get("failures") or [])
+            failures.extend(frontend_result.get("failures") or [])
+            critique = self._build_test_critique(
+                backend_result, frontend_result, failures,
+            )
+
+            metadata = self._load_job_metadata()
+            loop_state = metadata.get("loop_state") or {}
+            loop_state["current_critique"] = critique
+            loop_state["test_iteration"] = iteration + 1
+            loop_state["failures"] = failures
+            metadata["loop_state"] = loop_state
+            self._update_job_metadata(metadata)
+
+            if not self.dev_agent:
+                logger.warning("Test bed RED but no dev_agent available for fix pass")
+                break
+
+            fix_prompt = (
+                "The following tests failed after implementation. Fix the code so all "
+                "tests pass.\n"
+                "Use code_search(pattern) first to locate relevant code, then patch with "
+                "replace_file_content.\n\n"
+                f"{critique}"
+            )
+            try:
+                self.dev_agent.agent.reset_chat()
+                result = self.dev_agent.agent.chat(fix_prompt)
+                self.task_manager.update_task_status_by_output(str(result))
+            except Exception as exc:
+                logger.error("Test bed fix pass failed: %s", exc)
+        else:
+            if self.job_db:
+                import uuid as _uuid
+                last_critique = (
+                    (self._load_job_metadata().get("loop_state") or {})
+                    .get("current_critique", "")[:500]
+                )
+                self.job_db.create_validation_issue(
+                    issue_id=str(_uuid.uuid4()),
+                    job_id=self.project_id,
+                    check_name="feature_test_bed",
+                    severity="error",
+                    file_path=None,
+                    line_number=None,
+                    description=(
+                        f"Tests still failing after {max_iters} iterations. "
+                        f"Last critique: {last_critique}"
+                    ),
+                )
     
     # ── Frontend path classification ────────────────────────────────────────
 
@@ -2652,6 +2793,9 @@ class SoftwareDevWorkflow:
         logger.info("🚀 Starting Development phase...")
         self._report_progress('development', 65, "Implementing application logic...")
 
+        # Ensure test_plan.md exists on resume (idempotent — skips if present)
+        self._generate_test_plan()
+
 
         if self.state_machine.get_current_state() != ProjectState.DEVELOPMENT:
             if self.state_machine.can_transition(ProjectState.DEVELOPMENT):
@@ -2793,6 +2937,9 @@ class SoftwareDevWorkflow:
             )
 
         self._export_registry = export_registry
+
+        # Feature test bed — opt-in via SMOKE_TEST_BACKEND != syntax_only
+        self._run_feature_test_bed_loop()
 
         # Handle any remaining feature tasks
         feature_tasks = [t for t in self.task_manager.get_incomplete_tasks() if t.task_type == "feature"]
