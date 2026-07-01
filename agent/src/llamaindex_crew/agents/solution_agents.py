@@ -10,6 +10,7 @@ from typing import Optional, Union
 from ..tools import create_workspace_file_tools
 from ..tools.github_search_tools import GitHubRepoReadmeTool, GitHubSearchReposTool
 from ..tools.skill_tools import SkillQueryTool
+from ..tools.tldr_tools import _TLDR_AGENT_BACKSTORY, append_tldr_tools
 from ..tools.tool_loader import load_tools
 from ..utils.llm_config import get_supports_react
 from ..utils.prompt_loader import load_prompt
@@ -42,6 +43,9 @@ class SolutionResearchAgent:
             skills_url = getattr(config.skills, "service_url", None)
         if skills_url:
             tools.append(SkillQueryTool(service_url=skills_url))
+        if self.workspace_path is not None and get_supports_react("manager"):
+            append_tldr_tools(tools, self.workspace_path)
+
         try:
             if config:
                 entries = config.tools.global_tools + config.tools.agent_tools.get("solution_research", [])
@@ -53,6 +57,10 @@ class SolutionResearchAgent:
             "You research open-source reference implementations and framework patterns "
             "to propose solution candidates before detailed planning."
         )
+        if any(getattr(t, "metadata", None) and t.metadata.name in {
+            "code_search", "code_structure", "code_context", "code_impact",
+        } for t in tools):
+            backstory += _TLDR_AGENT_BACKSTORY
         self.agent = BaseLlamaIndexAgent(
             role="Solution Researcher",
             goal="Find reference repos and patterns for the project vision",
@@ -85,11 +93,16 @@ class SolutionArchitectAgent:
         if workspace_path is not None and get_supports_react("manager"):
             ws_tools = create_workspace_file_tools(Path(workspace_path))
             tools = [ws_tools[0], ws_tools[1]]
+            append_tldr_tools(tools, Path(workspace_path))
 
         backstory = (
             "You synthesize research into a concise solution specification "
             "that downstream product and engineering agents can follow."
         )
+        if any(getattr(t, "metadata", None) and t.metadata.name in {
+            "code_search", "code_structure", "code_context", "code_impact",
+        } for t in tools):
+            backstory += _TLDR_AGENT_BACKSTORY
         self.agent = BaseLlamaIndexAgent(
             role="Solution Architect",
             goal="Write solution_spec.md from research candidates",
@@ -118,10 +131,29 @@ class SolutionArchitectAgent:
             candidates_json=candidates_json,
             feedback_section=feedback_section,
         )
-        result = str(self.agent.chat(prompt))
         spec_path = self.workspace_path / "solution_spec.md" if self.workspace_path else None
-        if spec_path and not spec_path.exists() and result.strip():
-            spec_path.write_text(result.strip() + "\n", encoding="utf-8")
+        content_before = (
+            spec_path.read_text(encoding="utf-8", errors="replace")
+            if spec_path and spec_path.exists()
+            else None
+        )
+
+        result = str(self.agent.chat(prompt))
+
+        if spec_path and result.strip():
+            content_after = (
+                spec_path.read_text(encoding="utf-8", errors="replace")
+                if spec_path.exists()
+                else None
+            )
+            if content_after == content_before:
+                # The agent didn't write solution_spec.md via its file tool this
+                # pass (no tools available, or it just replied in chat) — persist
+                # the raw response so revision feedback isn't silently discarded
+                # on subsequent passes. Always overwrite here: on revision passes
+                # the file already exists from a prior pass and must be replaced,
+                # not skipped.
+                spec_path.write_text(result.strip() + "\n", encoding="utf-8")
         return result
 
 
@@ -143,7 +175,7 @@ class SolutionCritiqueAgent:
             budget_tracker=budget_tracker,
         )
 
-    def run(self, vision: str, spec_content: str, candidates_json: str) -> str:
+    def run(self, vision: str, spec_content: str, candidates_json: str, project_context: str = "") -> str:
         prompt = load_prompt(
             "solutioning/critique_task.txt",
             fallback="Critique the spec and return JSON with approved/score/issues/must_fix.",
@@ -151,5 +183,6 @@ class SolutionCritiqueAgent:
             vision=vision,
             candidates_json=candidates_json,
             spec_content=spec_content,
+            project_context=project_context or "",
         )
         return str(self.agent.chat(prompt))

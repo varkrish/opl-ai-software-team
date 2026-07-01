@@ -125,8 +125,13 @@ def run_solutioning_loop(
             )
         spec_content = spec_path.read_text(encoding="utf-8", errors="replace")
 
+        # Archive this pass's spec so revisions can be diffed pass-over-pass —
+        # spec_path itself gets overwritten on the next pass.
+        spec_pass_file = workspace_path / f"solution_spec_pass_{pass_count}.md"
+        spec_pass_file.write_text(spec_content, encoding="utf-8")
+
         _progress("solutioning", 18 + pass_count * 5, f"Critique pass {pass_count}…")
-        critique_raw = critique_agent.run(vision, spec_content, candidates_json)
+        critique_raw = critique_agent.run(vision, spec_content, candidates_json, project_context)
         critique = _extract_json(critique_raw, expect_list=False)
         if not isinstance(critique, dict):
             critique = {"approved": False, "score": 0, "issues": ["Invalid critique JSON"], "must_fix": []}

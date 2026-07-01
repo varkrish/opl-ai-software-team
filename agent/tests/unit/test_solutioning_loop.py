@@ -266,6 +266,71 @@ class TestSolutioningLoop:
         "__init__",
         lambda self, **kw: None,
     )
+    def test_spec_archived_per_pass_with_distinct_content(self, tmp_path, mock_config):
+        """Each pass's solution_spec.md must be archived before the next pass
+        overwrites it, so revisions can be diffed pass-over-pass."""
+        revisions = [
+            "# Solution Specification\n\n" + ("Draft one. " * 20),
+            "# Solution Specification\n\n" + ("Revised draft two. " * 20),
+            "# Solution Specification\n\n" + ("Final draft three. " * 20),
+        ]
+
+        def fake_architect_run(*a, **k):
+            content = revisions[fake_architect_run.calls]
+            fake_architect_run.calls += 1
+            (tmp_path / "solution_spec.md").write_text(content, encoding="utf-8")
+            return content
+
+        fake_architect_run.calls = 0
+
+        with patch(
+            "llamaindex_crew.workflows.solutioning_loop.SolutionResearchAgent.run",
+            return_value=_candidates(),
+        ), patch(
+            "llamaindex_crew.workflows.solutioning_loop.SolutionArchitectAgent.run",
+            side_effect=fake_architect_run,
+        ), patch(
+            "llamaindex_crew.workflows.solutioning_loop.SolutionCritiqueAgent.run",
+            return_value=_critique(False),
+        ):
+            run_solutioning_loop(
+                vision="Build app",
+                project_context="ctx",
+                workspace_path=tmp_path,
+                config=mock_config,
+                budget_tracker=MagicMock(),
+                document_indexer=None,
+                max_passes=3,
+            )
+
+        for n, expected_content in enumerate(revisions, start=1):
+            pass_file = tmp_path / f"solution_spec_pass_{n}.md"
+            assert pass_file.exists()
+            assert pass_file.read_text(encoding="utf-8") == expected_content
+
+        # Confirm the archived passes actually differ from each other —
+        # otherwise archiving wouldn't reveal whether revisions occurred.
+        contents = [
+            (tmp_path / f"solution_spec_pass_{n}.md").read_text(encoding="utf-8")
+            for n in (1, 2, 3)
+        ]
+        assert len(set(contents)) == 3
+
+    @patch.object(
+        __import__("llamaindex_crew.agents.solution_agents", fromlist=["SolutionCritiqueAgent"]).SolutionCritiqueAgent,
+        "__init__",
+        lambda self, **kw: None,
+    )
+    @patch.object(
+        __import__("llamaindex_crew.agents.solution_agents", fromlist=["SolutionArchitectAgent"]).SolutionArchitectAgent,
+        "__init__",
+        lambda self, **kw: None,
+    )
+    @patch.object(
+        __import__("llamaindex_crew.agents.solution_agents", fromlist=["SolutionResearchAgent"]).SolutionResearchAgent,
+        "__init__",
+        lambda self, **kw: None,
+    )
     def test_candidates_json_valid(self, tmp_path, mock_config):
         with patch(
             "llamaindex_crew.workflows.solutioning_loop.SolutionResearchAgent.run",

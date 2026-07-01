@@ -369,6 +369,8 @@ solutioning:
 
 Per-user UI settings are stored in the job database and merged at runtime (override YAML defaults). Connect **Settings → GitHub** for solutioning repo search.
 
+**Known limitation — reference repo recommendations are advisory only.** The solutioning research pass may recommend forking a GitHub repo in `solution_spec.md`, but this is unverified narrative text: candidate repos aren't confirmed to exist, there's no license gate, and nothing automatically clones them — whether the Developer agent forks the recommendation is left to LLM judgment with no guardrails. This needs refinement before relying on it; see [CHANGELOG](CHANGELOG.md) "Known limitations" for details and the planned fix (candidate verification + reusing the existing brownfield clone path used by import/fix jobs).
+
 ## Contributing
 
 Contributions are welcome! Please:
