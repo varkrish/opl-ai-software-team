@@ -1205,6 +1205,10 @@ class WorkflowConfigRequest(BaseModel):
     solutioning_max_passes: int = 3
     solutioning_max_github_searches: int = 10
     auto_approve_plan: bool = False
+    tldr_enabled: bool = True
+    tldr_max_chars: int = 6000
+    tldr_include_structure: bool = True
+    tldr_min_completed_files: int = 1
 
 
 class WorkflowConfigResponse(BaseModel):
@@ -1214,6 +1218,10 @@ class WorkflowConfigResponse(BaseModel):
     solutioning_max_passes: int = 3
     solutioning_max_github_searches: int = 10
     auto_approve_plan: bool = False
+    tldr_enabled: bool = True
+    tldr_max_chars: int = 6000
+    tldr_include_structure: bool = True
+    tldr_min_completed_files: int = 1
     updated_at: Optional[str] = None
 
 
@@ -1248,6 +1256,10 @@ async def save_workflow_config(
         solutioning_max_passes=body.solutioning_max_passes,
         solutioning_max_github_searches=body.solutioning_max_github_searches,
         auto_approve_plan=body.auto_approve_plan,
+        tldr_enabled=body.tldr_enabled,
+        tldr_max_chars=body.tldr_max_chars,
+        tldr_include_structure=body.tldr_include_structure,
+        tldr_min_completed_files=body.tldr_min_completed_files,
     )
     stored = job_db.get_workflow_config(user.user_id)
     from crew_studio.workflow_config import normalize_workflow_prefs

@@ -29,6 +29,7 @@ class DevAgent:
         custom_backstory: Optional[str] = None,
         budget_tracker=None,
         workspace_path: Optional[Path] = None,
+        config=None,
     ):
         """
         Initialize Development Agent
@@ -52,11 +53,18 @@ You verify and use the technology stack defined by the Technical Architect."""
         self.supports_react = get_supports_react("worker")
         logger.info("DevAgent: supports_react=%s", self.supports_react)
 
+        tool_config = config
+        if tool_config is None:
+            try:
+                tool_config = ConfigLoader.load()
+            except Exception:
+                tool_config = None
+
         if self.supports_react:
             if workspace_path is not None:
                 ws_tools = create_workspace_file_tools(Path(workspace_path))
                 tools = list(ws_tools) + [GitTool, PytestRunnerTool, CodeCoverageTool]
-                append_tldr_tools(tools, Path(workspace_path))
+                append_tldr_tools(tools, Path(workspace_path), config=tool_config)
             else:
                 tools = [
                     FileWriterTool, BulkFileWriterTool, FileReaderTool, FileListTool,
@@ -68,8 +76,8 @@ You verify and use the technology stack defined by the Technical Architect."""
             tools = []
 
         try:
-            config = ConfigLoader.load()
-            entries = config.tools.global_tools + config.tools.agent_tools.get("developer", [])
+            cfg = tool_config or ConfigLoader.load()
+            entries = cfg.tools.global_tools + cfg.tools.agent_tools.get("developer", [])
             extra_tools = load_tools(entries)
             tools.extend(extra_tools)
             logger.info("DevAgent: loaded %d extra tool(s) from config", len(extra_tools))

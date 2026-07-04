@@ -389,6 +389,7 @@ class SoftwareDevWorkflow:
         self.api_contract = None  # OpenAPI 3.0 dict (populated for fullstack projects)
         self.solution_spec = None
         self._export_registry: Dict[str, Any] = {}  # file_path -> export summary from dev phase
+        self._tldr_structure_cache: dict = {}
     
     def _report_progress(self, phase: str, progress: int, message: str = None):
         """Report progress via callback if available"""
@@ -1757,6 +1758,7 @@ class SoftwareDevWorkflow:
                     custom_backstory=backstory,
                     budget_tracker=self.budget_tracker,
                     workspace_path=self.workspace_path,
+                    config=self.config,
                 )
 
             # Group issues by file and ask dev agent to fix each
@@ -2843,6 +2845,20 @@ class SoftwareDevWorkflow:
                     extra_query=f"Implement file {file_path}. {(task.description or '')[:500]}",
                 )
             prompt_ts, prompt_us = self._dev_prompt_context(agent_simple, file_path)
+            tldr_context = ""
+            if agent_simple and gen and getattr(gen, "simple_mode_tldr_enabled", True):
+                from ..tools.tldr_tools import prefetch_tldr_context, detect_tldr_lang
+                with lock:
+                    completed_count = len(completed_files)
+                tldr_context = prefetch_tldr_context(
+                    workspace_path=self.workspace_path,
+                    file_path=file_path,
+                    task=task,
+                    completed_files=completed_count,
+                    lang=detect_tldr_lang(self.workspace_path),
+                    structure_cache=self._tldr_structure_cache,
+                    config=gen,
+                )
             prompt = self.task_manager.build_file_prompt(
                 task,
                 tech_stack=prompt_ts,
@@ -2854,6 +2870,7 @@ class SoftwareDevWorkflow:
                 api_contract=self.api_contract,
                 rag_context=file_rag,
                 simple_mode=agent_simple,
+                tldr_context=tldr_context,
             )
 
             if attempt > 0 and retry_prompt:
@@ -3017,6 +3034,7 @@ class SoftwareDevWorkflow:
             custom_backstory=backstory,
             budget_tracker=self.budget_tracker,
             workspace_path=self.workspace_path,
+            config=self.config,
         )
 
         def _make_dev_agent():
@@ -3024,6 +3042,7 @@ class SoftwareDevWorkflow:
                 custom_backstory=backstory,
                 budget_tracker=self.budget_tracker,
                 workspace_path=self.workspace_path,
+                config=self.config,
             )
 
         from ..tools.file_tools import set_allowed_file_paths
