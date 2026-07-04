@@ -7,6 +7,14 @@ from typing import List, Optional
 
 from ..tools.tldr_tools import read_call_graph
 
+# Generated/tooling paths — never offer these to the refinement agent
+_NON_EDITABLE_PARTS = frozenset({".tldr", ".git", "__pycache__", "node_modules"})
+
+
+def _is_editable_source(relative_path: str) -> bool:
+    parts = Path(relative_path.replace("\\", "/")).parts
+    return not any(p in _NON_EDITABLE_PARTS for p in parts)
+
 
 def _tokens_from_prompt(prompt: str) -> list[str]:
     prompt_no_urls = re.sub(r"https?://\S+", "", prompt)
@@ -30,14 +38,14 @@ def discover_impact_files(
     """Return primary file plus related files from call graph and prompt tokens."""
     workspace_path = Path(workspace_path)
     primary = primary_file.replace("\\", "/").lstrip("./")
-    result: list[str] = [primary]
-    seen = {primary}
+    result: list[str] = [primary] if _is_editable_source(primary) else []
+    seen = set(result)
 
     # Call graph neighbors
     for edge in read_call_graph(workspace_path):
         for key in ("from_file", "to_file"):
             fp = (edge.get(key) or "").replace("\\", "/")
-            if not fp or fp in seen:
+            if not fp or fp in seen or not _is_editable_source(fp):
                 continue
             if edge.get("from_file") == primary or edge.get("to_file") == primary:
                 if (workspace_path / fp).exists():
@@ -48,7 +56,7 @@ def discover_impact_files(
     tokens = _tokens_from_prompt(prompt)
     if tokens and all_source_files:
         for fp in all_source_files:
-            if fp in seen or len(result) >= max_files:
+            if fp in seen or len(result) >= max_files or not _is_editable_source(fp):
                 continue
             try:
                 content = (workspace_path / fp).read_text(encoding="utf-8", errors="replace")

@@ -34,15 +34,29 @@ _MAX_SEGMENTS = 12
 _MAX_BASENAME_STEM_LEN = 80
 
 
+def _normalize_file_path(path: str) -> str:
+    """Normalize an LLM-generated file path: strip, unify slashes, replace spaces."""
+    path = path.strip().replace("\\", "/")
+    # Replace spaces with underscores segment-by-segment so 'My File.py' → 'My_File.py'
+    parts = path.split("/")
+    parts = [p.replace(" ", "_") for p in parts]
+    return "/".join(parts)
+
+
 def is_valid_file_path(path: str) -> bool:
-    """Return True if *path* looks like a real relative file path."""
+    """Return True if *path* looks like a real relative file path.
+
+    Spaces are accepted because they are normalized by :func:`_normalize_file_path`
+    before this check runs in :func:`_filter_valid_entries`.
+    """
     if not path or not path.strip():
         return False
 
-    path = path.strip().replace("\\", "/")
+    path = _normalize_file_path(path)
     if len(path) > _MAX_PATH_LEN:
         return False
-    if any(ch in path for ch in (" ", "\n", "\r", "\t")):
+    # Reject remaining control characters and newlines (spaces already replaced above)
+    if any(ch in path for ch in ("\n", "\r", "\t")):
         return False
     if "_n_" in path:
         return False
@@ -71,14 +85,20 @@ def is_valid_file_path(path: str) -> bool:
 def _filter_valid_entries(entries: List[Dict[str, str]]) -> List[Dict[str, str]]:
     valid: List[Dict[str, str]] = []
     for entry in entries:
-        file_path = entry.get("file_path", "")
-        if is_valid_file_path(file_path):
-            valid.append(entry)
+        raw_path = entry.get("file_path", "")
+        normalized = _normalize_file_path(raw_path)
+        if is_valid_file_path(normalized):
+            if normalized != raw_path:
+                logger.info(
+                    "output_parser: normalized file_path %r → %r",
+                    raw_path, normalized,
+                )
+            valid.append({**entry, "file_path": normalized})
         else:
             logger.warning(
                 "output_parser: rejecting invalid file_path (len=%d): %.120r",
-                len(file_path),
-                file_path,
+                len(raw_path),
+                raw_path,
             )
     return valid
 
@@ -183,7 +203,11 @@ def product_owner_format_instruction() -> str:
 
 
 def is_valid_gherkin_feature(content: str, *, min_chars: int = 40) -> bool:
-    """Return True if *content* looks like a real Gherkin feature file."""
+    """Return True if *content* looks like a real Gherkin feature file.
+
+    Accepts ``Scenario:``, ``Scenario Outline:``, ``Scenario Template:``,
+    and ``Background:`` — all are valid Gherkin constructs that LLMs may emit.
+    """
     if not content or len(content.strip()) < min_chars:
         return False
     text = content.strip()
@@ -191,9 +215,13 @@ def is_valid_gherkin_feature(content: str, *, min_chars: int = 40) -> bool:
         return False
     if not re.search(r"^Feature:\s*\S", text, re.MULTILINE | re.IGNORECASE):
         return False
-    has_scenario = bool(re.search(r"^\s*Scenario:", text, re.MULTILINE | re.IGNORECASE))
+    # Accept any standard Gherkin scenario keyword
+    has_scenario = bool(re.search(
+        r"^\s*(?:Scenario(?:\s+(?:Outline|Template))?|Background|Rule)\s*:",
+        text, re.MULTILINE | re.IGNORECASE,
+    ))
     has_steps = bool(
-        re.search(r"^\s*(Given|When|Then|And)\s+", text, re.MULTILINE | re.IGNORECASE)
+        re.search(r"^\s*(Given|When|Then|And|But)\s+", text, re.MULTILINE | re.IGNORECASE)
     )
     return has_scenario and has_steps
 

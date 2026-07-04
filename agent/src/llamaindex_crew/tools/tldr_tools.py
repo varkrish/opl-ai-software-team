@@ -370,13 +370,28 @@ def prefetch_tldr_context(
     return result
 
 
-def _code_search(pattern: str, context_lines: int = 3, *, workspace: str) -> str:
+def _code_search(pattern: str = "", context_lines: int = 3, *, workspace: str, **kwargs) -> str:
     """Search the codebase for a regex pattern. Returns matching lines with surrounding context.
 
     Use BEFORE editing to find all usages of a function, class, or variable you plan to change.
     """
+    # Handle models wrapping params in {"args": {...}}
+    nested = kwargs.pop("args", None)
+    if isinstance(nested, dict):
+        pattern = nested.get("pattern", pattern)
+        context_lines = nested.get("context_lines", context_lines)
+    if not pattern:
+        return "Error: pattern is required"
     args = ["search", pattern, workspace, "-C", str(context_lines)]
-    return _run_tldr(args)
+    result = _run_tldr(args)
+    # Empty result: steer the model toward file_reader instead of retrying endlessly
+    if result in ("[]", "", "(no output)"):
+        return (
+            f"No matches found for '{pattern}'. "
+            "The symbol may not exist yet or uses a different name. "
+            "Use file_reader to read the file directly and locate the correct line numbers."
+        )
+    return result
 
 
 def _code_structure(*, workspace: str, lang: Optional[str]) -> str:
@@ -531,6 +546,54 @@ _CALL_GRAPH_CANDIDATES = [
     ".tldr/cache/call_graph-backend.json",
     ".tldr/cache/call_graph-react.json",
 ]
+
+
+def build_symbol_map(workspace_path: Path, max_chars: int = 3000) -> str:
+    """Return a compact one-line-per-file symbol map using tldr structure.
+
+    Format:  path/to/file.py | classes: Foo, Bar | fns: do_thing, helper
+    This is injected into the refinement prompt so the model knows what symbols
+    exist before calling code_search, preventing wasted retries on missing names.
+
+    Returns an empty string if tldr is unavailable or the workspace has no source.
+    """
+    if not _workspace_has_indexable_source(workspace_path):
+        return ""
+    tldr_bin = shutil.which("tldr")
+    if not tldr_bin:
+        return ""
+    # Call subprocess directly — bypass run_tldr's output cap so large JSON is fully parsed.
+    try:
+        result = subprocess.run(
+            [tldr_bin, "structure", str(workspace_path), "--lang", "all"],
+            capture_output=True, text=True, timeout=_TLDR_TIMEOUT,
+        )
+        raw = result.stdout.strip()
+    except Exception:
+        return ""
+    if not raw:
+        return ""
+    try:
+        data = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return ""
+    lines: list[str] = []
+    for fentry in data.get("files") or []:
+        fp = (fentry.get("path") or "").replace("\\", "/")
+        if not fp:
+            continue
+        parts: list[str] = []
+        classes = fentry.get("classes") or []
+        fns = (fentry.get("functions") or []) + (fentry.get("methods") or [])
+        if classes:
+            parts.append("classes: " + ", ".join(classes[:8]))
+        if fns:
+            parts.append("fns: " + ", ".join(fns[:10]))
+        lines.append(fp + (" | " + " | ".join(parts) if parts else ""))
+    text = "\n".join(lines)
+    if len(text) > max_chars:
+        text = text[:max_chars] + "\n... (truncated)"
+    return text
 
 
 def read_call_graph(workspace_path: Path) -> list[dict]:

@@ -219,8 +219,169 @@ class GenericLlamaLLM(LLM):
             context_window=self.context_window,
             num_output=self.max_tokens,
             is_chat_model=True,
+            is_function_calling_model=True,
             model_name=self.model,
         )
+
+    # ------------------------------------------------------------------
+    # Function-calling interface (used by FunctionCallingAgentWorker)
+    # ------------------------------------------------------------------
+
+    def chat_with_tools(
+        self,
+        tools,
+        user_msg=None,
+        chat_history=None,
+        verbose: bool = False,
+        allow_parallel_tool_calls: bool = False,
+        **kwargs,
+    ) -> ChatResponse:
+        """Call the LLM with tools in OpenAI-compatible format."""
+        from llama_index.core.llms import ChatMessage
+
+        tool_specs = []
+        for tool in tools:
+            fn_schema = {"type": "object", "properties": {}, "required": []}
+            if hasattr(tool, "metadata"):
+                try:
+                    fn_schema = tool.metadata.get_parameters_dict()
+                except Exception:
+                    pass
+            tool_specs.append({
+                "type": "function",
+                "function": {
+                    "name": tool.metadata.name if hasattr(tool, "metadata") else str(tool),
+                    "description": (tool.metadata.description or "") if hasattr(tool, "metadata") else "",
+                    "parameters": fn_schema,
+                },
+            })
+
+        messages = list(chat_history or [])
+        if user_msg is not None:
+            if isinstance(user_msg, str):
+                messages.append(ChatMessage(role="user", content=user_msg))
+            else:
+                messages.append(user_msg)
+
+        return self.chat(messages, tools=tool_specs, **kwargs)
+
+    def get_tool_calls_from_response(
+        self,
+        response: ChatResponse,
+        error_on_no_tool_call: bool = True,
+        **kwargs,
+    ):
+        """Extract tool calls from a ChatResponse.
+
+        Primary: structured ``tool_calls`` in response additional_kwargs.
+        Fallback: regex extraction from content text when the model embeds
+        tool calls in its output instead of using the API field. This makes
+        the agent resilient to models that intermittently drop out of
+        structured function-calling mode.
+        """
+        import json as _json
+        import re as _re
+        from llama_index.core.tools import ToolSelection
+
+        tool_calls_raw = (response.message.additional_kwargs or {}).get("tool_calls", [])
+        selections = []
+        for tc in tool_calls_raw:
+            fn = tc.get("function", {})
+            try:
+                tool_kwargs = _json.loads(fn.get("arguments", "{}"))
+            except (ValueError, TypeError):
+                tool_kwargs = {}
+            selections.append(ToolSelection(
+                tool_id=tc.get("id", f"call_{id(tc)}"),
+                tool_name=fn.get("name", ""),
+                tool_kwargs=tool_kwargs,
+            ))
+
+        if not selections:
+            content = response.message.content or ""
+            selections = self._extract_tool_calls_from_content(content)
+            if selections:
+                logger.info(
+                    "Recovered %d tool call(s) from content fallback: %s",
+                    len(selections),
+                    [s.tool_name for s in selections],
+                )
+                # Inject synthetic tool_calls into the response message so the
+                # conversation history stays valid (API requires assistant
+                # messages with tool_calls before tool-result messages).
+                import json as _json2
+                synthetic_calls = []
+                for sel in selections:
+                    synthetic_calls.append({
+                        "id": sel.tool_id,
+                        "type": "function",
+                        "function": {
+                            "name": sel.tool_name,
+                            "arguments": _json2.dumps(sel.tool_kwargs),
+                        },
+                    })
+                if not response.message.additional_kwargs:
+                    response.message.additional_kwargs = {}
+                response.message.additional_kwargs["tool_calls"] = synthetic_calls
+                response.message.content = None
+
+        if not selections and error_on_no_tool_call:
+            raise ValueError(
+                f"No tool calls in LLM response. Content: {str(response.message.content)[:200]}"
+            )
+        return selections
+
+    @staticmethod
+    def _extract_tool_calls_from_content(content: str):
+        """Best-effort extraction of tool calls embedded in model text output.
+
+        Handles patterns like:
+          - ``<|message|>{"file_path":"x"}<|call|>`` with tool name nearby
+          - ``Action: tool_name\\nAction Input: {...}`` (ReAct format)
+        """
+        import json as _json
+        import re as _re
+        import uuid as _uuid
+        from llama_index.core.tools import ToolSelection
+
+        results = []
+
+        # Pattern 1: model-internal markup  <...>to=functions.TOOL_NAME<...><|message|>JSON<|call|>
+        for m in _re.finditer(
+            r'to=(?:functions\.)?(\w+)[^<]*<\|message\|>\s*(\{[^}]+\})\s*<\|call\|>',
+            content,
+        ):
+            tool_name = m.group(1)
+            try:
+                tool_kwargs = _json.loads(m.group(2))
+            except (ValueError, TypeError):
+                continue
+            results.append(ToolSelection(
+                tool_id=f"recovered_{_uuid.uuid4().hex[:8]}",
+                tool_name=tool_name,
+                tool_kwargs=tool_kwargs,
+            ))
+
+        # Pattern 2: ReAct format in content
+        if not results:
+            for m in _re.finditer(
+                r'Action:\s*(\w+)\s*\nAction Input:\s*(\{.+?\})',
+                content, _re.DOTALL,
+            ):
+                tool_name = m.group(1)
+                try:
+                    tool_kwargs = _json.loads(m.group(2))
+                except (ValueError, TypeError):
+                    continue
+                results.append(ToolSelection(
+                    tool_id=f"recovered_{_uuid.uuid4().hex[:8]}",
+                    tool_name=tool_name,
+                    tool_kwargs=tool_kwargs,
+                ))
+
+        return results
+
+    # ------------------------------------------------------------------
 
     def _completions_url(self) -> str:
         """Build the chat completions URL, normalising the base to include /v1."""
@@ -242,8 +403,11 @@ class GenericLlamaLLM(LLM):
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
         
-        # Filter out any kwargs that shouldn't go to the API
-        api_kwargs = {k: v for k, v in kwargs.items() if k not in ["num_beams"]}
+        _PAYLOAD_EXCLUDE_KEYS = {
+            "num_beams", "tools", "tool_choice",
+            "verbose", "allow_parallel_tool_calls",
+        }
+        api_kwargs = {k: v for k, v in kwargs.items() if k not in _PAYLOAD_EXCLUDE_KEYS}
         formatted_messages = self._format_messages_for_api(messages)
 
         payload = {
@@ -253,6 +417,12 @@ class GenericLlamaLLM(LLM):
             "temperature": self.temperature,
             **api_kwargs
         }
+
+        if "tools" in kwargs and kwargs["tools"]:
+            payload["tools"] = kwargs["tools"]
+            if "tool_choice" in kwargs:
+                payload["tool_choice"] = kwargs["tool_choice"]
+            logger.info("Function-calling: %d tool(s) in payload", len(payload["tools"]))
         
         # --- Pre-flight token trimming to avoid 400 errors ---
         from .prompt_budget import PromptBudget, estimate_tokens
@@ -351,13 +521,19 @@ class GenericLlamaLLM(LLM):
                         raise ValueError(f"LLM returned invalid format: {err_msg}")
                         
                     choice = data["choices"][0]
-                    content = choice.get("message", {}).get("content", "")
+                    msg_data = choice.get("message", {})
+                    content = msg_data.get("content") or ""
                     logger.debug(f"LLM Response: {content[:200]}...")
-                    
+
+                    additional_kwargs: dict = {}
+                    if msg_data.get("tool_calls"):
+                        additional_kwargs["tool_calls"] = msg_data["tool_calls"]
+
                     return ChatResponse(
                         message=ChatMessage(
                             role=MessageRole.ASSISTANT,
-                            content=content
+                            content=content,
+                            additional_kwargs=additional_kwargs,
                         ),
                         raw=data
                     )
@@ -395,19 +571,40 @@ class GenericLlamaLLM(LLM):
         """Apply role alternation and system→user rules so MaaS endpoints accept the payload.
 
         Rules:
-        - Consecutive messages with the *same original* role are merged.
+        - Consecutive messages with the *same original* role are merged (except
+          tool/assistant-with-tool_calls which must stay separate for the API).
         - A system message that immediately follows another system message is merged
           into the existing system block (stays as system).
         - A system message that appears after any non-system message is converted
-          to 'user' but kept as a separate entry (not merged with an adjacent user
-          message, since it carries different semantic content).
+          to 'user' but kept as a separate entry.
         - An 'assistant' message is never the first or last message (guards added).
+        - Tool-call messages (role=tool) are passed through verbatim.
+        - Assistant messages carrying tool_calls preserve that field.
         """
         formatted_messages = []
         last_original_role = None
         for m in messages:
-            original_role = m.role.value
-            content = m.content
+            original_role = m.role.value if hasattr(m.role, "value") else str(m.role)
+            content = m.content or ""
+            extra = getattr(m, "additional_kwargs", None) or {}
+
+            # tool-result messages: pass through with tool_call_id
+            if original_role == "tool":
+                entry = {"role": "tool", "content": content}
+                if extra.get("tool_call_id"):
+                    entry["tool_call_id"] = extra["tool_call_id"]
+                elif extra.get("name"):
+                    entry["tool_call_id"] = extra.get("tool_call_id", extra["name"])
+                formatted_messages.append(entry)
+                last_original_role = "tool"
+                continue
+
+            # assistant message with tool_calls: preserve tool_calls, never merge
+            if original_role == "assistant" and extra.get("tool_calls"):
+                entry = {"role": "assistant", "content": content or None, "tool_calls": extra["tool_calls"]}
+                formatted_messages.append(entry)
+                last_original_role = "assistant"
+                continue
 
             # System after non-system → convert to user for MaaS compatibility
             if original_role == "system" and last_original_role is not None and last_original_role != "system":
@@ -416,18 +613,20 @@ class GenericLlamaLLM(LLM):
                 api_role = original_role
 
             # Merge only when the *original* role matches the previous original role
-            if original_role == last_original_role and formatted_messages:
+            if original_role == last_original_role and formatted_messages and original_role not in ("tool",):
                 formatted_messages[-1]["content"] += f"\n\n{content}"
             else:
                 formatted_messages.append({"role": api_role, "content": content})
                 last_original_role = original_role
 
-        if formatted_messages and formatted_messages[0]["role"] == "assistant":
+        if formatted_messages and formatted_messages[0].get("role") == "assistant":
             formatted_messages.insert(0, {"role": "user", "content": "Continue."})
-        if formatted_messages and formatted_messages[-1]["role"] == "assistant":
-            last_content = formatted_messages[-1]["content"]
-            if "Action:" not in last_content and "Action Input:" not in last_content:
-                formatted_messages.append({"role": "user", "content": "Please provide your final answer or next step."})
+        if formatted_messages and formatted_messages[-1].get("role") == "assistant":
+            last_entry = formatted_messages[-1]
+            if not last_entry.get("tool_calls"):
+                last_content = last_entry.get("content", "")
+                if "Action:" not in last_content and "Action Input:" not in last_content:
+                    formatted_messages.append({"role": "user", "content": "Please provide your final answer or next step."})
         return formatted_messages
 
     @llm_chat_callback()

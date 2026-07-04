@@ -8,22 +8,13 @@ import logging
 import time
 import nest_asyncio
 from typing import List, Optional, Callable, Any, Dict
-from llama_index.core.agent import ReActAgent
+from llama_index.core.agent import ReActAgent, FunctionCallingAgentWorker, AgentRunner
 from llama_index.core.llms import LLM
 from llama_index.core.tools import FunctionTool
 
 # Apply nest_asyncio to allow nested event loops
 nest_asyncio.apply()
 
-# Try to import OpenAIAgent, fallback to ReActAgent if not available
-try:
-    from llama_index.agent.openai import OpenAIAgent
-except ImportError:
-    try:
-        from llama_index.agents.openai import OpenAIAgent
-    except ImportError:
-        # Use ReActAgent as fallback
-        OpenAIAgent = None
 from ..utils.llm_config import get_llm_for_agent
 from ..budget.tracker import BudgetTracker, EnhancedBudgetTracker
 
@@ -118,7 +109,24 @@ Do NOT explain your reasoning. Output ONLY the structured format requested in th
 """
             return SimpleAgent(self.llm, agent_context)
 
-        agent_context = f"""{self._build_system_prompt()}
+        system_prompt = self._build_system_prompt()
+        instrumented = self._instrumented_tools()
+
+        try:
+            worker = FunctionCallingAgentWorker.from_tools(
+                tools=instrumented,
+                llm=self.llm,
+                verbose=self.verbose,
+                max_function_calls=50,
+                system_prompt=system_prompt,
+            )
+            agent = AgentRunner(worker, callback_manager=self.llm.callback_manager)
+            logger.info("Using FunctionCallingAgent for %s", self.role)
+            return agent
+        except Exception as e:
+            logger.info("FunctionCallingAgent unavailable (%s), falling back to ReActAgent", e)
+
+        agent_context = f"""{system_prompt}
 
 You are an AI assistant that uses tools to accomplish tasks.
 Follow the thought-action-input format:
@@ -134,12 +142,13 @@ IMPORTANT: Only use the tools provided to you. If no tools are needed, provide a
 """
 
         agent = ReActAgent.from_tools(
-            tools=self._instrumented_tools(),
+            tools=instrumented,
             llm=self.llm,
             verbose=self.verbose,
-            max_iterations=50, # Increased to allow for more complex multi-file tasks
+            max_iterations=50,
             system_prompt=agent_context
         )
+        logger.info("Using ReActAgent (text-based) for %s", self.role)
         return agent
 
     def _instrumented_tools(self) -> List[FunctionTool]:

@@ -8,7 +8,7 @@ from typing import Optional, List, Dict, Any
 
 from .base_agent import BaseLlamaIndexAgent
 from ..tools.file_tools import create_workspace_file_tools
-from ..tools.tldr_tools import append_tldr_tools
+from ..tools.tldr_tools import append_tldr_tools, build_symbol_map
 from ..budget.tracker import EnhancedBudgetTracker
 
 logger = logging.getLogger(__name__)
@@ -20,8 +20,8 @@ You MUST use the provided tools to accomplish the task. Do NOT just describe wha
 Available tools:
 - file_lister: Recursively list all files in a directory to discover project structure.
 - file_reader: Read the current content of a file before modifying it.
-- replace_file_content: Replace a specific range of lines in an existing file. You MUST use this to update files. NEVER overwrite the entire file.
-- file_writer: Write NEW files from scratch. Do NOT use this for updating existing files.
+- replace_file_content: Replace a specific range of lines in an existing file (start_line, end_line, replacement_content). Use this for ALL edits to existing files — especially large ones.
+- file_writer: Write NEW files from scratch only. Do NOT use for updating existing files.
 - file_deleter: Delete a file from the workspace. Use this when the user asks to remove, delete, or get rid of a file.
 - code_search: Search the codebase for a regex pattern. Returns matching lines with context.
   Use BEFORE editing to find all usages of a function, class, or variable you plan to change.
@@ -31,7 +31,8 @@ Available tools:
 
 CRITICAL RULES:
 - You MUST call replace_file_content for every existing file you want to update.
-- Do NOT use file_writer for updating files! It will delete the rest of the file. Use replace_file_content with start_line and end_line.
+- Do NOT use file_writer for updating existing files — it requires the entire file and fails on large files. Use replace_file_content with start_line and end_line.
+- For large or truncated files: call file_reader first, then patch only the changed line ranges with replace_file_content.
 - When the user asks to DELETE, REMOVE, or get rid of a file: call file_deleter with that file_path.
 - Make minimal, targeted changes that satisfy the user's request.
 - Do not invent new features or refactor beyond what was asked.
@@ -164,8 +165,8 @@ class RefinementAgent:
                 sections.append(f"\n## Primary focus\nStart with: **{file_path}**")
             if initial_file_content is not None:
                 # For large files, extract only the relevant sections to fit context window.
-                # The LLM sees a trimmed view; the instructions direct it to use file_reader
-                # to fetch the full content before calling file_writer with the complete file.
+                # The LLM sees a trimmed view; instructions direct it to use file_reader
+                # for the full file, then replace_file_content on specific line ranges.
                 if len(initial_file_content) > self._MAX_INLINE_CHARS:
                     prompt_no_urls = _re.sub(r'https?://\S+', '', user_prompt)
                     tokens = list({
@@ -204,6 +205,19 @@ class RefinementAgent:
                 for r in refinement_history[:5]
             )
             sections.append("\n## Previous refinement requests (do not undo these)\n" + history_text)
+
+        # Inject compact symbol map so the model knows what functions/classes exist
+        # before calling code_search — prevents wasted retries on non-existent symbols.
+        try:
+            sym_map = build_symbol_map(self.workspace_path)
+            if sym_map:
+                sections.append(
+                    "\n## Codebase symbol map (file → classes / functions)\n"
+                    "Use these names when calling code_search or code_impact.\n"
+                    "```\n" + sym_map + "\n```"
+                )
+        except Exception:
+            pass
 
         # Determine whether full file content was inlined (affects instructions)
         large_file = (
@@ -319,7 +333,10 @@ CRITICAL: "Remove code/lines/functions" = replace_file_content with empty replac
         refinement_history: Optional[List[Dict[str, Any]]] = None,
         project_context: Optional[str] = None,
     ) -> str:
-        """Build a single prompt that includes ALL candidate files for one-shot editing."""
+        """Build a single prompt that includes ALL candidate files for one-shot editing.
+
+        Used by project-wide scope when <=5 candidate files.
+        """
         sections: List[str] = ["## User request\n" + user_prompt]
 
         if project_context:
@@ -343,12 +360,17 @@ CRITICAL: "Remove code/lines/functions" = replace_file_content with empty replac
 ## Instructions
 Apply the user's request to ALL the files listed above in a single pass.
 For each file that needs changes:
-1. Call file_writer with file_path="<path>" and the COMPLETE updated content.
-2. "Remove lines / delete code / remove functions" means EDIT with file_writer — keep the file.
-3. Only use file_deleter if the user explicitly asks to delete an entire file by name.
-4. If a file needs no changes, skip it (do NOT call file_writer for unchanged files).
-5. After updating all files, provide a Final Answer listing every file you modified.
+1. Use file_reader to load the full current content if the snippet above was truncated.
+2. Use code_search to find exact line numbers for functions/classes you need to edit.
+3. Call replace_file_content with file_path, start_line, end_line, and replacement_content.
+4. "Remove lines / delete code" = replace_file_content with empty replacement_content.
+5. Only use file_deleter if the user explicitly asks to delete an entire file by name.
+6. If a file needs no changes, skip it.
+7. After updating all files, provide a Final Answer listing every file you modified.
 
-CRITICAL: Call file_writer for EACH file that needs changes. Without it, nothing is saved.""")
+CRITICAL RULES:
+- You MUST use replace_file_content for ALL edits to existing files. DO NOT use file_writer!
+- You MUST actually call replace_file_content — do NOT just describe changes.
+- Without calling the tool, NOTHING is saved.""")
 
         return "\n".join(sections)

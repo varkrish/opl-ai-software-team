@@ -268,83 +268,100 @@ class JobDatabase:
                 except sqlite3.OperationalError:
                     pass
 
-            # Model context windows dictionary (maps model substrings to context sizes)
+            # Model context windows + pricing (maps model substrings to limits & USD/1M token rates)
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS model_context_windows (
                     model_pattern TEXT PRIMARY KEY,
                     context_window INTEGER NOT NULL,
+                    input_price_per_1m REAL NOT NULL DEFAULT 0.0,
+                    output_price_per_1m REAL NOT NULL DEFAULT 0.0,
                     updated_at TEXT NOT NULL
                 )
             """)
+            # Add pricing columns to existing deployments that only have context_window
+            for col, default in [
+                ("input_price_per_1m", "0.0"),
+                ("output_price_per_1m", "0.0"),
+            ]:
+                try:
+                    conn.execute(
+                        f"ALTER TABLE model_context_windows ADD COLUMN {col} REAL NOT NULL DEFAULT {default}"
+                    )
+                except Exception:
+                    pass  # column already exists
 
-            # Pre-populate defaults
+            # Pre-populate defaults — (pattern, context_window, input_$/1M, output_$/1M)
+            # OSS / self-hosted models have $0 because cost is borne by the host.
             now = datetime.now().isoformat()
             default_models = [
                 # OpenAI
-                ("gpt-4o-mini", 128000),
-                ("gpt-4o", 128000),
-                ("gpt-4-turbo", 128000),
-                ("gpt-4", 8192),
-                ("gpt-3.5", 16384),
-                # Anthropic (standard & OpenRouter)
-                ("claude-3.5", 200000),
-                ("claude-3-5", 200000),
-                ("claude-3", 200000),
-                # Google Gemini (standard & OpenRouter)
-                ("gemini-2.0", 1000000),
-                ("gemini-1.5", 1000000),
-                ("gemini-pro", 2000000),
-                ("gemini-flash", 1000000),
-                # DeepSeek
-                ("deepseek-r1", 128000),
-                ("deepseek-v3", 128000),
-                ("deepseek-chat", 128000),
-                ("deepseek-coder", 128000),
-                ("deepseek", 128000),
-                # Meta Llama (standard & OpenRouter)
-                ("llama-3.1", 128000),
-                ("llama-3.2", 128000),
-                ("llama-3", 8192),
-                ("llama3", 8192),
-                ("llama-scout", 400000),
-                ("llama-nemotron", 10240),
-                ("nemotron-3-super", 1000000),
-                ("nemotron-3", 1000000),
-                # IBM Granite
-                ("granite-3", 128000),
-                ("granite3", 128000),
-                # Alibaba Qwen
-                ("qwen-2.5", 128000),
-                ("qwen-2", 32768),
-                ("qwen3-coder", 400000),
-                ("qwen3", 400000),
-                # Mistral / Mixtral
-                ("mixtral-8x22b", 64000),
-                ("mixtral-8x7b", 32768),
-                ("pixtral", 128000),
-                ("mistral-large", 128000),
-                ("mistral", 32768),
-                ("mixtral", 32768),
+                ("gpt-4o-mini",   128000, 0.15,  0.60),
+                ("gpt-4o",        128000, 2.50, 10.00),
+                ("gpt-4-turbo",   128000, 10.00, 30.00),
+                ("gpt-4",           8192, 30.00, 60.00),
+                ("gpt-3.5",        16384,  0.50,  1.50),
+                # Anthropic
+                ("claude-3.5",    200000,  3.00, 15.00),
+                ("claude-3-5",    200000,  3.00, 15.00),
+                ("claude-3",      200000,  3.00, 15.00),
+                # Google Gemini
+                ("gemini-2.0",   1000000,  0.10,  0.40),
+                ("gemini-1.5",   1000000,  1.25,  5.00),
+                ("gemini-pro",   2000000,  1.25,  5.00),
+                ("gemini-flash", 1000000,  0.075, 0.30),
+                # DeepSeek (OSS / self-hosted)
+                ("deepseek-r1",   128000,  0.0,   0.0),
+                ("deepseek-v3",   128000,  0.0,   0.0),
+                ("deepseek-chat", 128000,  0.0,   0.0),
+                ("deepseek-coder",128000,  0.0,   0.0),
+                ("deepseek",      128000,  0.0,   0.0),
+                # Meta Llama (OSS / self-hosted)
+                ("llama-3.1",     128000,  0.0,   0.0),
+                ("llama-3.2",     128000,  0.0,   0.0),
+                ("llama-3",         8192,  0.0,   0.0),
+                ("llama3",          8192,  0.0,   0.0),
+                ("llama-scout",   400000,  0.0,   0.0),
+                ("llama-nemotron", 10240,  0.0,   0.0),
+                ("nemotron-3-super",1000000, 0.0,  0.0),
+                ("nemotron-3",   1000000,  0.0,   0.0),
+                # IBM Granite (OSS)
+                ("granite-3",     128000,  0.0,   0.0),
+                ("granite3",      128000,  0.0,   0.0),
+                # Alibaba Qwen (OSS)
+                ("qwen-2.5",      128000,  0.0,   0.0),
+                ("qwen-2",         32768,  0.0,   0.0),
+                ("qwen3-coder",   400000,  0.0,   0.0),
+                ("qwen3",         400000,  0.0,   0.0),
+                # Mistral / Mixtral (OSS)
+                ("mixtral-8x22b",  64000,  0.0,   0.0),
+                ("mixtral-8x7b",   32768,  0.0,   0.0),
+                ("pixtral",       128000,  0.0,   0.0),
+                ("mistral-large", 128000,  0.0,   0.0),
+                ("mistral",        32768,  0.0,   0.0),
+                ("mixtral",        32768,  0.0,   0.0),
                 # Cohere
-                ("command-r-plus", 128000),
-                ("command-r", 128000),
-                # Microsoft Phi
-                ("phi-4", 16384),
-                ("phi-3", 128000),
-                ("codellama", 4000),
-                # Common OpenRouter Free Models
-                ("gemma-2", 8192),
-                ("gemma", 8192),
-                ("openchat", 8192),
-                ("mythomax", 4096),
-                ("hermes-3", 128000),
-                ("zephyr", 16384)
+                ("command-r-plus", 128000, 3.00, 15.00),
+                ("command-r",      128000, 0.50,  1.50),
+                # Microsoft Phi (OSS)
+                ("phi-4",          16384,  0.0,   0.0),
+                ("phi-3",         128000,  0.0,   0.0),
+                ("codellama",       4000,  0.0,   0.0),
+                # Common OpenRouter Free / OSS
+                ("gemma-2",         8192,  0.0,   0.0),
+                ("gemma",           8192,  0.0,   0.0),
+                ("openchat",        8192,  0.0,   0.0),
+                ("mythomax",        4096,  0.0,   0.0),
+                ("hermes-3",      128000,  0.0,   0.0),
+                ("zephyr",         16384,  0.0,   0.0),
+                # Red Hat MaaS / generic OSS aliases
+                ("gpt-oss",       128000,  0.0,   0.0),
             ]
-            for pattern, window in default_models:
+            for pattern, window, in_price, out_price in default_models:
                 conn.execute("""
-                    INSERT OR IGNORE INTO model_context_windows (model_pattern, context_window, updated_at)
-                    VALUES (?, ?, ?)
-                """, (pattern, window, now))
+                    INSERT OR IGNORE INTO model_context_windows
+                        (model_pattern, context_window, input_price_per_1m, output_price_per_1m, updated_at)
+                    VALUES (?, ?, ?, ?, ?)
+                """, (pattern, window, in_price, out_price, now))
     
     def create_job(self, job_id: str, vision: str, workspace_path: str,
                    metadata: Optional[Dict[str, Any]] = None,
@@ -1597,13 +1614,43 @@ class JobDatabase:
             return row["context_window"] if row else None
 
     def save_model_context_window(self, model_pattern: str, context_window: int) -> None:
-        """Upsert a model pattern and its context window size."""
+        """Upsert a model pattern and its context window size (preserves existing pricing)."""
         now = datetime.now().isoformat()
         with self._get_conn() as conn:
             conn.execute("""
-                INSERT OR REPLACE INTO model_context_windows (model_pattern, context_window, updated_at)
-                VALUES (?, ?, ?)
+                INSERT INTO model_context_windows (model_pattern, context_window, input_price_per_1m, output_price_per_1m, updated_at)
+                VALUES (?, ?, 0.0, 0.0, ?)
+                ON CONFLICT(model_pattern) DO UPDATE SET context_window=excluded.context_window, updated_at=excluded.updated_at
             """, (model_pattern.lower(), context_window, now))
+
+    def save_model_pricing(self, model_pattern: str, input_price_per_1m: float, output_price_per_1m: float) -> None:
+        """Upsert pricing for a model pattern (preserves existing context window)."""
+        now = datetime.now().isoformat()
+        with self._get_conn() as conn:
+            conn.execute("""
+                INSERT INTO model_context_windows (model_pattern, context_window, input_price_per_1m, output_price_per_1m, updated_at)
+                VALUES (?, 0, ?, ?, ?)
+                ON CONFLICT(model_pattern) DO UPDATE SET
+                    input_price_per_1m=excluded.input_price_per_1m,
+                    output_price_per_1m=excluded.output_price_per_1m,
+                    updated_at=excluded.updated_at
+            """, (model_pattern.lower(), input_price_per_1m, output_price_per_1m, now))
+
+    def get_model_pricing(self, model_name: str) -> Optional[Dict[str, float]]:
+        """Return {input_price_per_1m, output_price_per_1m} for the best-matching pattern, or None."""
+        if not model_name:
+            return None
+        with self._get_conn() as conn:
+            row = conn.execute("""
+                SELECT input_price_per_1m, output_price_per_1m
+                FROM model_context_windows
+                WHERE ? LIKE '%' || model_pattern || '%'
+                ORDER BY length(model_pattern) DESC
+                LIMIT 1
+            """, (model_name.lower(),)).fetchone()
+            if row:
+                return {"input_price_per_1m": row["input_price_per_1m"], "output_price_per_1m": row["output_price_per_1m"]}
+            return None
 
     def delete_model_context_window(self, model_pattern: str) -> bool:
         """Delete a model pattern entry. Returns True if a row was deleted."""
@@ -1615,8 +1662,19 @@ class JobDatabase:
             return cursor.rowcount > 0
 
     def get_all_model_context_windows(self) -> List[Dict[str, Any]]:
-        """Return all model patterns and their context windows."""
+        """Return all model patterns with context window and pricing."""
         with self._get_conn() as conn:
-            cursor = conn.execute("SELECT model_pattern, context_window FROM model_context_windows ORDER BY model_pattern ASC")
-            return [{"model_pattern": row["model_pattern"], "context_window": row["context_window"]} for row in cursor.fetchall()]
+            cursor = conn.execute("""
+                SELECT model_pattern, context_window, input_price_per_1m, output_price_per_1m
+                FROM model_context_windows ORDER BY model_pattern ASC
+            """)
+            return [
+                {
+                    "model_pattern": row["model_pattern"],
+                    "context_window": row["context_window"],
+                    "input_price_per_1m": row["input_price_per_1m"],
+                    "output_price_per_1m": row["output_price_per_1m"],
+                }
+                for row in cursor.fetchall()
+            ]
 
