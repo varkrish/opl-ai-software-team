@@ -159,3 +159,124 @@ def test_rejects_raw_agent_dump_as_design_spec():
     raw = "assistant: file_writer(file_path='design_spec.md', content='# Title\\n')"
     assert looks_like_raw_agent_dump(raw) is True
     assert is_valid_design_spec(raw) is False
+
+
+# ---------------------------------------------------------------------------
+# DeepSeek channel-token stripping tests (TDD — must pass after fix)
+# ---------------------------------------------------------------------------
+
+# Real patterns observed in production logs from DeepSeek R1 Distill 14B running
+# in simple mode.  The model bleeds its internal multi-turn channel tokens into
+# the response instead of outputting the required JSON array.
+
+_DS_COMMENTARY = "<|channel|>commentary<|message|>We need to output the tool action.<|end|>"
+
+_DS_TOOL_CALL = (
+    "<|start|>assistant<|channel|>commentary to=code_search <|constrain|>json"
+    '<|message|>{"pattern":"FirebaseService","workspace":"/app/workspace/abc"}<|call|>'
+)
+
+_DS_ANALYSIS_CALL = (
+    "<|start|>assistant<|channel|>analysis to=code_structure code"
+    '<|message|>{"workspace":"/app/workspace/abc","lang":"python"}<|call|>'
+)
+
+_DS_PREAMBLE_THEN_JSON = (
+    "<|channel|>commentary<|message|>We will now output the action.<|end|>\n"
+    "[{\"file_path\": \"src/services/OCRService.js\","
+    " \"content\": \"const OCRService = {}; export default OCRService;\"}]"
+)
+
+_DS_START_THEN_JSON = (
+    "<|start|>assistant<|channel|>commentary to=file_writer <|constrain|>json"
+    "<|message|>we will create the file<|end|>\n"
+    "[{\"file_path\": \"src/App.js\", \"content\": \"import React from 'react';\"}]"
+)
+
+
+class TestDeepSeekTokenStripping:
+    """_clean_response must strip DeepSeek channel tokens so the JSON parser can find the array."""
+
+    def test_pure_commentary_token_yields_empty(self):
+        from llamaindex_crew.utils.output_parser import extract_files_from_response
+        entries, strategy = extract_files_from_response(_DS_COMMENTARY, target_file_path="any.js")
+        # No JSON in this response — should return nothing (not crash)
+        assert entries == []
+
+    def test_pure_tool_call_token_yields_empty(self):
+        from llamaindex_crew.utils.output_parser import extract_files_from_response
+        entries, _ = extract_files_from_response(_DS_TOOL_CALL, target_file_path="any.js")
+        assert entries == []
+
+    def test_channel_preamble_then_json_extracts_file(self):
+        """Commentary token followed by valid JSON — JSON must be extracted."""
+        from llamaindex_crew.utils.output_parser import extract_files_from_response
+        entries, strategy = extract_files_from_response(
+            _DS_PREAMBLE_THEN_JSON, target_file_path="src/services/OCRService.js"
+        )
+        assert len(entries) == 1, f"Expected 1 entry, got {entries}"
+        assert entries[0]["file_path"] == "src/services/OCRService.js"
+        assert strategy == "json"
+
+    def test_start_token_preamble_then_json_extracts_file(self):
+        """<|start|>assistant token followed by JSON — JSON must be extracted."""
+        from llamaindex_crew.utils.output_parser import extract_files_from_response
+        entries, strategy = extract_files_from_response(
+            _DS_START_THEN_JSON, target_file_path="src/App.js"
+        )
+        assert len(entries) == 1, f"Expected 1 entry, got {entries}"
+        assert entries[0]["file_path"] == "src/App.js"
+        assert strategy == "json"
+
+    def test_analysis_token_yields_empty_no_json(self):
+        """Analysis channel call with no JSON — should not crash, return empty."""
+        from llamaindex_crew.utils.output_parser import extract_files_from_response
+        entries, _ = extract_files_from_response(_DS_ANALYSIS_CALL, target_file_path="src/x.py")
+        assert entries == []
+
+    def test_multiple_channel_tokens_then_json(self):
+        """Multiple commentary tokens before the JSON array — all stripped."""
+        from llamaindex_crew.utils.output_parser import extract_files_from_response
+        response = (
+            "<|channel|>commentary<|message|>Inspecting repo.<|end|>\n"
+            "<|channel|>commentary<|message|>Now writing file.<|end|>\n"
+            '[{"file_path": "src/utils/helpers.js", "content": "export const noop = () => {};"}]'
+        )
+        entries, strategy = extract_files_from_response(
+            response, target_file_path="src/utils/helpers.js"
+        )
+        assert len(entries) == 1
+        assert entries[0]["file_path"] == "src/utils/helpers.js"
+        assert strategy == "json"
+
+    def test_channel_token_before_code_fence(self):
+        """Commentary token before a code fence — code fence fallback must still work."""
+        from llamaindex_crew.utils.output_parser import extract_files_from_response
+        response = (
+            "<|channel|>commentary<|message|>Will create the file now.<|end|>\n"
+            "```javascript\n"
+            "const x = 1;\nexport default x;\n"
+            "```"
+        )
+        entries, strategy = extract_files_from_response(
+            response, target_file_path="src/config.js"
+        )
+        assert len(entries) == 1
+        assert entries[0]["file_path"] == "src/config.js"
+        assert strategy == "code_fence"
+
+    def test_clean_json_response_unaffected(self):
+        """A response without any channel tokens must parse exactly as before."""
+        from llamaindex_crew.utils.output_parser import extract_files_from_response
+        response = '[{"file_path": "src/index.js", "content": "console.log(1);"}]'
+        entries, strategy = extract_files_from_response(
+            response, target_file_path="src/index.js"
+        )
+        assert len(entries) == 1
+        assert strategy == "json"
+
+    def test_looks_like_raw_agent_dump_detects_channel_tokens(self):
+        """looks_like_raw_agent_dump should flag responses that are purely channel tokens."""
+        from llamaindex_crew.utils.output_parser import looks_like_raw_agent_dump
+        assert looks_like_raw_agent_dump(_DS_COMMENTARY) is True
+        assert looks_like_raw_agent_dump(_DS_TOOL_CALL) is True

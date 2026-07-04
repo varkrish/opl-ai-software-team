@@ -2048,6 +2048,7 @@ class TaskManager:
         context_window: Optional[int] = None,
         max_tokens: Optional[int] = None,
         simple_mode: bool = False,
+        tldr_context: Optional[str] = None,
     ) -> str:
         """Build a focused prompt for generating a single file.
 
@@ -2087,6 +2088,11 @@ class TaskManager:
         if rag_context and rag_context.strip():
             parts.append("REFERENCE & PLAN EXCERPTS (retrieved — follow precisely):")
             parts.append(rag_context.strip())
+            parts.append("")
+
+        if tldr_context and tldr_context.strip():
+            parts.append("CODEBASE STRUCTURE (from tldr — use for imports, call sites, and naming):")
+            parts.append(tldr_context.strip())
             parts.append("")
 
         if is_feature_task:

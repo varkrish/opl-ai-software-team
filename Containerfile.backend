@@ -56,7 +56,8 @@ RUN cd /app/agent && \
         "jsonschema[format]>=4.0.0" \
         "litellm>=1.0.0" \
         "cryptography>=41.0.0" \
-        "httpx>=0.28.0"
+        "httpx>=0.28.0" \
+        "llm-tldr>=1.2.0"
 
 # ── Copy application source ──────────────────────────────────────────────────
 COPY agent/src/ /app/agent/src/

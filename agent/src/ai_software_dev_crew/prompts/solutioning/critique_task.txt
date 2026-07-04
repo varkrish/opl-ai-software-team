@@ -9,6 +9,9 @@ Solution candidates (JSON):
 Solution specification:
 {spec_content}
 
+Project context (includes existing codebase when brownfield):
+{project_context}
+
 Return JSON only — do NOT rewrite the spec:
 {{
   "approved": true|false,
@@ -18,4 +21,5 @@ Return JSON only — do NOT rewrite the spec:
 }}
 
 Approve only when the spec is implementable, aligned with the vision, and addresses major risks.
+When project context describes an existing codebase, reject specs that ignore or contradict it.
 Reject with actionable must_fix items when gaps remain.

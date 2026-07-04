@@ -6,6 +6,10 @@ Project vision:
 Project context:
 {project_context}
 
+When project context includes an EXISTING CODEBASE section, treat this as brownfield work:
+- Prefer extending or integrating with existing modules over greenfield rewrites.
+- If you have code_structure / code_search tools, use them to inspect what is already built.
+
 Return JSON only — a list of solution candidates:
 [
   {{

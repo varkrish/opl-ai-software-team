@@ -209,6 +209,9 @@ def looks_like_raw_agent_dump(content: str) -> bool:
         return True
     if re.search(r"Thought\s*:", head, re.IGNORECASE) and "Action" in head:
         return True
+    # DeepSeek R1 channel tokens — internal multi-turn dispatch leaked into response
+    if re.match(r"<\|(?:channel|start)\|>", head):
+        return True
     return False
 
 
@@ -251,11 +254,39 @@ def is_valid_tech_stack(content: str) -> bool:
     return any(ind in content for ind in indicators)
 
 
-def _clean_response(text: str) -> str:
-    """Strip common role prefixes before parsing."""
-    cleaned = text.strip()
-    cleaned = re.sub(r"^(?:assistant|user|system)\s*:\s*", "", cleaned, flags=re.IGNORECASE)
+# Matches DeepSeek R1 internal channel tokens that bleed into simple-mode responses.
+# Patterns observed in production:
+#   <|channel|>commentary<|message|>...<|end|>
+#   <|start|>assistant<|channel|>commentary to=X <|constrain|>json<|message|>...<|call|>
+#   <|start|>assistant<|channel|>analysis to=X code<|message|>...<|call|>
+_DS_CHANNEL_TOKEN_RE = re.compile(
+    r"<\|(?:start\|>assistant<\|)?channel\|>.*?(?:<\|(?:end|call)\|>|$)",
+    re.DOTALL,
+)
+# Matches bare <|start|> / <|end|> / <|call|> markers left after block stripping
+_DS_BARE_MARKER_RE = re.compile(r"<\|(?:start|end|call|constrain|message)\|>")
+
+
+def _strip_deepseek_tokens(text: str) -> str:
+    """Remove DeepSeek multi-turn channel tokens from *text*.
+
+    DeepSeek R1 (and derivatives) use special tokens like ``<|channel|>`` and
+    ``<|start|>assistant<|channel|>`` for internal tool dispatch.  In simple
+    mode these tokens are never executed but DO appear in the raw response,
+    preventing the JSON parser from finding the file array.
+    """
+    cleaned = _DS_CHANNEL_TOKEN_RE.sub("", text)
+    cleaned = _DS_BARE_MARKER_RE.sub("", cleaned)
     return cleaned
+
+
+def _clean_response(text: str) -> str:
+    """Strip role prefixes and DeepSeek channel tokens before parsing."""
+    cleaned = text.strip()
+    # Remove DeepSeek internal multi-turn tokens first (they can wrap the JSON)
+    cleaned = _strip_deepseek_tokens(cleaned)
+    cleaned = re.sub(r"^(?:assistant|user|system)\s*:\s*", "", cleaned, flags=re.IGNORECASE)
+    return cleaned.strip()
 
 
 def _fix_trailing_commas(json_text: str) -> str:

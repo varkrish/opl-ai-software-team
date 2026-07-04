@@ -11,6 +11,11 @@ Research candidates (JSON):
 
 {feedback_section}
 
+When project context includes an EXISTING CODEBASE section, your spec MUST:
+- Acknowledge what code already exists and what should be reused vs replaced.
+- Recommend incremental changes where possible (avoid unnecessary rewrites).
+- If you have code_structure / code_search tools, use them before finalizing the spec.
+
 Write solution_spec.md to the workspace using file_writer. Include:
 - Recommended approach and rationale
 - Reference repositories (if any)
