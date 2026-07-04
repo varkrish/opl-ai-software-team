@@ -35,6 +35,9 @@ RUN cd /app/agent && \
     pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -e . 2>/dev/null || \
     pip install --no-cache-dir \
+        "fastapi>=0.115.0" \
+        "uvicorn[standard]>=0.30.0" \
+        "PyJWT>=2.8.0" \
         "llama-index>=0.10.0" \
         "llama-index-core>=0.10.0" \
         "llama-index-agent-openai>=0.2.0" \
@@ -64,6 +67,11 @@ COPY crew_studio/ /app/crew_studio/
 # Make agent package importable
 RUN cd /app/agent && pip install --no-cache-dir -e . 2>/dev/null || true
 
+# ── Download NLTK data (required by LlamaIndex) ──────────────────────────────
+RUN mkdir -p /app/nltk_data && \
+    python -c "import nltk; nltk.data.path.insert(0, '/app/nltk_data'); nltk.download('punkt', download_dir='/app/nltk_data'); nltk.download('averaged_perceptron_tagger', download_dir='/app/nltk_data')" && \
+    chmod -R 755 /app/nltk_data
+
 # ── Create directories ───────────────────────────────────────────────────────
 RUN mkdir -p /app/workspace /app/data && \
     chown -R 1001:0 /app && \
@@ -72,6 +80,7 @@ RUN mkdir -p /app/workspace /app/data && \
 # ── Environment ──────────────────────────────────────────────────────────────
 ENV PYTHONPATH=/app/agent:/app/agent/src:/app \
     PYTHONUNBUFFERED=1 \
+    NLTK_DATA=/app/nltk_data \
     WORKSPACE_PATH=/app/workspace \
     JOB_DB_PATH=/app/data/crew_jobs.db \
     FLASK_ENV=production \
@@ -87,11 +96,4 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
     CMD curl -sf http://localhost:8080/health || exit 1
 
 # ── Entrypoint ───────────────────────────────────────────────────────────────
-CMD ["python", "-c", "\
-import sys; \
-sys.path.insert(0, './agent'); \
-sys.path.insert(0, './agent/src'); \
-sys.path.insert(0, '.'); \
-from crew_studio.llamaindex_web_app import app; \
-app.run(host='0.0.0.0', port=8080, debug=False, use_reloader=False) \
-"]
+CMD ["python", "-m", "uvicorn", "crew_studio.asgi_app:app", "--host", "0.0.0.0", "--port", "8080"]
