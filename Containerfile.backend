@@ -99,6 +99,14 @@ RUN mkdir -p /app/nltk_data && \
     python -c "import nltk; nltk.data.path.insert(0, '/app/nltk_data'); nltk.download('punkt', download_dir='/app/nltk_data'); nltk.download('averaged_perceptron_tagger', download_dir='/app/nltk_data')" && \
     chmod -R 755 /app/nltk_data
 
+# ── Pre-download HuggingFace embedding model ──────────────────────────────────
+# Bake the model into the image so the container never needs internet access at runtime.
+# /app/hf_cache is owned by 1001:0 so the non-root user can read it.
+RUN HF_HOME=/app/hf_cache python -c "\
+from llama_index.embeddings.huggingface import HuggingFaceEmbedding; \
+HuggingFaceEmbedding(model_name='BAAI/bge-small-en-v1.5'); \
+print('BAAI/bge-small-en-v1.5 cached OK')"
+
 # ── Create directories ───────────────────────────────────────────────────────
 RUN mkdir -p /app/workspace /app/data && \
     chown -R 1001:0 /app && \
@@ -108,6 +116,7 @@ RUN mkdir -p /app/workspace /app/data && \
 ENV PYTHONPATH=/app/agent:/app/agent/src:/app \
     PYTHONUNBUFFERED=1 \
     NLTK_DATA=/app/nltk_data \
+    HF_HOME=/app/hf_cache \
     WORKSPACE_PATH=/app/workspace \
     JOB_DB_PATH=/app/data/crew_jobs.db \
     FLASK_ENV=production \

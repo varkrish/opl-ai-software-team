@@ -8,7 +8,7 @@ import logging
 import re
 import threading
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, Optional, Any
 from functools import partial
 from llama_index.core.tools import FunctionTool
 from ..utils.code_safety import CodeSafetyChecker
@@ -98,6 +98,37 @@ def _sanitize_java_package_path(file_path: str) -> str:
         else:
             fixed.append(part)
     return prefix + "/".join(fixed)
+
+
+def _normalize_file_tool_kwargs(
+    file_path: Optional[str] = None,
+    workspace_path: Optional[str] = None,
+    **kwargs: Any,
+) -> tuple[Optional[str], Optional[str], dict[str, Any]]:
+    """Coerce common ReAct tool-call shapes into file_path / workspace_path.
+
+    Models often send ``path`` instead of ``file_path``, or wrap params in ``args``.
+    """
+    merged: dict[str, Any] = {}
+    if file_path is not None:
+        merged["file_path"] = file_path
+    if workspace_path is not None:
+        merged["workspace_path"] = workspace_path
+    merged.update(kwargs)
+
+    nested = merged.pop("args", None)
+    if nested is not None:
+        if isinstance(nested, dict):
+            merged = {**nested, **merged}
+        else:
+            try:
+                merged = {**dict(nested), **merged}
+            except Exception:
+                pass
+
+    fp = merged.pop("file_path", None) or merged.pop("path", None) or merged.pop("filename", None)
+    ws = merged.pop("workspace_path", None)
+    return fp, ws, merged
 
 
 def _normalize_manifest_path(file_path: str, allowed: set) -> str:
@@ -313,7 +344,7 @@ def file_line_replacer(
         return f"❌ Error replacing lines in {file_path}: {str(e)}"
 
 
-def file_reader(file_path: str, workspace_path: Optional[str] = None) -> str:
+def file_reader(file_path: Optional[str] = None, workspace_path: Optional[str] = None, **kwargs) -> str:
     """Read content from a file in the workspace.
     
     Args:
@@ -323,6 +354,11 @@ def file_reader(file_path: str, workspace_path: Optional[str] = None) -> str:
     Returns:
         File content or error message
     """
+    file_path, workspace_path, _extra = _normalize_file_tool_kwargs(
+        file_path=file_path, workspace_path=workspace_path, **kwargs
+    )
+    if not file_path:
+        return "❌ Error: file_path is required (e.g. 'README.md' or 'src/main.py')."
     try:
         file_path = _sanitize_java_package_path(file_path)
         workspace = _resolve_workspace(workspace_path)
@@ -339,7 +375,7 @@ def file_reader(file_path: str, workspace_path: Optional[str] = None) -> str:
         return f"❌ Error reading {file_path}: {str(e)}"
 
 
-def file_lister(directory: str = ".", workspace_path: Optional[str] = None) -> str:
+def file_lister(directory: str = ".", workspace_path: Optional[str] = None, **kwargs) -> str:
     """List all files in a directory recursively. Returns file paths relative to workspace and sizes.
     
     Args:
@@ -349,6 +385,16 @@ def file_lister(directory: str = ".", workspace_path: Optional[str] = None) -> s
     Returns:
         Recursive list of all files or error message
     """
+    _fp, workspace_path, extra = _normalize_file_tool_kwargs(
+        workspace_path=workspace_path, **kwargs
+    )
+    directory = (
+        extra.get("directory")
+        or extra.get("path")
+        or _fp
+        or directory
+        or "."
+    )
     try:
         workspace = _resolve_workspace(workspace_path)
         full_path = workspace / directory
@@ -380,7 +426,7 @@ def file_lister(directory: str = ".", workspace_path: Optional[str] = None) -> s
         return f"❌ Error listing {directory}: {str(e)}"
 
 
-def file_deleter(file_path: str, workspace_path: Optional[str] = None) -> str:
+def file_deleter(file_path: Optional[str] = None, workspace_path: Optional[str] = None, **kwargs) -> str:
     """Delete a file in the workspace. Use this when the user asks to remove or delete a file.
     Do NOT empty the file with file_writer — call file_deleter to remove the file from the filesystem.
 
@@ -391,6 +437,11 @@ def file_deleter(file_path: str, workspace_path: Optional[str] = None) -> str:
     Returns:
         Success or error message
     """
+    file_path, workspace_path, _extra = _normalize_file_tool_kwargs(
+        file_path=file_path, workspace_path=workspace_path, **kwargs
+    )
+    if not file_path:
+        return "❌ Error: file_path is required."
     try:
         workspace = _resolve_workspace(workspace_path)
         full_path = (workspace / file_path).resolve()
@@ -449,7 +500,14 @@ def bulk_file_writer(files: list, workspace_path: Optional[str] = None, **kwargs
     
     return "\n".join(results)
 
-def replace_file_content(file_path: str, start_line: int, end_line: int, replacement_content: str, workspace_path: Optional[str] = None, **kwargs) -> str:
+def replace_file_content(
+    file_path: Optional[str] = None,
+    start_line: int = 0,
+    end_line: int = 0,
+    replacement_content: str = "",
+    workspace_path: Optional[str] = None,
+    **kwargs,
+) -> str:
     """Replace a specific range of lines in an existing file.
     
     Args:
@@ -459,6 +517,14 @@ def replace_file_content(file_path: str, start_line: int, end_line: int, replace
         replacement_content: The new content that will replace the lines from start_line to end_line inclusive.
         workspace_path: Optional workspace root.
     """
+    file_path, workspace_path, extra = _normalize_file_tool_kwargs(
+        file_path=file_path, workspace_path=workspace_path, **kwargs
+    )
+    start_line = int(extra.get("start_line", start_line) or 0)
+    end_line = int(extra.get("end_line", end_line) or 0)
+    replacement_content = extra.get("replacement_content", extra.get("new_content", replacement_content))
+    if not file_path:
+        return "❌ Error: file_path is required."
     try:
         ws_path = _resolve_workspace(workspace_path)
         full_path = (ws_path / file_path).resolve()
@@ -520,7 +586,7 @@ BulkFileWriterTool = FunctionTool.from_defaults(
 FileReaderTool = FunctionTool.from_defaults(
     fn=file_reader,
     name="file_reader",
-    description="Read content from a file in the workspace."
+    description="Read content from a file in the workspace. Args: file_path (str, relative path e.g. 'README.md').",
 )
 
 FileListTool = FunctionTool.from_defaults(
@@ -538,7 +604,12 @@ FileDeleterTool = FunctionTool.from_defaults(
 ReplaceFileContentTool = FunctionTool.from_defaults(
     fn=replace_file_content,
     name="replace_file_content",
-    description="Replace a specific range of lines in an existing file. CRITICAL: Use line numbers (start_line, end_line) and provide the exact replacement text."
+    description=(
+        "Replace a specific range of lines in an existing file. "
+        "Args: file_path (str), start_line (int, 1-indexed), end_line (int, 1-indexed inclusive), "
+        "replacement_content (str). Use for ALL edits to existing files — especially large ones. "
+        "Do NOT use file_writer to update existing files."
+    ),
 )
 
 

@@ -20,19 +20,6 @@ class ModelPricing:
     input_price: float
     output_price: float
 
-# Pricing as of Dec 2024 (per 1M tokens)
-MODEL_PRICING = {
-    "gpt-4o": ModelPricing(2.50, 10.00),
-    "gpt-4o-mini": ModelPricing(0.15, 0.60),
-    "gpt-4": ModelPricing(30.00, 60.00),
-    "gpt-4-turbo": ModelPricing(10.00, 30.00),
-    "claude-3.5-sonnet": ModelPricing(3.00, 15.00),
-    "claude-3.5-haiku": ModelPricing(0.80, 4.00),
-    "claude-3-opus": ModelPricing(15.00, 75.00),
-    "gemini-1.5-pro": ModelPricing(1.25, 5.00),
-    "gemini-1.5-flash": ModelPricing(0.075, 0.30),
-}
-
 class BudgetTracker:
     """Tracks AI usage and costs across all agents"""
 
@@ -57,28 +44,35 @@ class BudgetTracker:
             except Exception as e:
                 logger.warning(f"Failed to connect to JobDatabase for token tracking: {e}")
 
+    def _get_pricing(self, model: str) -> ModelPricing:
+        """Look up pricing from DB; fall back to $0 for unknown/OSS models."""
+        if self.job_db:
+            try:
+                row = self.job_db.get_model_pricing(model)
+                if row is not None:
+                    return ModelPricing(row["input_price_per_1m"], row["output_price_per_1m"])
+            except Exception as e:
+                logger.debug("DB pricing lookup failed for %s: %s", model, e)
+        # No entry → assume self-hosted/OSS with no API cost
+        logger.debug("No pricing entry for model %r — assuming $0 (self-hosted/OSS)", model)
+        return ModelPricing(0.0, 0.0)
+
     def calculate_cost(
         self,
         model: str,
         input_tokens: int,
         output_tokens: int
     ) -> float:
-        """Calculate cost for a model call"""
-        if model not in MODEL_PRICING:
-            logger.warning(f"Unknown model {model}, using default pricing")
-            pricing = ModelPricing(3.0, 15.0)  # Default to GPT-4o equivalent
-        else:
-            pricing = MODEL_PRICING[model]
+        """Calculate cost for a model call using DB-stored pricing."""
+        pricing = self._get_pricing(model)
 
         input_cost = (input_tokens / 1_000_000) * pricing.input_price
         output_cost = (output_tokens / 1_000_000) * pricing.output_price
         total_cost = input_cost + output_cost
 
         logger.debug(
-            f"Cost calculation: {model} | "
-            f"Input: {input_tokens} tokens (${input_cost:.6f}) | "
-            f"Output: {output_tokens} tokens (${output_cost:.6f}) | "
-            f"Total: ${total_cost:.6f}"
+            "Cost: %s | in=%d tok ($%.6f) | out=%d tok ($%.6f) | total=$%.6f",
+            model, input_tokens, input_cost, output_tokens, output_cost, total_cost,
         )
 
         return total_cost

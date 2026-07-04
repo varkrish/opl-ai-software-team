@@ -1,6 +1,16 @@
 import pytest
 from pathlib import Path
-from llamaindex_crew.tools.file_tools import file_line_replacer
+from llamaindex_crew.tools.file_tools import file_line_replacer, file_reader
+
+def test_file_reader_accepts_path_alias(tmp_path):
+    workspace = tmp_path
+    (workspace / "README.md").write_text("hello")
+    assert file_reader(path="README.md", workspace_path=str(workspace)) == "hello"
+
+def test_file_reader_accepts_args_wrapper(tmp_path):
+    workspace = tmp_path
+    (workspace / "README.md").write_text("wrapped")
+    assert file_reader(args={"path": "README.md"}, workspace_path=str(workspace)) == "wrapped"
 
 def test_file_line_replacer_single_line(tmp_path):
     # Setup
