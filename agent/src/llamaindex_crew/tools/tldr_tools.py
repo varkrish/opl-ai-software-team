@@ -664,12 +664,25 @@ TLDR_TOOL_NAMES = frozenset({
 })
 
 
+def is_tldr_enabled(config: Any = None) -> bool:
+    """Return True when TLDR tools/prefetch are enabled for this config."""
+    if config is None:
+        return True
+    gen = getattr(config, "generation", None)
+    if gen is not None:
+        return bool(getattr(gen, "simple_mode_tldr_enabled", True))
+    return bool(getattr(config, "simple_mode_tldr_enabled", True))
+
+
 def append_tldr_tools(
     tools: List[FunctionTool],
     workspace_path: Path,
     lang: Optional[str] = None,
+    config: Any = None,
 ) -> List[FunctionTool]:
     """Append tldr code-search tools for *workspace_path*, skipping duplicates."""
+    if not is_tldr_enabled(config):
+        return tools
     wp = Path(workspace_path)
     detected = lang if lang is not None else detect_tldr_lang(wp)
     existing = {t.metadata.name for t in tools if getattr(t, "metadata", None)}

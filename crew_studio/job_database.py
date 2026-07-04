@@ -248,9 +248,25 @@ class JobDatabase:
                     solutioning_max_passes INTEGER NOT NULL DEFAULT 3,
                     solutioning_max_github_searches INTEGER NOT NULL DEFAULT 10,
                     auto_approve_plan INTEGER NOT NULL DEFAULT 0,
+                    tldr_enabled INTEGER NOT NULL DEFAULT 1,
+                    tldr_max_chars INTEGER NOT NULL DEFAULT 6000,
+                    tldr_include_structure INTEGER NOT NULL DEFAULT 1,
+                    tldr_min_completed_files INTEGER NOT NULL DEFAULT 1,
                     updated_at TEXT NOT NULL
                 )
             """)
+            for col, col_type, default in [
+                ("tldr_enabled", "INTEGER", "1"),
+                ("tldr_max_chars", "INTEGER", "6000"),
+                ("tldr_include_structure", "INTEGER", "1"),
+                ("tldr_min_completed_files", "INTEGER", "1"),
+            ]:
+                try:
+                    conn.execute(
+                        f"ALTER TABLE user_workflow_configs ADD COLUMN {col} {col_type} NOT NULL DEFAULT {default}"
+                    )
+                except sqlite3.OperationalError:
+                    pass
 
             # Model context windows dictionary (maps model substrings to context sizes)
             conn.execute("""
@@ -1490,6 +1506,10 @@ class JobDatabase:
         solutioning_max_passes: int = 3,
         solutioning_max_github_searches: int = 10,
         auto_approve_plan: bool = False,
+        tldr_enabled: bool = True,
+        tldr_max_chars: int = 6000,
+        tldr_include_structure: bool = True,
+        tldr_min_completed_files: int = 1,
     ) -> None:
         """Persist workflow preferences for owner_id."""
         now = datetime.now().isoformat()
@@ -1498,15 +1518,21 @@ class JobDatabase:
                 INSERT INTO user_workflow_configs (
                     owner_id, plan_review_enabled, solutioning_enabled,
                     solutioning_max_passes, solutioning_max_github_searches,
-                    auto_approve_plan, updated_at
+                    auto_approve_plan, tldr_enabled, tldr_max_chars,
+                    tldr_include_structure, tldr_min_completed_files,
+                    updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(owner_id) DO UPDATE SET
                     plan_review_enabled = excluded.plan_review_enabled,
                     solutioning_enabled = excluded.solutioning_enabled,
                     solutioning_max_passes = excluded.solutioning_max_passes,
                     solutioning_max_github_searches = excluded.solutioning_max_github_searches,
                     auto_approve_plan = excluded.auto_approve_plan,
+                    tldr_enabled = excluded.tldr_enabled,
+                    tldr_max_chars = excluded.tldr_max_chars,
+                    tldr_include_structure = excluded.tldr_include_structure,
+                    tldr_min_completed_files = excluded.tldr_min_completed_files,
                     updated_at = excluded.updated_at
             """, (
                 owner_id,
@@ -1515,6 +1541,10 @@ class JobDatabase:
                 max(1, min(5, int(solutioning_max_passes))),
                 max(1, min(50, int(solutioning_max_github_searches))),
                 1 if auto_approve_plan else 0,
+                1 if tldr_enabled else 0,
+                max(500, min(50_000, int(tldr_max_chars))),
+                1 if tldr_include_structure else 0,
+                max(0, min(100, int(tldr_min_completed_files))),
                 now,
             ))
 
@@ -1533,6 +1563,10 @@ class JobDatabase:
             "solutioning_max_passes": int(row["solutioning_max_passes"]),
             "solutioning_max_github_searches": int(row["solutioning_max_github_searches"]),
             "auto_approve_plan": bool(row["auto_approve_plan"]),
+            "tldr_enabled": bool(row["tldr_enabled"]) if "tldr_enabled" in row.keys() else True,
+            "tldr_max_chars": int(row["tldr_max_chars"]) if "tldr_max_chars" in row.keys() else 6000,
+            "tldr_include_structure": bool(row["tldr_include_structure"]) if "tldr_include_structure" in row.keys() else True,
+            "tldr_min_completed_files": int(row["tldr_min_completed_files"]) if "tldr_min_completed_files" in row.keys() else 1,
             "updated_at": row["updated_at"],
         }
 

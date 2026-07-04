@@ -9,6 +9,10 @@ DEFAULT_WORKFLOW_PREFS: Dict[str, Any] = {
     "solutioning_max_passes": 3,
     "solutioning_max_github_searches": 10,
     "auto_approve_plan": False,
+    "tldr_enabled": True,
+    "tldr_max_chars": 6000,
+    "tldr_include_structure": True,
+    "tldr_min_completed_files": 1,
 }
 
 
@@ -25,6 +29,10 @@ def normalize_workflow_prefs(raw: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     merged["auto_approve_plan"] = bool(merged["auto_approve_plan"])
     merged["solutioning_max_passes"] = max(1, min(5, int(merged["solutioning_max_passes"])))
     merged["solutioning_max_github_searches"] = max(1, min(50, int(merged["solutioning_max_github_searches"])))
+    merged["tldr_enabled"] = bool(merged["tldr_enabled"])
+    merged["tldr_include_structure"] = bool(merged["tldr_include_structure"])
+    merged["tldr_max_chars"] = max(500, min(50_000, int(merged["tldr_max_chars"])))
+    merged["tldr_min_completed_files"] = max(0, min(100, int(merged["tldr_min_completed_files"])))
     return merged
 
 
@@ -43,8 +51,20 @@ def merge_workflow_prefs_into_config(config: Any, prefs: Optional[Dict[str, Any]
             "max_github_searches": normalized["solutioning_max_github_searches"],
         }
     )
+    generation = config.generation.model_copy(
+        update={
+            "simple_mode_tldr_enabled": normalized["tldr_enabled"],
+            "simple_mode_tldr_max_chars": normalized["tldr_max_chars"],
+            "simple_mode_tldr_include_structure": normalized["tldr_include_structure"],
+            "simple_mode_tldr_min_completed_files": normalized["tldr_min_completed_files"],
+        }
+    )
     return config.model_copy(
-        update={"plan_review": plan_review, "solutioning": solutioning}
+        update={
+            "plan_review": plan_review,
+            "solutioning": solutioning,
+            "generation": generation,
+        }
     )
 
 

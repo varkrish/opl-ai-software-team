@@ -44,7 +44,7 @@ class SolutionResearchAgent:
         if skills_url:
             tools.append(SkillQueryTool(service_url=skills_url))
         if self.workspace_path is not None and get_supports_react("manager"):
-            append_tldr_tools(tools, self.workspace_path)
+            append_tldr_tools(tools, self.workspace_path, config=config)
 
         try:
             if config:
@@ -93,7 +93,7 @@ class SolutionArchitectAgent:
         if workspace_path is not None and get_supports_react("manager"):
             ws_tools = create_workspace_file_tools(Path(workspace_path))
             tools = [ws_tools[0], ws_tools[1]]
-            append_tldr_tools(tools, Path(workspace_path))
+            append_tldr_tools(tools, Path(workspace_path), config=config)
 
         backstory = (
             "You synthesize research into a concise solution specification "
