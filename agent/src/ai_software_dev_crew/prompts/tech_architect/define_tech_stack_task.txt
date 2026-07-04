@@ -43,6 +43,32 @@ library_management/
 ```
 Do NOT invent Java/Spring-style folders like `hooks/model/core.py` or `controller/`. Use ONLY Frappe conventions (`doctype`, `report`, `page`, etc).
 
+**APACHE CAMEL / ESB STRUCTURE RULE**: If the vision mentions Apache Camel, this is an integration/ESB framework, NOT an MVC framework. There is NO concept of "Controller" or "Service" layers in Camel. Do NOT create `controller/` or `service/` folders. Business logic lives in **Route** classes (RouteBuilder subclasses) and optional **Processor** classes. You MUST enumerate concrete named route files — never a bare `routes/` folder with no files inside it.
+Example for a task-management REST API with Apache Camel + Spring Boot:
+```text
+backend/
+├── pom.xml
+├── src/
+│   ├── main/
+│   │   ├── java/com/taskmanagement/
+│   │   │   ├── TaskManagementApplication.java   # [SOURCE] Spring Boot entrypoint
+│   │   │   ├── config/
+│   │   │   │   └── CamelRestConfig.java          # [SOURCE] REST DSL / component config
+│   │   │   ├── routes/
+│   │   │   │   ├── TaskRoute.java                # [SOURCE] extends RouteBuilder — /tasks CRUD
+│   │   │   │   └── UserRoute.java                # [SOURCE] extends RouteBuilder — /users CRUD
+│   │   │   ├── processors/
+│   │   │   │   └── TaskValidationProcessor.java  # [SOURCE] implements Processor
+│   │   │   └── model/
+│   │   │       └── Task.java                     # [SOURCE] POJO/DTO exchanged on the route
+│   │   └── resources/
+│   │       └── application.properties            # [CONFIG]
+│   └── test/
+│       └── java/com/taskmanagement/routes/
+│           └── TaskRouteTest.java                # [SOURCE] CamelTestSupport / AdviceWith
+```
+Every Route file MUST be a concretely named class (e.g. `TaskRoute.java`, `UserRoute.java`) — one per bounded-context/entity from the design spec — never a generic placeholder or an empty folder line.
+
 You MUST specify a COMPLETE, BUILDABLE file structure that includes:
 
 You MUST specify a COMPLETE, BUILDABLE file structure that strictly follows the active framework rules provided below in the skills context.
@@ -103,7 +129,7 @@ CRITICAL RULES:
 2. You MUST specify a COMPLETE, BUILDABLE file structure (not just source files). You MUST enumerate concrete filenames with extensions (e.g., config.yaml, utils.js). NEVER list only generic folders without the files inside them. The orchestrator cannot create tasks for folder names.
 3. Include ALL necessary config files, entry points, and build files
 4. The structure must be runnable (e.g. ./mvnw spring-boot:run for Spring Boot, or npm install && ..., or pip install ...)
-4a. If the FRAMEWORK REFERENCE section above contains skill content, your file structure MUST follow it exactly. Do NOT add folders or files that are not shown in the reference (e.g. no models/, controllers/, views/, migrations/ for Frappe).
+4a. If the FRAMEWORK REFERENCE section above contains skill content, your file structure MUST follow it exactly. Do NOT add folders or files that are not shown in the reference (e.g. no models/, controllers/, views/, migrations/ for Frappe; no controllers/, services/ for Apache Camel — use routes/ and processors/ instead). If the FRAMEWORK REFERENCE says no relevant skill was found, rely on the well-known standard conventions of the EXACT technology named in the vision — do NOT borrow folder patterns from an unrelated framework just because it was mentioned elsewhere in this prompt.
 4b. FRAPPE APP NESTING (CRITICAL — read carefully):
    Frappe apps have THREE levels of nesting: app_root/inner_package/module_folder/doctype/
    Example for an app called "leave_tracker" with module "Leave Tracker":

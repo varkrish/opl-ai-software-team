@@ -648,6 +648,12 @@ class SoftwareDevWorkflow:
         logger.info("Plan refinement requested for job %s: %r", self.project_id, feedback[:120])
         self._report_progress("pending_review", 30, "Refining plan with your feedback…")
 
+        # Planning phases already advanced the state machine (typically to
+        # tech_architect) before pausing for review. Roll back so phases can
+        # transition forward again without violating the state graph.
+        if self.state_machine.get_current_state() != ProjectState.PRODUCT_OWNER:
+            self.state_machine.rollback_to(ProjectState.PRODUCT_OWNER)
+
         # Append feedback to vision context so agents pick it up
         original_vision = self.vision
         self.vision = (

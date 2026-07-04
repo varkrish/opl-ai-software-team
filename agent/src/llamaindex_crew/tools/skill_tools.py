@@ -23,6 +23,17 @@ from llama_index.core.tools import FunctionTool
 
 logger = logging.getLogger(__name__)
 
+# Client-side backstop matching skills-service's own SKILLS_MIN_SCORE default
+# (see skills-service/src/indexer.py for the calibration methodology). Results
+# without a "score" key (older service versions) are treated as unfiltered/
+# legacy and kept — the service-side threshold is the primary gate.
+MIN_SKILL_SCORE = float(os.environ.get("SKILLS_MIN_SCORE", "0.68"))
+
+
+def _passes_relevance(result: dict) -> bool:
+    score = result.get("score")
+    return score is None or score >= MIN_SKILL_SCORE
+
 def _record_skills_used(job_id: str, skill_names: List[str]):
     try:
         from crew_studio.job_database import JobDatabase
@@ -55,12 +66,18 @@ def SkillQueryTool(
         try:
             resp = httpx.post(f"{service_url}/query", json=payload, timeout=30)
             resp.raise_for_status()
-            results = resp.json().get("results", [])
+            raw_results = resp.json().get("results", [])
+            results = [r for r in raw_results if _passes_relevance(r)]
+            if len(results) < len(raw_results):
+                logger.info(
+                    "Skills query: dropped %d low-relevance result(s) below threshold %.2f",
+                    len(raw_results) - len(results), MIN_SKILL_SCORE,
+                )
             if not results:
-                logger.info("Skills query returned 0 results")
+                logger.info("Skills query returned 0 relevant results")
                 return "No matching skills found."
             parts = [f"[{r['skill_name']}] {r['content']}" for r in results]
-            logger.info("Skills query returned %d results", len(results))
+            logger.info("Skills query returned %d relevant results", len(results))
             if job_id:
                 _record_skills_used(job_id, [r['skill_name'] for r in results])
             return "\n---\n".join(parts)
@@ -151,6 +168,12 @@ def prefetch_skills(
             )
             resp.raise_for_status()
             for r in resp.json().get("results", []):
+                if not _passes_relevance(r):
+                    logger.info(
+                        "prefetch_skills [%s]: dropping low-relevance skill %r (score=%s < %.2f)",
+                        role, r.get("skill_name"), r.get("score"), MIN_SKILL_SCORE,
+                    )
+                    continue
                 skill_name = r["skill_name"]
                 if skill_name in seen_skills:
                     continue
