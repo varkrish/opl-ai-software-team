@@ -106,13 +106,29 @@ You consider the project vision and constraints when making decisions."""
             fallback=_DEFAULT_TECH_STACK_PROMPT,
         )
 
+        # When no skill cleared the relevance threshold (e.g. the framework in the
+        # vision has no indexed skill — Camel, Angular, etc.), do NOT leave the
+        # "FRAMEWORK REFERENCE (GROUND TRUTH)" section blank. An empty section
+        # under a "you MUST follow this" heading is confusing; be explicit that
+        # there is no framework-specific reference and the model must rely on
+        # standard, well-known conventions for the requested technology instead.
+        if not (skill_context or "").strip():
+            skill_context = (
+                "(No indexed skill matched this project's technology closely enough to be "
+                "trustworthy — none was injected.) Use the well-established, standard "
+                "conventions for the EXACT technology named in the vision. Do NOT default to "
+                "a different framework's patterns (e.g. do NOT use Spring MVC-style "
+                "controllers/services for a framework that has no such concept, such as "
+                "Apache Camel route builders, event-driven systems, or ESB-style integration)."
+            )
+
         # Fit sections into the model's context window; protect vision and design_spec first
         budget = PromptBudget.from_llm(self.agent.llm)
         sections = {
             "design_spec":    design_spec or "",
             "context_digest": context_digest or "",
             "vision":         vision or "",
-            "skill_context":  skill_context or "",
+            "skill_context":  skill_context,
         }
         ref_overhead = len(reference_context) if reference_context and reference_context.strip() else 0
         fixed_overhead = len(task_prompt) + ref_overhead
@@ -245,14 +261,22 @@ TASK 1 — Define Tech Stack
 Based on the FRAMEWORK REFERENCE above and the design specification:
 
 1. Select specific technologies (database, framework, infrastructure) with justification.
-2. The file structure MUST be copied from the FRAMEWORK REFERENCE skill documents above.
-   Do NOT use generic MVC patterns (models/, controllers/, views/) unless the framework
-   reference explicitly shows them.
+2. The file structure MUST be copied from the FRAMEWORK REFERENCE skill documents above
+   when one is present. Do NOT use generic MVC patterns (models/, controllers/, views/)
+   unless the framework reference explicitly shows them OR the EXACT technology named in
+   the vision is itself an MVC framework (e.g. Spring MVC, Django, Rails). When no skill
+   reference is present, use the well-known standard conventions of the named technology
+   instead of defaulting to MVC — e.g. Apache Camel uses Route/Processor classes, not
+   controllers/services; event-driven systems use handlers/consumers, not controllers.
 3. For Frappe apps: the structure comes from `bench new-app`. DocTypes are defined by
    JSON files, not Python model classes. There are no migrations/ folders.
 4. List every file the developer agents need to create, using the exact folder layout
    from the skill reference.
-5. You MUST enumerate concrete filenames with extensions (e.g., Task.java, UserService.java). NEVER list only folders (e.g., controller/, service/) without the files inside them. The orchestrator cannot create tasks for folder names.
+5. You MUST enumerate concrete filenames with extensions using names specific to the
+   entities in the design spec (e.g., a Task entity in Apache Camel → routes/TaskRoute.java;
+   in Spring MVC → controller/TaskController.java + service/TaskService.java). NEVER list
+   only folders (e.g., controller/, service/, routes/) without the concrete files inside
+   them. The orchestrator cannot create tasks for folder names.
 
 Call file_writer(file_path='tech_stack.md', content='<your tech stack>')
 

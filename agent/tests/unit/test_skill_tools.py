@@ -146,3 +146,102 @@ class TestSkillQueryToolExecution:
 
         payload = mock_post.call_args.kwargs.get("json") or mock_post.call_args[1].get("json")
         assert payload["top_k"] == 5
+
+    def test_low_relevance_results_are_dropped(self):
+        """Results scoring below MIN_SKILL_SCORE must not be surfaced as matches."""
+        tool = self._make_tool()
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.raise_for_status = MagicMock()
+        mock_resp.json.return_value = {
+            "results": [
+                {"skill_name": "react-component-style", "content": "Use hooks", "tags": ["react"], "score": 0.55},
+            ]
+        }
+
+        with patch("httpx.post", return_value=mock_resp):
+            result = tool.call(query="Apache Camel route builder")
+
+        assert "no matching" in str(result).lower()
+        assert "react-component-style" not in str(result)
+
+    def test_high_relevance_results_are_kept(self):
+        """Results scoring above MIN_SKILL_SCORE should still be surfaced."""
+        tool = self._make_tool()
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.raise_for_status = MagicMock()
+        mock_resp.json.return_value = {
+            "results": [
+                {"skill_name": "frappe-api-patterns", "content": "Use @whitelist", "tags": ["frappe"], "score": 0.82},
+            ]
+        }
+
+        with patch("httpx.post", return_value=mock_resp):
+            result = tool.call(query="Frappe whitelist decorator")
+
+        assert "frappe-api-patterns" in str(result)
+
+    def test_missing_score_is_treated_as_legacy_and_kept(self):
+        """Older skills-service responses without a score must not be dropped."""
+        tool = self._make_tool()
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.raise_for_status = MagicMock()
+        mock_resp.json.return_value = {
+            "results": [
+                {"skill_name": "frappe-api-patterns", "content": "Use @whitelist", "tags": ["frappe"]},
+            ]
+        }
+
+        with patch("httpx.post", return_value=mock_resp):
+            result = tool.call(query="whitelist")
+
+        assert "frappe-api-patterns" in str(result)
+
+
+class TestPrefetchSkillsRelevanceFiltering:
+    """prefetch_skills() must not inject low-relevance skills as 'ground truth'."""
+
+    def _mock_config(self):
+        config = MagicMock()
+        config.skills.service_url = "http://test:8090"
+        return config
+
+    def test_skips_injection_when_nothing_clears_threshold(self):
+        from llamaindex_crew.tools.skill_tools import prefetch_skills
+
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status = MagicMock()
+        mock_resp.json.return_value = {
+            "results": [
+                {"skill_name": "react-component-style", "content": "Use hooks", "tags": ["react"], "score": 0.55},
+            ]
+        }
+
+        with patch("llamaindex_crew.config.ConfigLoader.load", return_value=self._mock_config()), \
+             patch("httpx.post", return_value=mock_resp):
+            result = prefetch_skills(vision="Build an Apache Camel integration service", role="tech_architect")
+
+        assert result == ""
+
+    def test_injects_high_relevance_skill(self):
+        from llamaindex_crew.tools.skill_tools import prefetch_skills
+
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status = MagicMock()
+        mock_resp.json.return_value = {
+            "results": [
+                {"skill_name": "frappe-api-patterns", "content": "Use @whitelist", "tags": ["frappe"], "score": 0.82},
+            ]
+        }
+
+        with patch("llamaindex_crew.config.ConfigLoader.load", return_value=self._mock_config()), \
+             patch("httpx.post", return_value=mock_resp):
+            result = prefetch_skills(vision="Build a Frappe app", role="tech_architect")
+
+        assert "frappe-api-patterns" in result
+        assert "Use @whitelist" in result

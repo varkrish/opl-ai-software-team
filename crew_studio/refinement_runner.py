@@ -42,6 +42,63 @@ def _git_snapshot(workspace_path: Path) -> str:
         return f"Git snapshot skipped: {e}"
 
 
+def _pull_and_reindex(workspace_path: Path, job_db: Any, job_id: str) -> None:
+    """Pull latest changes from the git remote (if any) and re-warm the tldr cache.
+
+    Ensures refinements operate on top of the freshest upstream code, and that
+    the tldr call-graph index reflects what's actually on disk. Best-effort:
+    any failure here is logged and refinement proceeds with whatever is present.
+    """
+    workspace_path = Path(workspace_path)
+    if not (workspace_path / ".git").exists():
+        return
+    try:
+        import git
+    except ImportError:
+        return
+
+    try:
+        repo = git.Repo(workspace_path)
+    except Exception as e:
+        logger.warning("Could not open git repo for pull: %s", e)
+        return
+
+    if not repo.remotes:
+        return
+
+    try:
+        origin = repo.remote("origin")
+    except ValueError:
+        return
+
+    from crew_studio.github_client import resolve_github_token
+    token = resolve_github_token(job_db, job_id)
+
+    original_url = origin.url
+    auth_url = original_url
+    if token:
+        from llamaindex_crew.utils.git_remote_auth import inject_push_credentials
+        auth_url = inject_push_credentials(original_url, token)
+        if auth_url != original_url:
+            origin.set_url(auth_url)
+
+    try:
+        origin.pull(rebase=True)
+        logger.info("Pulled latest changes from origin before refinement (job %s)", job_id)
+    except Exception as e:
+        logger.warning("git pull before refinement failed (non-fatal): %s", e)
+    finally:
+        if auth_url != original_url:
+            origin.set_url(original_url)
+
+    try:
+        from llamaindex_crew.tools.tldr_tools import run_tldr
+        run_tldr(["warm", str(workspace_path), "--lang", "all"])
+        logger.info("tldr warm completed after pull (job %s)", job_id)
+    except Exception as e:
+        logger.warning("tldr warm after pull failed (non-fatal): %s", e)
+
+
 def _workspace_has_changes(workspace_path: Path) -> bool:
     """Check if the workspace has uncommitted changes (i.e. agent wrote files)."""
     try:
@@ -223,6 +280,9 @@ def _run_refinement_impl(
         {"status": "success"} or {"status": "error", "error": "..."}.
     """
     workspace_path = Path(workspace_path)
+    progress_callback("refining", 2, "Syncing with remote repository...")
+    _pull_and_reindex(workspace_path, job_db, job_id)
+
     progress_callback("refining", 5, "Creating git snapshot...")
     _git_snapshot(workspace_path)
 
@@ -261,7 +321,7 @@ def _run_refinement_impl(
             refinement_kind=refinement_kind,
         )
 
-    if file_path:
+    if file_path and scope == "file":
         # ── FILE-LEVEL SCOPE ──────────────────────────────────────────
         return _run_single_file_refinement(
             job_id=job_id,
@@ -275,26 +335,33 @@ def _run_refinement_impl(
             file_listing=file_listing,
             refinement_history=refinement_history,
             previous_status=previous_status,
-            scope=scope if scope == "file" else "file",
+            scope="file",
             project_context=project_context,
             refinement_kind=refinement_kind,
         )
-    else:
-        # ── PROJECT-WIDE SCOPE ────────────────────────────────────────
-        return _run_project_wide_refinement(
-            job_id=job_id,
-            workspace_path=workspace_path,
-            prompt=prompt,
-            refinement_id=refinement_id,
-            job_db=job_db,
-            progress_callback=progress_callback,
-            tech_stack_content=tech_stack_content,
-            file_listing=file_listing,
-            refinement_history=refinement_history,
-            previous_status=previous_status,
-            project_context=project_context,
-            refinement_kind=refinement_kind,
-        )
+
+    # ── PROJECT-WIDE SCOPE ──────────────────────────────────────────────
+    # scope == "project" — reached even when a file is open in the UI (e.g.
+    # user has a file selected but explicitly chose "Whole project"). A
+    # previous version of this dispatcher fell through to single-file
+    # refinement any time file_path was set, which silently downgraded
+    # "project" scope to "file" scope. file_path is passed through only as a
+    # hint so the selected file is still prioritized among the candidates.
+    return _run_project_wide_refinement(
+        job_id=job_id,
+        workspace_path=workspace_path,
+        prompt=prompt,
+        refinement_id=refinement_id,
+        job_db=job_db,
+        progress_callback=progress_callback,
+        tech_stack_content=tech_stack_content,
+        file_listing=file_listing,
+        refinement_history=refinement_history,
+        previous_status=previous_status,
+        project_context=project_context,
+        refinement_kind=refinement_kind,
+        hint_file_path=file_path,
+    )
 
 
 def _job_metadata(job_db: Any, job_id: str) -> dict:
@@ -555,8 +622,16 @@ def _run_project_wide_refinement(
     previous_status: str = "completed",
     project_context: str = "",
     refinement_kind: Optional[str] = None,
+    hint_file_path: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Run project-wide refinement: filter candidates, batch edit when ≤5 files."""
+    """Run project-wide refinement: filter candidates, batch edit when ≤5 files.
+
+    hint_file_path: the file the user had open in the UI when they chose
+    "Whole project" scope. Not a hard restriction — the refinement still
+    considers the whole project — but it's guaranteed to be included among
+    the candidates since the user was almost certainly looking at it for a
+    reason.
+    """
     progress_callback("refining", 12, "Scanning project files...")
     all_source_files = _discover_source_files(workspace_path)
     if not all_source_files:
@@ -564,6 +639,8 @@ def _run_project_wide_refinement(
                                 "No source files found in the workspace.", previous_status)
 
     source_files = _candidate_files_from_prompt(prompt, all_source_files, workspace_path)
+    if hint_file_path and hint_file_path in all_source_files and hint_file_path not in source_files:
+        source_files = [hint_file_path] + source_files
     total = len(source_files)
     logger.info(
         "Project-wide scope: %d/%d candidate files: %s",
@@ -730,12 +807,14 @@ def _create_github_pr(workspace_path: Path, job_id: str, prompt: str, job_db) ->
     """Push a new branch and open a GitHub PR for the refinement changes.
 
     Returns the PR URL on success, or None if skipped / failed.
-    Requires GITHUB_TOKEN in environment and a git remote named 'origin' pointing to GitHub.
+    Requires a GitHub token (user's Settings PAT, or env GITHUB_TOKEN as fallback)
+    and a git remote named 'origin' pointing to GitHub.
     """
     import re as _re
-    token = os.getenv("GITHUB_TOKEN", "").strip()
+    from crew_studio.github_client import resolve_github_token
+    token = resolve_github_token(job_db, job_id)
     if not token:
-        logger.warning("GITHUB_TOKEN not set — skipping PR creation")
+        logger.warning("No GitHub token available (Settings or GITHUB_TOKEN) — skipping PR creation")
         return None
 
     try:
