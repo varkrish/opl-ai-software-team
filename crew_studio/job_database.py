@@ -162,6 +162,20 @@ class JobDatabase:
             conn.execute("CREATE INDEX IF NOT EXISTS idx_llm_usage_job ON llm_usage(job_id)")
 
             conn.execute("""
+                CREATE TABLE IF NOT EXISTS tool_usage (
+                    id TEXT PRIMARY KEY,
+                    job_id TEXT NOT NULL,
+                    agent_name TEXT,
+                    tool_name TEXT NOT NULL,
+                    duration_ms REAL DEFAULT 0.0,
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY (job_id) REFERENCES jobs(id)
+                )
+            """)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_tool_usage_job ON tool_usage(job_id)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_tool_usage_name ON tool_usage(tool_name)")
+
+            conn.execute("""
                 CREATE TABLE IF NOT EXISTS validation_issues (
                     id TEXT PRIMARY KEY,
                     job_id TEXT NOT NULL,
@@ -667,16 +681,19 @@ class JobDatabase:
                 {where}
             """, params)
             row = cursor.fetchone()
-            return {
-                'total_jobs': row['total'] or 0,
-                'completed': row['completed'] or 0,
-                'running': row['running'] or 0,
-                'failed': row['failed'] or 0,
-                'quota_exhausted': row['quota_exhausted'] or 0,
-                'queued': row['queued'] or 0,
-                'total_cost': row['total_cost'] or 0.0,
-                'total_tokens': row['total_tokens'] or 0
-            }
+        tool_stats = self.get_tool_stats(owner_id=owner_id, team_ids=team_ids, is_admin=is_admin)
+        return {
+            'total_jobs': row['total'] or 0,
+            'completed': row['completed'] or 0,
+            'running': row['running'] or 0,
+            'failed': row['failed'] or 0,
+            'quota_exhausted': row['quota_exhausted'] or 0,
+            'queued': row['queued'] or 0,
+            'total_cost': row['total_cost'] or 0.0,
+            'total_tokens': row['total_tokens'] or 0,
+            'total_tool_calls': tool_stats['total_tool_calls'],
+            'top_tools': tool_stats['top_tools'],
+        }
     
     # ── Document Methods ───────────────────────────────────────────────────────
 
@@ -957,6 +974,65 @@ class JobDatabase:
         with self._get_conn() as conn:
             rows = conn.execute("SELECT * FROM llm_usage WHERE job_id = ? ORDER BY created_at", (job_id,)).fetchall()
             return [dict(r) for r in rows]
+
+    # ── Tool Usage ────────────────────────────────────────────────────────────
+
+    def record_tool_usage(self, job_id: str, agent_name: str, tool_name: str, duration_ms: float = 0.0) -> str:
+        """Record a single tool call invocation for a job."""
+        import uuid
+        now = datetime.now().isoformat()
+        usage_id = str(uuid.uuid4())
+        with self._get_conn() as conn:
+            conn.execute("""
+                INSERT INTO tool_usage (id, job_id, agent_name, tool_name, duration_ms, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, (usage_id, job_id, agent_name, tool_name, duration_ms, now))
+        return usage_id
+
+    def get_tool_usage(self, job_id: str) -> List[Dict[str, Any]]:
+        """Get all tool usage records for a job."""
+        with self._get_conn() as conn:
+            rows = conn.execute(
+                "SELECT * FROM tool_usage WHERE job_id = ? ORDER BY created_at",
+                (job_id,)
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def get_tool_stats(
+        self,
+        owner_id: Optional[str] = None,
+        team_ids: Optional[List[str]] = None,
+        is_admin: bool = False,
+        top_n: int = 8,
+    ) -> Dict[str, Any]:
+        """Return total tool call count and top-N tools by call frequency."""
+        where, params = self._build_where(owner_id=owner_id, team_ids=team_ids, is_admin=is_admin)
+        job_filter = (
+            f"WHERE job_id IN (SELECT id FROM jobs {where})"
+            if where.strip()
+            else ""
+        )
+        with self._get_conn() as conn:
+            total_row = conn.execute(
+                f"SELECT COUNT(*) as cnt FROM tool_usage {job_filter}", params
+            ).fetchone()
+            top_rows = conn.execute(
+                f"""
+                SELECT tool_name, COUNT(*) as cnt, AVG(duration_ms) as avg_ms
+                FROM tool_usage {job_filter}
+                GROUP BY tool_name
+                ORDER BY cnt DESC
+                LIMIT ?
+                """,
+                params + [top_n],
+            ).fetchall()
+        return {
+            "total_tool_calls": total_row["cnt"] if total_row else 0,
+            "top_tools": [
+                {"name": r["tool_name"], "count": r["cnt"], "avg_ms": round(r["avg_ms"] or 0, 1)}
+                for r in top_rows
+            ],
+        }
 
     # ── Refactor Tasks ───────────────────────────────────────────
 

@@ -142,3 +142,11 @@ generation:
   simple_mode_large_file_tech_stack_chars: 24000
   simple_mode_large_file_user_stories_chars: 6000
   simple_mode_large_file_related_chars: 16384
+
+  # Workflow-side tldr context for simple mode (requires llm-tldr in PATH).
+  # Pre-computes structure/search/impact output and injects it into the
+  # single-shot file-generation prompt so weak models have codebase context.
+  simple_mode_tldr_enabled: true          # master switch (disable if tldr not installed)
+  simple_mode_tldr_max_chars: 6000        # total injected chars (structure + search + impact)
+  simple_mode_tldr_include_structure: true # include 'tldr structure' (cached per job)
+  simple_mode_tldr_min_completed_files: 1  # skip until at least N files completed (0 = always)

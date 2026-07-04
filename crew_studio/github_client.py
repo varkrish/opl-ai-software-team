@@ -1,8 +1,9 @@
-"""GitHub REST API helpers for per-user repo search and authenticated clone."""
+"""GitHub REST API helpers for per-user repo search, authenticated clone, and push."""
 
 from __future__ import annotations
 
 import logging
+import os
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse, urlunparse
 
@@ -99,3 +100,26 @@ def github_host_from_url(url: str) -> Optional[str]:
     if parsed.scheme not in ("http", "https") or not parsed.netloc:
         return None
     return parsed.netloc.lower()
+
+
+def resolve_github_token(job_db: Any, job_id: str) -> Optional[str]:
+    """Resolve the GitHub token to use for a job's git operations (clone/pull/push).
+
+    Preference order:
+    1. The job owner's Settings-configured personal access token (per-user, encrypted at rest).
+    2. The server-wide ``GITHUB_TOKEN`` environment variable (fallback for jobs with no
+       owner, or when the owner has not connected GitHub in Settings).
+    """
+    try:
+        job = job_db.get_job(job_id)
+    except Exception:
+        job = None
+    owner_id = job.get("owner_id") if job else None
+    if owner_id:
+        try:
+            cfg = job_db.get_github_config(owner_id)
+        except Exception:
+            cfg = None
+        if cfg and cfg.get("token"):
+            return cfg["token"]
+    return os.getenv("GITHUB_TOKEN", "").strip() or None

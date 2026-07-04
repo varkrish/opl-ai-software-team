@@ -9,6 +9,12 @@ Helper:  detect_tldr_lang(workspace_path) -> Optional[str]
          append_tldr_tools(tools, workspace_path, lang=None) -> list
 Graph:   read_call_graph(workspace_path) -> list[dict]
          format_call_graph_delta(edges, story_key) -> str
+
+Workflow helpers (simple mode):
+  run_tldr(args) -> str               public alias of the subprocess runner
+  _workspace_has_indexable_source(ws) private helper
+  _extract_search_terms(fp, task)     private helper
+  prefetch_tldr_context(...)          pre-compute tldr context for prompt injection
 """
 from __future__ import annotations
 
@@ -18,7 +24,7 @@ import shutil
 import subprocess
 from functools import partial
 from pathlib import Path
-from typing import List, Optional
+from typing import Any, List, Optional
 
 from llama_index.core.tools import FunctionTool
 
@@ -126,7 +132,7 @@ def detect_tldr_lang(workspace_path: Path) -> Optional[str]:
     return None
 
 
-def _run_tldr(args: list[str]) -> str:
+def run_tldr(args: list[str]) -> str:
     """Run tldr with the given argument list and return truncated stdout or an error string."""
     tldr_bin = shutil.which("tldr")
     if not tldr_bin:
@@ -152,6 +158,216 @@ def _run_tldr(args: list[str]) -> str:
         return "tldr is not installed or not in PATH. Install with: pip install llm-tldr"
     except Exception as e:
         return f"tldr failed: {e}"
+
+
+# Backward-compatibility alias — existing callers that reference _run_tldr keep working.
+_run_tldr = run_tldr
+
+
+# ── Source extensions considered "indexable" by tldr ─────────────────────────
+_INDEXABLE_EXTENSIONS = frozenset({
+    ".py", ".ts", ".tsx", ".js", ".jsx",
+    ".java", ".kt", ".kts",
+    ".go", ".rs", ".rb", ".cs", ".swift",
+    ".php", ".cpp", ".cc", ".cxx", ".c", ".h", ".hpp",
+    ".scala", ".ex", ".exs", ".lua",
+})
+
+# Directory names that contain test code (not indexable source)
+_TEST_DIR_NAMES = frozenset({"tests", "test", "__tests__", "spec", "specs"})
+
+# Stop-words excluded from search term extraction
+_SEARCH_STOP_WORDS = frozenset({
+    "a", "an", "the", "in", "of", "and", "to", "with", "is", "it",
+    "for", "on", "at", "by", "be", "as", "or", "do", "if", "not",
+    "use", "add", "get", "set", "new", "all", "any", "each", "make",
+    "that", "this", "from", "when", "then", "than", "also", "into",
+    "implement", "create", "build", "write", "update", "generate",
+    "function", "method", "class", "module", "file", "type",
+    "using", "with", "should", "must", "will", "has", "have",
+})
+
+
+def _workspace_has_indexable_source(workspace: Path) -> bool:
+    """Return True when workspace contains at least one non-test source file.
+
+    Used to gate tldr calls: no point running structure/search on an empty
+    workspace that hasn't generated any files yet.
+
+    Returns False for:
+    - Empty workspaces
+    - Workspaces that contain only test files (files in tests/ directories or
+      named test_*.py / *_test.py)
+    """
+    workspace = Path(workspace)
+    try:
+        for p in workspace.rglob("*"):
+            if not p.is_file():
+                continue
+            # Skip hidden/cache dirs
+            try:
+                rel_parts = p.relative_to(workspace).parts
+            except ValueError:
+                continue
+            if any(part in _SKIP_DIRS for part in rel_parts):
+                continue
+            # Skip files inside test directories
+            if any(part in _TEST_DIR_NAMES for part in rel_parts[:-1]):
+                continue
+            # Skip test files by name
+            name = p.name
+            if name.startswith("test_") or name.endswith("_test.py"):
+                continue
+            # Accept any known source extension
+            if p.suffix.lower() in _INDEXABLE_EXTENSIONS:
+                return True
+    except Exception as exc:
+        logger.debug("_workspace_has_indexable_source: scan failed: %s", exc)
+    return False
+
+
+def _extract_search_terms(file_path: str, task: Any) -> list[str]:
+    """Extract 1–3 search terms from the target file path stem + task description.
+
+    The path stem is always the primary term.  Additional terms come from the
+    task description after filtering stop-words and single-character tokens.
+    """
+    terms: list[str] = []
+
+    # Primary: path stem (e.g. "calculator" from "src/calculator/calculator.py")
+    stem = Path(file_path).stem
+    if len(stem) > 1 and stem.lower() not in _SEARCH_STOP_WORDS:
+        terms.append(stem)
+
+    # Secondary: meaningful words from task description
+    description = (getattr(task, "description", "") or "").lower()
+    for word in description.split():
+        word = word.strip(".,;:!?\"'()[]{}|")
+        if len(word) <= 1:
+            continue
+        if word in _SEARCH_STOP_WORDS:
+            continue
+        if word in {t.lower() for t in terms}:
+            continue
+        terms.append(word)
+        if len(terms) >= 3:
+            break
+
+    # Fallback: return the stem only when it has a meaningful length
+    if not terms and stem and len(stem) > 1:
+        terms.append(stem)
+
+    return terms[:3]
+
+
+def _is_useful_tldr_output(output: str) -> bool:
+    """Return True if the tldr output contains meaningful content (not an error string)."""
+    if not output or not output.strip():
+        return False
+    lower = output.strip().lower()
+    if lower.startswith("tldr"):
+        return False
+    if lower == "(no output)":
+        return False
+    return True
+
+
+def prefetch_tldr_context(
+    workspace_path: Path,
+    file_path: str,
+    task: Any,
+    completed_files: int,
+    lang: Optional[str],
+    structure_cache: dict,
+    config: Any,
+) -> str:
+    """Pre-compute tldr context for simple-mode file generation.
+
+    Mirrors the ``prefetch_skills()`` pattern: runs tldr subprocesses in the
+    workflow and returns a combined string for injection into ``build_file_prompt``.
+    No change to ReAct agents or their tool loops.
+
+    Gating (returns "" immediately):
+    - ``config.simple_mode_tldr_enabled`` is False
+    - tldr binary not in PATH
+    - workspace has no indexable source AND completed_files < min_threshold
+
+    Sections included (in order):
+    - ``structure`` — once per workspace, cached in ``structure_cache``
+    - ``search`` — once per term from ``_extract_search_terms``
+    - ``impact`` — only when the target file already exists on disk (brownfield)
+
+    The combined result is truncated to ``config.simple_mode_tldr_max_chars``
+    (default 6000 chars).
+    """
+    workspace_path = Path(workspace_path)
+
+    # Gate 1: config switch
+    enabled = getattr(config, "simple_mode_tldr_enabled", True) if config is not None else True
+    if not enabled:
+        return ""
+
+    # Gate 2: tldr must be available
+    if not shutil.which("tldr"):
+        logger.debug("prefetch_tldr_context: tldr not in PATH — skipping")
+        return ""
+
+    # Gate 3: workspace must have source files OR enough completed files
+    min_files = getattr(config, "simple_mode_tldr_min_completed_files", 1) if config else 1
+    has_source = _workspace_has_indexable_source(workspace_path)
+    if not has_source and completed_files < min_files:
+        logger.debug(
+            "prefetch_tldr_context: no indexable source (completed_files=%d < min=%d) — skipping",
+            completed_files, min_files,
+        )
+        return ""
+
+    max_chars: int = getattr(config, "simple_mode_tldr_max_chars", 6000) if config else 6000
+    include_structure: bool = getattr(config, "simple_mode_tldr_include_structure", True) if config else True
+    ws_str = str(workspace_path)
+
+    sections: list[str] = []
+
+    try:
+        # ── Structure (once per workspace, cached) ────────────────────────────
+        if include_structure:
+            cache_key = ws_str
+            if cache_key not in structure_cache:
+                args: list[str] = ["structure", ws_str]
+                if lang:
+                    args += ["--lang", lang]
+                structure_cache[cache_key] = run_tldr(args)
+            struct_out = structure_cache[ws_str]
+            if _is_useful_tldr_output(struct_out):
+                sections.append(struct_out)
+
+        # ── Search (per extracted term) ───────────────────────────────────────
+        terms = _extract_search_terms(file_path, task)
+        for term in terms:
+            search_out = run_tldr(["search", term, ws_str])
+            if _is_useful_tldr_output(search_out):
+                sections.append(search_out)
+
+        # ── Impact (only when target file already exists on disk) ─────────────
+        target_path = workspace_path / file_path
+        if target_path.exists() and terms:
+            symbol = terms[0]
+            impact_args: list[str] = ["impact", symbol, ws_str]
+            if lang:
+                impact_args += ["--lang", lang]
+            impact_out = run_tldr(impact_args)
+            if _is_useful_tldr_output(impact_out):
+                sections.append(impact_out)
+
+    except Exception as exc:
+        logger.warning("prefetch_tldr_context: unexpected error: %s", exc)
+        return ""
+
+    result = "\n\n".join(sections)
+    if len(result) > max_chars:
+        result = result[:max_chars]
+
+    return result
 
 
 def _code_search(pattern: str, context_lines: int = 3, *, workspace: str) -> str:
@@ -187,6 +403,112 @@ def _code_context(entry: str, depth: int = 2, *, workspace: str, lang: Optional[
     if lang:
         args += ["--lang", lang]
     return _run_tldr(args)
+
+
+# Workspace artifacts produced by the crew pipeline — not "existing product code".
+_SOLUTIONING_SKIP_NAMES = frozenset({
+    "agent_backstories.json",
+    "agent_prompts.json",
+    "apps.json",
+    "app.json",
+    "crew_errors.log",
+    "delivery_mode_triage.json",
+    "rag_index_manifest.json",
+    "skill_prefetch.json",
+    "smoke_test_container.log",
+    "solution_candidates.json",
+    "solution_spec.md",
+    "test_plan.md",
+    "validation_report.json",
+})
+_SOLUTIONING_SKIP_PREFIXES = (
+    "solution_critique_pass_",
+    "index_",
+    "state_",
+    "tasks_",
+)
+
+
+def _is_solutioning_artifact(rel_path: str) -> bool:
+    """Return True when *rel_path* is a crew-generated artifact, not product code."""
+    name = Path(rel_path).name
+    if name in _SOLUTIONING_SKIP_NAMES:
+        return True
+    return any(name.startswith(prefix) for prefix in _SOLUTIONING_SKIP_PREFIXES)
+
+
+def list_workspace_source_files(workspace_path: Path, *, max_files: int = 60) -> list[str]:
+    """List relative source/config paths in *workspace_path* for brownfield context."""
+    workspace_path = Path(workspace_path)
+    if not workspace_path.is_dir():
+        return []
+
+    paths: list[str] = []
+    try:
+        for p in sorted(workspace_path.rglob("*")):
+            if not p.is_file():
+                continue
+            try:
+                rel = p.relative_to(workspace_path).as_posix()
+            except ValueError:
+                continue
+            if any(part in _SKIP_DIRS for part in Path(rel).parts):
+                continue
+            if _is_solutioning_artifact(rel):
+                continue
+            if p.suffix.lower() in _INDEXABLE_EXTENSIONS or p.name in {
+                "package.json", "pyproject.toml", "requirements.txt", "pom.xml",
+                "build.gradle", "Dockerfile", "Containerfile", "README.md",
+            }:
+                paths.append(rel)
+            if len(paths) >= max_files:
+                break
+    except Exception as exc:
+        logger.debug("list_workspace_source_files: scan failed: %s", exc)
+    return paths
+
+
+def build_solutioning_codebase_context(
+    workspace_path: Path,
+    *,
+    max_chars: int = 6000,
+    max_files: int = 60,
+) -> str:
+    """Build brownfield context for solutioning agents (file list + optional tldr structure).
+
+    Returns an empty string when the workspace has no meaningful existing code.
+    """
+    workspace_path = Path(workspace_path)
+    source_files = list_workspace_source_files(workspace_path, max_files=max_files)
+    if not source_files and not _workspace_has_indexable_source(workspace_path):
+        return ""
+
+    parts: list[str] = ["EXISTING CODEBASE (brownfield — account for this in your solution):"]
+    if source_files:
+        parts.append("Existing project files:")
+        parts.append(", ".join(source_files))
+
+    if _workspace_has_indexable_source(workspace_path) and shutil.which("tldr"):
+        lang = detect_tldr_lang(workspace_path)
+        args: list[str] = ["structure", str(workspace_path)]
+        if lang:
+            args += ["--lang", lang]
+        struct_out = run_tldr(args)
+        if _is_useful_tldr_output(struct_out):
+            parts.append("Codebase structure (tldr):")
+            parts.append(struct_out)
+
+    result = "\n".join(parts).strip()
+    if len(result) > max_chars:
+        result = result[:max_chars] + f"\n... (truncated to {max_chars} chars)"
+    return result
+
+
+_TLDR_AGENT_BACKSTORY = (
+    "\n\nYou have code_search, code_structure, code_context, and code_impact tools. "
+    "When the workspace contains existing code, use code_structure (and code_search as needed) "
+    "to understand what is already built before proposing architectural changes."
+)
 
 
 def _code_impact(func: str, depth: int = 3, *, workspace: str, lang: Optional[str]) -> str:

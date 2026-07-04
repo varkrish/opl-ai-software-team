@@ -408,6 +408,13 @@ def _run_import_analysis_impl(
     except Exception as e:
         logger.warning("DocumentIndexer during import: %s", e)
 
+    progress_callback("import_analyzing", 80, "Building code graph (tldr warm)...")
+    try:
+        from llamaindex_crew.tools.tldr_tools import run_tldr
+        run_tldr(["warm", str(workspace_path), "--lang", "all"])
+    except Exception as e:
+        logger.warning("tldr warm during import: %s", e)
+
     progress_callback("import_analyzing", 100, "Import analysis complete.")
 
     import json as _runner_json

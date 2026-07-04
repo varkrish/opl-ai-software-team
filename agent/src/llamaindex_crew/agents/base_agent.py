@@ -2,7 +2,10 @@
 Base agent class for LlamaIndex agents
 Provides common functionality for all agents including budget tracking and tool integration
 """
+import asyncio
+import inspect
 import logging
+import time
 import nest_asyncio
 from typing import List, Optional, Callable, Any, Dict
 from llama_index.core.agent import ReActAgent
@@ -131,13 +134,58 @@ IMPORTANT: Only use the tools provided to you. If no tools are needed, provide a
 """
 
         agent = ReActAgent.from_tools(
-            tools=self.tools,
+            tools=self._instrumented_tools(),
             llm=self.llm,
             verbose=self.verbose,
             max_iterations=50, # Increased to allow for more complex multi-file tasks
             system_prompt=agent_context
         )
         return agent
+
+    def _instrumented_tools(self) -> List[FunctionTool]:
+        """Return tools wrapped with per-call stats recording."""
+        return [self._wrap_tool_with_stats(t) for t in self.tools]
+
+    def _wrap_tool_with_stats(self, tool: FunctionTool) -> FunctionTool:
+        """Wrap a FunctionTool so each call is recorded in tool_usage."""
+        tracker = self.budget_tracker
+        agent_name = self.role
+        tool_name = tool.metadata.name
+        original_fn = tool._fn  # type: ignore[attr-defined]
+
+        def _record(duration_ms: float) -> None:
+            try:
+                job_id = tracker.project_id
+                if job_id and job_id != "default-project" and getattr(tracker, "job_db", None):
+                    tracker.job_db.record_tool_usage(
+                        job_id=job_id,
+                        agent_name=agent_name,
+                        tool_name=tool_name,
+                        duration_ms=duration_ms,
+                    )
+            except Exception:
+                pass
+
+        if asyncio.iscoroutinefunction(original_fn):
+            async def async_tracked(*args: Any, **kwargs: Any) -> Any:
+                t0 = time.monotonic()
+                result = await original_fn(*args, **kwargs)
+                _record((time.monotonic() - t0) * 1000)
+                return result
+            tracked_fn: Any = async_tracked
+        else:
+            def sync_tracked(*args: Any, **kwargs: Any) -> Any:
+                t0 = time.monotonic()
+                result = original_fn(*args, **kwargs)
+                _record((time.monotonic() - t0) * 1000)
+                return result
+            tracked_fn = sync_tracked
+
+        return FunctionTool.from_defaults(
+            fn=tracked_fn,
+            name=tool_name,
+            description=tool.metadata.description or "",
+        )
     
     def _build_system_prompt(self) -> str:
         """Build system prompt from role, goal, and backstory"""

@@ -135,6 +135,7 @@ _REFINEMENT_PHASES = frozenset({'refining'})
 _SKIP_PHASES = frozenset({
     'awaiting_migration', 'awaiting_refactor', 'awaiting_import',
     'awaiting_refinement', 'pending_approval', 'pending_review',
+    'pending_solution_review',
 })
 
 
@@ -181,7 +182,7 @@ def resume_pending_jobs(override_job_db=None):
             continue
 
         # Skip jobs waiting for explicit user trigger
-        if phase in _SKIP_PHASES or status in ("pending_approval", "pending_review"):
+        if phase in _SKIP_PHASES or status in ("pending_approval", "pending_review", "pending_solution_review"):
             continue
 
         # Migration / refactor / import analysis in progress → mark interrupted (no checkpoint resume)
@@ -366,18 +367,18 @@ def _run_job_async_impl(job_id: str, vision: str, job_config: SecretConfig = Non
             resume=resume,
         )
 
-        if results.get("status") in ("pending_approval", "pending_review"):
+        if results.get("status") in ("pending_approval", "pending_review", "pending_solution_review"):
             pause_status = results["status"]
+            progress_default = 25 if pause_status == "pending_solution_review" else 45
             job_db.update_job(job_id, {
                 "status": pause_status,
                 "current_phase": pause_status,
-                "progress": results.get("progress", 45),
+                "progress": results.get("progress", progress_default),
             })
             logger.info(
-                "Job %s paused for human review (status=%s, stories_planned=%s)",
+                "Job %s paused awaiting human input (status=%s)",
                 job_id,
                 pause_status,
-                results.get("epic_stories_planned", 0),
             )
             return
 
@@ -413,7 +414,16 @@ def _run_job_async_impl(job_id: str, vision: str, job_config: SecretConfig = Non
                 failed_issues = job_db.get_failed_validation_issues(job_id)
                 error_parts.append(f"Code validation: {len(failed_issues)} unresolved issue(s)")
             job_db.mark_failed(job_id, ". ".join(error_parts))
-        
+
+        if task_ok:
+            try:
+                _push_build_to_github(job_id, job_workspace, job_db)
+            except Exception as push_err:
+                logger.warning(
+                    "Post-build GitHub push step raised (non-fatal) for job %s: %s",
+                    job_id, push_err,
+                )
+
     except Exception as e:
         error_message = str(e)
         error_trace = traceback.format_exc()
@@ -893,9 +903,7 @@ def _clone_github_repo(github_url: str, target_dir: Path, job_id: str) -> Option
 
     Returns dict with metadata or None on failure.
     """
-    import os
-
-    from crew_studio.github_client import authenticated_clone_url
+    from crew_studio.github_client import authenticated_clone_url, resolve_github_token
     from llamaindex_crew.tools.git_tools import clone_repository_into_directory
 
     clean_url = github_url.strip().rstrip('/')
@@ -904,15 +912,7 @@ def _clone_github_repo(github_url: str, target_dir: Path, job_id: str) -> Option
 
     clone_url = clean_url
     if _is_github_url(clean_url):
-        token = None
-        job = job_db.get_job(job_id)
-        owner_id = job.get("owner_id") if job else None
-        if owner_id:
-            cfg = job_db.get_github_config(owner_id)
-            if cfg:
-                token = cfg.get("token")
-        if not token:
-            token = os.getenv("GITHUB_TOKEN", "").strip() or None
+        token = resolve_github_token(job_db, job_id)
         if token:
             git_url = clean_url if clean_url.endswith(".git") else f"{clean_url}.git"
             clone_url = authenticated_clone_url(git_url, token)
@@ -929,6 +929,122 @@ def _clone_github_repo(github_url: str, target_dir: Path, job_id: str) -> Option
 
     logger.warning("Git clone failed for %s: %s", clean_url, result_msg)
     return None
+
+
+def _push_build_to_github(job_id: str, job_workspace: Path, job_db) -> Optional[str]:
+    """After a successful greenfield build, commit and push the generated project to GitHub.
+
+    Uses the job owner's Settings PAT (or env GITHUB_TOKEN fallback) via
+    ``resolve_github_token``. If the workspace has no git remote yet, a new
+    (private) repository is created on GitHub — named from job metadata
+    ``target_repo_name`` if the user provided one, otherwise derived from the
+    project vision. Non-fatal: any failure is logged and returns None so the
+    job's completion is unaffected.
+    """
+    from crew_studio.github_client import resolve_github_token
+    token = resolve_github_token(job_db, job_id)
+    if not token:
+        logger.debug("No GitHub token available for job %s — skipping post-build push", job_id)
+        return None
+
+    try:
+        import git
+    except ImportError:
+        logger.warning("gitpython not installed; skipping post-build push")
+        return None
+
+    job = job_db.get_job(job_id)
+    if not job:
+        return None
+    raw_meta = job.get("metadata")
+    if isinstance(raw_meta, dict):
+        meta = dict(raw_meta)
+    elif isinstance(raw_meta, str):
+        try:
+            meta = json.loads(raw_meta)
+        except (json.JSONDecodeError, TypeError):
+            meta = {}
+    else:
+        meta = {}
+
+    try:
+        from crew_studio.workspace_publish import (
+            collect_publishable_files,
+            stage_publishable_files,
+            suggest_github_repo_name,
+        )
+
+        job_workspace = Path(job_workspace)
+        publishable = collect_publishable_files(job_workspace)
+        if not publishable:
+            logger.warning("No publishable files for job %s — skipping GitHub push", job_id)
+            return None
+
+        if not (job_workspace / ".git").exists():
+            repo = git.Repo.init(job_workspace)
+            gitignore = job_workspace / ".gitignore"
+            if not gitignore.exists():
+                gitignore.write_text(
+                    "__pycache__/\n*.pyc\n.pytest_cache/\n.coverage\nhtmlcov/\n.env\n"
+                    "node_modules/\ndist/\nbuild/\n.tldr/\n.crew_state.json\n"
+                    "crew_errors.log\nstate_*.json\ntasks_*.db\n",
+                    encoding="utf-8",
+                )
+        else:
+            repo = git.Repo(job_workspace)
+
+        git_name = os.getenv("GITHUB_USER_NAME", "Crew AI").strip() or "Crew AI"
+        git_email = os.getenv("GITHUB_USER_EMAIL", "crew-ai@noreply.github.com").strip() or "crew-ai@noreply.github.com"
+        actor = git.Actor(git_name, git_email)
+        staged = stage_publishable_files(repo, job_workspace, publishable)
+        if staged == 0:
+            logger.warning("Nothing staged for GitHub push (job %s)", job_id)
+            return None
+        repo.index.commit("crew-ai: initial generated project", author=actor, committer=actor)
+
+        from llamaindex_crew.utils.git_remote_auth import (
+            create_github_repo, parse_github_slug, push_with_token,
+        )
+
+        if repo.remotes:
+            repo_url = repo.remote("origin").url
+        else:
+            repo_name = (meta.get("target_repo_name") or "").strip()
+            if not repo_name:
+                repo_name = suggest_github_repo_name(
+                    job.get("vision", "") or "",
+                    job_id,
+                    config=config,
+                )
+            clone_url = create_github_repo(token, repo_name, private=True)
+            if not clone_url:
+                logger.warning("Failed to create GitHub repo (name=%r) for job %s", repo_name, job_id)
+                return None
+            repo.create_remote("origin", clone_url)
+            repo_url = clone_url
+
+        try:
+            branch_name = repo.active_branch.name
+        except (TypeError, ValueError):
+            branch_name = "main"
+
+        push_result = push_with_token(repo, remote_name="origin", branch_name=branch_name, token=token)
+        if not push_result.success:
+            logger.warning("Post-build push failed for job %s: %s", job_id, push_result.message)
+            return None
+
+        html_url = repo_url
+        slug = parse_github_slug(repo_url)
+        if slug:
+            html_url = f"https://github.com/{slug}"
+
+        meta["github_repo_url"] = html_url
+        job_db.update_job(job_id, {"metadata": json.dumps(meta)})
+        logger.info("Pushed generated project for job %s to %s", job_id, html_url)
+        return html_url
+    except Exception as e:
+        logger.warning("Post-build GitHub push failed (non-fatal) for job %s: %s", job_id, e)
+        return None
 
 
 ALLOWED_EXTENSIONS = {
@@ -1099,6 +1215,9 @@ def create_job():
         auto_approve_val = request.form.get('auto_approve_plan')
         if auto_approve_val is not None:
             metadata['auto_approve_plan'] = auto_approve_val.lower() == 'true'
+        target_repo_name = request.form.get('target_repo_name', '').strip()
+        if target_repo_name:
+            metadata['target_repo_name'] = target_repo_name
     else:
         data = request.json or {}
         vision = data.get('vision', '')
@@ -1109,6 +1228,9 @@ def create_job():
         metadata = data.get('metadata', {})
         if 'auto_approve_plan' in data:
             metadata['auto_approve_plan'] = bool(data['auto_approve_plan'])
+        target_repo_name = str(data.get('target_repo_name', '') or '').strip()
+        if target_repo_name:
+            metadata['target_repo_name'] = target_repo_name
     
     # Validate backend
     try:
@@ -1820,27 +1942,10 @@ def _resolve_job_workspace(job_id: str, stored_path: str) -> Optional[Path]:
     return None
 
 
-# Files/dirs to exclude from project download (internal agent/crew artifacts)
-_DOWNLOAD_EXCLUDE_NAMES = frozenset({
-    'agent_prompts.json',
-    'agents_prompt.json',
-    'crew_errors.log',
-})
-_DOWNLOAD_EXCLUDE_PATTERNS = ('state_*.json', 'tasks_*.db')
-
-
 def _should_exclude_from_download(rel_path_str: str, name: str) -> bool:
     """Return True if this path should be omitted from the download ZIP."""
-    if name in _DOWNLOAD_EXCLUDE_NAMES:
-        return True
-    for pattern in _DOWNLOAD_EXCLUDE_PATTERNS:
-        if fnmatch.fnmatch(name, pattern):
-            return True
-    # Skip .git directory and its contents
-    parts = rel_path_str.replace('\\', '/').split('/')
-    if '.git' in parts:
-        return True
-    return False
+    from crew_studio.workspace_publish import should_exclude_from_publish
+    return should_exclude_from_publish(rel_path_str, name)
 
 
 @app.route('/api/jobs/<job_id>/download', methods=['GET'])

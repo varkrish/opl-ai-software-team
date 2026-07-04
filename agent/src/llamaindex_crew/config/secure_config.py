@@ -197,6 +197,40 @@ class GenerationConfig(BaseModel):
         ),
     )
 
+    # ── Simple-mode tldr context injection ───────────────────────────────────
+    simple_mode_tldr_enabled: bool = Field(
+        True,
+        description=(
+            "When True (default), pre-compute tldr structure/search/impact output "
+            "and inject it into the single-shot prompt for simple-mode file generation. "
+            "Set to False to disable (e.g. for very small models or environments "
+            "without the tldr binary)."
+        ),
+    )
+    simple_mode_tldr_max_chars: int = Field(
+        6000,
+        description=(
+            "Maximum total characters of tldr output injected per file prompt. "
+            "Combined structure + search + impact sections are truncated to this limit."
+        ),
+    )
+    simple_mode_tldr_include_structure: bool = Field(
+        True,
+        description=(
+            "When True (default), include a 'tldr structure' section in the injected "
+            "context. The output is cached per workspace so it is computed only once "
+            "per job regardless of how many files are generated."
+        ),
+    )
+    simple_mode_tldr_min_completed_files: int = Field(
+        1,
+        description=(
+            "Skip tldr context injection until at least this many source files "
+            "have been completed in the current job. "
+            "Set to 0 to always try (even on the very first file)."
+        ),
+    )
+
 
 class PlanReviewConfig(BaseModel):
     """Plan review gate configuration"""

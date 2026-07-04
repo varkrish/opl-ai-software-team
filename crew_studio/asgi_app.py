@@ -792,6 +792,59 @@ async def list_backends(user: CurrentUser = Depends(get_current_user)):
         ]}
 
 
+@app.get("/api/jobs/{job_id}/tool-stats")
+async def get_job_tool_stats(job_id: str, user: CurrentUser = Depends(get_current_user)):
+    """Return aggregated tool call statistics for a single job."""
+    job = job_db.get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    if not user.is_admin:
+        has_access = (
+            (job.get("owner_id") == user.user_id) or
+            (job.get("team_id") and job.get("team_id").lstrip("/") in user.teams)
+        )
+        if not has_access:
+            raise HTTPException(status_code=404, detail="Job not found")
+
+    rows = job_db.get_tool_usage(job_id)
+
+    # Aggregate per-tool stats
+    tool_counts: dict = {}
+    tool_duration_ms: dict = {}
+    agent_counts: dict = {}
+    for row in rows:
+        name = row.get("tool_name", "unknown")
+        tool_counts[name] = tool_counts.get(name, 0) + 1
+        tool_duration_ms.setdefault(name, [])
+        if row.get("duration_ms") is not None:
+            tool_duration_ms[name].append(row["duration_ms"])
+        agent = row.get("agent_name") or "unknown"
+        agent_counts[agent] = agent_counts.get(agent, 0) + 1
+
+    by_tool = sorted(
+        [
+            {
+                "name": n,
+                "count": c,
+                "avg_ms": round(sum(tool_duration_ms[n]) / len(tool_duration_ms[n]), 1)
+                if tool_duration_ms.get(n) else 0,
+            }
+            for n, c in tool_counts.items()
+        ],
+        key=lambda x: x["count"],
+        reverse=True,
+    )
+
+    by_agent = sorted(
+        [{"agent_name": a, "count": c} for a, c in agent_counts.items()],
+        key=lambda x: x["count"],
+        reverse=True,
+    )
+
+    return {"total": len(rows), "by_tool": by_tool, "by_agent": by_agent}
+
+
 @app.get("/api/stats")
 async def stats(user: CurrentUser = Depends(get_current_user)):
     return job_db.get_stats(owner_id=user.user_id, team_ids=user.teams, is_admin=user.is_admin)
