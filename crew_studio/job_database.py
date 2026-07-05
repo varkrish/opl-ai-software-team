@@ -362,6 +362,23 @@ class JobDatabase:
                         (model_pattern, context_window, input_price_per_1m, output_price_per_1m, updated_at)
                     VALUES (?, ?, ?, ?, ?)
                 """, (pattern, window, in_price, out_price, now))
+
+            # Per-user dynamic MCP tool configurations
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS mcp_configs (
+                    owner_id TEXT NOT NULL,
+                    server_name TEXT NOT NULL,
+                    target_agent TEXT DEFAULT 'global',
+                    transport_type TEXT NOT NULL,
+                    command TEXT,
+                    args TEXT,
+                    url TEXT,
+                    env TEXT,
+                    tools TEXT,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (owner_id, server_name)
+                )
+            """)
     
     def create_job(self, job_id: str, vision: str, workspace_path: str,
                    metadata: Optional[Dict[str, Any]] = None,
@@ -1592,6 +1609,87 @@ class JobDatabase:
         with self._get_conn() as conn:
             cursor = conn.execute(
                 "DELETE FROM user_workflow_configs WHERE owner_id = ?", (owner_id,)
+            )
+        return cursor.rowcount > 0
+
+    # ------------------------------------------------------------------
+    # MCP configurations - per-user dynamic server configurations
+    # ------------------------------------------------------------------
+
+    def save_mcp_config(self, owner_id: str, server_name: str, target_agent: str,
+                        transport_type: str, command: Optional[str] = None,
+                        args: Optional[List[str]] = None, url: Optional[str] = None,
+                        env: Optional[Dict[str, str]] = None,
+                        tools: Optional[List[str]] = None) -> None:
+        """Upsert an MCP config in mcp_configs."""
+        now = datetime.now().isoformat()
+        args_str = json.dumps(args or [])
+        env_str = json.dumps(env or {})
+        tools_str = json.dumps(tools or [])
+        with self._get_conn() as conn:
+            conn.execute("""
+                INSERT INTO mcp_configs (
+                    owner_id, server_name, target_agent, transport_type,
+                    command, args, url, env, tools, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(owner_id, server_name) DO UPDATE SET
+                    target_agent = excluded.target_agent,
+                    transport_type = excluded.transport_type,
+                    command = excluded.command,
+                    args = excluded.args,
+                    url = excluded.url,
+                    env = excluded.env,
+                    tools = excluded.tools,
+                    updated_at = excluded.updated_at
+            """, (owner_id, server_name, target_agent, transport_type,
+                  command, args_str, url, env_str, tools_str, now))
+
+    def get_mcp_configs(self, owner_id: str) -> List[Dict[str, Any]]:
+        """Retrieve all MCP configs for owner_id."""
+        if not owner_id:
+            return []
+        with self._get_conn() as conn:
+            rows = conn.execute(
+                "SELECT server_name, target_agent, transport_type, command, args, url, env, tools, updated_at "
+                "FROM mcp_configs WHERE owner_id = ? "
+                "ORDER BY server_name ASC",
+                (owner_id,)
+            ).fetchall()
+            
+            result = []
+            for row in rows:
+                try:
+                    args_parsed = json.loads(row["args"]) if row["args"] else []
+                except Exception:
+                    args_parsed = []
+                try:
+                    env_parsed = json.loads(row["env"]) if row["env"] else {}
+                except Exception:
+                    env_parsed = {}
+                try:
+                    tools_parsed = json.loads(row["tools"]) if row["tools"] else []
+                except Exception:
+                    tools_parsed = []
+                    
+                result.append({
+                    "server_name": row["server_name"],
+                    "target_agent": row["target_agent"],
+                    "transport_type": row["transport_type"],
+                    "command": row["command"],
+                    "args": args_parsed,
+                    "url": row["url"],
+                    "env": env_parsed,
+                    "tools": tools_parsed,
+                    "updated_at": row["updated_at"],
+                })
+            return result
+
+    def delete_mcp_config(self, owner_id: str, server_name: str) -> bool:
+        """Remove a stored MCP config. Returns True if a row was deleted."""
+        with self._get_conn() as conn:
+            cursor = conn.execute(
+                "DELETE FROM mcp_configs WHERE owner_id = ? AND server_name = ?",
+                (owner_id, server_name)
             )
         return cursor.rowcount > 0
 
