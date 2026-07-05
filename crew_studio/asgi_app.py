@@ -1275,6 +1275,86 @@ async def delete_workflow_config(user: CurrentUser = Depends(get_current_user)):
 
 
 # ---------------------------------------------------------------------------
+# MCP configuration endpoints
+# ---------------------------------------------------------------------------
+
+class McpConfigRequest(BaseModel):
+    server_name: str
+    target_agent: Optional[str] = "global"
+    transport_type: str  # "stdio" or "sse"
+    command: Optional[str] = None
+    args: Optional[List[str]] = []
+    url: Optional[str] = None
+    env: Optional[Dict[str, str]] = {}
+    tools: Optional[List[str]] = []
+
+
+class McpConfigResponse(BaseModel):
+    server_name: str
+    target_agent: str
+    transport_type: str
+    command: Optional[str]
+    args: List[str]
+    url: Optional[str]
+    env: Dict[str, str]
+    tools: List[str]
+    updated_at: str
+
+
+@app.get("/api/mcp/configs", response_model=List[McpConfigResponse])
+async def get_mcp_configs(user: CurrentUser = Depends(get_current_user)):
+    """Return all dynamic MCP configs for the current user."""
+    configs = job_db.get_mcp_configs(user.user_id)
+    return configs
+
+
+@app.post("/api/mcp/configs", status_code=201)
+async def save_mcp_config(
+    body: McpConfigRequest,
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Save or update an MCP configuration for the current user."""
+    if not user.user_id:
+        raise HTTPException(status_code=401, detail="Authenticated user has no identity")
+        
+    if body.transport_type not in ("stdio", "sse"):
+        raise HTTPException(status_code=400, detail="transport_type must be either 'stdio' or 'sse'")
+        
+    if body.transport_type == "stdio" and not body.command:
+        raise HTTPException(status_code=400, detail="command is required for stdio transport")
+        
+    if body.transport_type == "sse" and not body.url:
+        raise HTTPException(status_code=400, detail="url is required for sse transport")
+        
+    job_db.save_mcp_config(
+        owner_id=user.user_id,
+        server_name=body.server_name.strip(),
+        target_agent=body.target_agent.strip() if body.target_agent else "global",
+        transport_type=body.transport_type,
+        command=body.command,
+        args=body.args,
+        url=body.url,
+        env=body.env,
+        tools=body.tools,
+    )
+    return {"saved": True}
+
+
+@app.delete("/api/mcp/configs/{server_name}", status_code=200)
+async def delete_mcp_config(
+    server_name: str,
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Remove a configured MCP server."""
+    if not user.user_id:
+        raise HTTPException(status_code=401, detail="Authenticated user has no identity")
+    deleted = job_db.delete_mcp_config(user.user_id, server_name)
+    if not deleted:
+        raise HTTPException(status_code=404, detail=f"MCP config '{server_name}' not found")
+    return {"deleted": True}
+
+
+# ---------------------------------------------------------------------------
 # LLM configuration endpoints
 # ---------------------------------------------------------------------------
 

@@ -69,10 +69,50 @@ def merge_workflow_prefs_into_config(config: Any, prefs: Optional[Dict[str, Any]
 
 
 def config_for_job_owner(config: Any, job_db: Any, owner_id: Optional[str]) -> Any:
-    """Load owner workflow prefs from job_db and merge into config."""
-    if not config or not job_db or not owner_id:
+    """Load owner workflow prefs and dynamic MCP tools from job_db and merge into config."""
+    if not config:
         return config
-    prefs = job_db.get_workflow_config(owner_id)
-    if not prefs:
-        return config
-    return merge_workflow_prefs_into_config(config, prefs)
+
+    merged_config = config
+
+    if job_db and owner_id:
+        # 1. Merge workflow preferences
+        prefs = job_db.get_workflow_config(owner_id)
+        if prefs:
+            merged_config = merge_workflow_prefs_into_config(merged_config, prefs)
+
+        # 2. Merge dynamic MCP configurations
+        mcp_configs = job_db.get_mcp_configs(owner_id)
+        if mcp_configs:
+            from src.llamaindex_crew.config.secure_config import McpToolEntry
+
+            global_tools = list(merged_config.tools.global_tools)
+            agent_tools = {k: list(v) for k, v in merged_config.tools.agent_tools.items()}
+
+            for mcp in mcp_configs:
+                entry = McpToolEntry(
+                    type="mcp",
+                    server_name=mcp["server_name"],
+                    command=mcp.get("command"),
+                    args=mcp.get("args") or [],
+                    url=mcp.get("url"),
+                    env=mcp.get("env") or {},
+                    tools=mcp.get("tools") or [],
+                )
+
+                target = mcp.get("target_agent", "global") or "global"
+                if target == "global":
+                    if not any(getattr(t, "server_name", None) == entry.server_name for t in global_tools):
+                        global_tools.append(entry)
+                else:
+                    if target not in agent_tools:
+                        agent_tools[target] = []
+                    if not any(getattr(t, "server_name", None) == entry.server_name for t in agent_tools[target]):
+                        agent_tools[target].append(entry)
+
+            tools_config = merged_config.tools.model_copy(
+                update={"global_tools": global_tools, "agent_tools": agent_tools}
+            )
+            merged_config = merged_config.model_copy(update={"tools": tools_config})
+
+    return merged_config
