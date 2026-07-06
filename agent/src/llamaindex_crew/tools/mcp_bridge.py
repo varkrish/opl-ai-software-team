@@ -7,7 +7,125 @@ Tool names are prefixed with ``mcp_{server_name}_`` to avoid collisions.
 import asyncio
 import logging
 import os
+import urllib.parse
 from typing import Any, Dict, List, Optional
+
+# ---------------------------------------------------------------------------
+# Environment scrubbing
+# ---------------------------------------------------------------------------
+
+# Substrings that must never appear in env var keys passed to MCP subprocesses.
+# Checked case-insensitively as a substring match (not just prefix) so that
+# keys like MY_TOKEN or DB_PASSWORD are caught as well as TOKEN or PASSWORD.
+_BLOCKED_ENV_PREFIXES = (
+    "api_key",
+    "apikey",
+    "secret",
+    "password",
+    "passwd",
+    "token",
+    "credential",
+    "keycloak",
+    "jwt",
+    "auth_",
+    "aws_",
+    "azure_",
+    "gcp_",
+    "google_api",
+)
+
+# Benign runtime vars that are safe to inherit (PATH, locale, home, etc.)
+_ALLOWED_ENV_KEYS = frozenset({
+    "PATH",
+    "HOME",
+    "USER",
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    "TERM",
+    "TMPDIR",
+    "TMP",
+    "TEMP",
+    "XDG_RUNTIME_DIR",
+    "NODE_PATH",
+    "PYTHONPATH",
+    "VIRTUAL_ENV",
+    "npm_config_cache",
+})
+
+
+def _safe_env(user_env: Dict[str, str]) -> Dict[str, str]:
+    """Build a scrubbed env for stdio MCP subprocesses.
+
+    Policy:
+    - Start from an empty base (no implicit os.environ inheritance).
+    - Allow a small set of safe runtime vars from the host.
+    - Block anything matching known secret/credential key patterns.
+    - Merge in the user-supplied env last (they can add what their
+      server genuinely needs, but cannot override blocked keys).
+    """
+    base: Dict[str, str] = {}
+
+    for key, val in os.environ.items():
+        key_lower = key.lower()
+        if any(sub in key_lower for sub in _BLOCKED_ENV_PREFIXES):
+            continue
+        if key in _ALLOWED_ENV_KEYS:
+            base[key] = val
+
+    # User-supplied env: apply after base but still block secret key names
+    for key, val in user_env.items():
+        key_lower = key.lower()
+        if any(sub in key_lower for sub in _BLOCKED_ENV_PREFIXES):
+            logger.warning(
+                "MCP env scrub: blocked user-supplied key '%s' (matches secret pattern)",
+                key,
+            )
+            continue
+        base[key] = val
+
+    return base
+
+
+# ---------------------------------------------------------------------------
+# SSE URL validation
+# ---------------------------------------------------------------------------
+
+_PRIVATE_PREFIXES = (
+    "169.254.",  # link-local
+    "10.",
+    "192.168.",
+)
+_PRIVATE_RANGES_172 = range(16, 32)  # 172.16–172.31
+
+
+def _validate_sse_url(url: str) -> None:
+    """Reject SSE URLs that would allow SSRF to private/internal endpoints."""
+    try:
+        parsed = urllib.parse.urlparse(url)
+    except Exception as exc:
+        raise ValueError(f"MCP SSE URL is invalid: {exc}") from exc
+
+    if parsed.scheme not in ("http", "https"):
+        raise ValueError(
+            f"MCP SSE URL scheme '{parsed.scheme}' is not allowed (use http or https)"
+        )
+
+    hostname = parsed.hostname or ""
+    if hostname in ("localhost", "127.0.0.1", "::1", "0.0.0.0"):
+        raise ValueError(
+            f"MCP SSE URL hostname '{hostname}' is not allowed (loopback address)"
+        )
+    if any(hostname.startswith(p) for p in _PRIVATE_PREFIXES):
+        raise ValueError(
+            f"MCP SSE URL hostname '{hostname}' is not allowed (private address range)"
+        )
+    if hostname.startswith("172."):
+        parts = hostname.split(".")
+        if len(parts) >= 2 and parts[1].isdigit() and int(parts[1]) in _PRIVATE_RANGES_172:
+            raise ValueError(
+                f"MCP SSE URL hostname '{hostname}' is not allowed (private address range)"
+            )
 
 from pydantic import create_model
 from llama_index.core.tools import FunctionTool
@@ -106,10 +224,17 @@ class McpBridge:
         from mcp.client.stdio import stdio_client
         from mcp import ClientSession
 
+        safe = _safe_env(self.entry.env or {})
+        logger.debug(
+            "MCP stdio '%s': scrubbed env has %d keys (user supplied %d)",
+            self.entry.server_name,
+            len(safe),
+            len(self.entry.env or {}),
+        )
         params = StdioServerParameters(
             command=self.entry.command,
             args=self.entry.args,
-            env={**os.environ, **self.entry.env},
+            env=safe,
         )
         read, write = await stdio_client(params).__aenter__()
         self._session = ClientSession(read, write)
@@ -120,6 +245,8 @@ class McpBridge:
         from mcp.client.sse import sse_client
         from mcp import ClientSession
 
+        _validate_sse_url(self.entry.url)
+        logger.debug("MCP SSE '%s': connecting to %s", self.entry.server_name, self.entry.url)
         read, write = await sse_client(self.entry.url).__aenter__()
         self._session = ClientSession(read, write)
         await self._session.__aenter__()

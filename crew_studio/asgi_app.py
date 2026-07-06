@@ -1319,13 +1319,33 @@ async def save_mcp_config(
         
     if body.transport_type not in ("stdio", "sse"):
         raise HTTPException(status_code=400, detail="transport_type must be either 'stdio' or 'sse'")
-        
+
     if body.transport_type == "stdio" and not body.command:
         raise HTTPException(status_code=400, detail="command is required for stdio transport")
-        
+
     if body.transport_type == "sse" and not body.url:
         raise HTTPException(status_code=400, detail="url is required for sse transport")
-        
+
+    # Validate SSE URL at save time to reject SSRF targets early
+    if body.transport_type == "sse":
+        try:
+            from src.llamaindex_crew.tools.mcp_bridge import _validate_sse_url
+            _validate_sse_url(body.url)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+
+    # Reject env keys that contain known secret substrings
+    from src.llamaindex_crew.tools.mcp_bridge import _BLOCKED_ENV_PREFIXES
+    blocked_keys = [
+        k for k in (body.env or {})
+        if any(sub in k.lower() for sub in _BLOCKED_ENV_PREFIXES)
+    ]
+    if blocked_keys:
+        raise HTTPException(
+            status_code=400,
+            detail=f"env contains blocked key(s): {', '.join(blocked_keys)}"
+        )
+
     job_db.save_mcp_config(
         owner_id=user.user_id,
         server_name=body.server_name.strip(),
