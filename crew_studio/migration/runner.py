@@ -297,9 +297,10 @@ def run_migration(
     progress_callback: Optional[Callable] = None,
 ) -> None:
     from src.llamaindex_crew.config import ConfigLoader
-    from src.llamaindex_crew.utils.llm_config import user_llm_context
+    from src.llamaindex_crew.utils.llm_config import user_llm_context, ensure_llm_api_key
     fallback_config = ConfigLoader.load()
-    with user_llm_context(job_id, job_db, fallback_config):
+    with user_llm_context(job_id, job_db, fallback_config) as active_config:
+        ensure_llm_api_key(active_config)
         return _run_migration_impl(
             job_id=job_id,
             workspace_path=workspace_path,
@@ -634,9 +635,10 @@ def run_migration_retry(
     progress_callback: Optional[Callable] = None,
 ) -> None:
     from src.llamaindex_crew.config import ConfigLoader
-    from src.llamaindex_crew.utils.llm_config import user_llm_context
+    from src.llamaindex_crew.utils.llm_config import user_llm_context, ensure_llm_api_key
     fallback_config = ConfigLoader.load()
-    with user_llm_context(job_id, job_db, fallback_config):
+    with user_llm_context(job_id, job_db, fallback_config) as active_config:
+        ensure_llm_api_key(active_config)
         return _run_migration_retry_impl(
             job_id=job_id,
             workspace_path=workspace_path,

@@ -602,17 +602,18 @@ async def refine_plan(job_id: str, body: RefinePlanRequest, user: CurrentUser = 
         from pathlib import Path as _Path
         from src.llamaindex_crew.workflows.software_dev_workflow import SoftwareDevWorkflow
         from src.llamaindex_crew.tools.file_tools import set_thread_workspace
-        from src.llamaindex_crew.utils.llm_config import user_llm_context
+        from src.llamaindex_crew.utils.llm_config import user_llm_context, ensure_llm_api_key
 
         workspace = _Path(job["workspace_path"])
         set_thread_workspace(str(workspace))
         cfg = _config_for_job(job_id)
-        with user_llm_context(job_id, job_db, cfg):
+        with user_llm_context(job_id, job_db, cfg) as active_config:
+            ensure_llm_api_key(active_config)
             workflow = SoftwareDevWorkflow(
                 project_id=job_id,
                 workspace_path=workspace,
                 vision=job.get("vision", ""),
-                config=cfg,
+                config=active_config,
                 progress_callback=lambda phase, prog, msg=None: job_db.update_progress(job_id, phase, prog, msg),
                 job_db=job_db,
             )
@@ -753,17 +754,18 @@ async def refine_solution(job_id: str, body: RefineSolutionRequest, user: Curren
         from pathlib import Path as _Path
         from src.llamaindex_crew.workflows.software_dev_workflow import SoftwareDevWorkflow
         from src.llamaindex_crew.tools.file_tools import set_thread_workspace
-        from src.llamaindex_crew.utils.llm_config import user_llm_context
+        from src.llamaindex_crew.utils.llm_config import user_llm_context, ensure_llm_api_key
 
         workspace = _Path(job["workspace_path"])
         set_thread_workspace(str(workspace))
         cfg = _config_for_job(job_id)
-        with user_llm_context(job_id, job_db, cfg):
+        with user_llm_context(job_id, job_db, cfg) as active_config:
+            ensure_llm_api_key(active_config)
             workflow = SoftwareDevWorkflow(
                 project_id=job_id,
                 workspace_path=workspace,
                 vision=job.get("vision", ""),
-                config=cfg,
+                config=active_config,
                 progress_callback=lambda phase, prog, msg=None: job_db.update_progress(job_id, phase, prog, msg),
                 job_db=job_db,
             )

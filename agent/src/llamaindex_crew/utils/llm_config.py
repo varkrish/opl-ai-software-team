@@ -19,6 +19,41 @@ from .prompt_budget import trim_text, estimate_tokens
 
 logger = logging.getLogger(__name__)
 
+
+class MissingLLMAPIKeyError(ValueError):
+    """Raised when a job would call a remote LLM without a usable API key."""
+
+
+def ensure_llm_api_key(config: SecretConfig) -> None:
+    """Fail fast if remote LLM credentials are missing.
+
+    Local/Ollama mode does not require an API key. Remote providers do —
+    an empty key produces ``Authorization: Bearer `` which httpx rejects as
+    ``Illegal header value b'Bearer '``.
+    """
+    if config is None:
+        raise MissingLLMAPIKeyError(
+            "No LLM configuration loaded. Set llm.api_key in ~/.crew-ai/config.yaml "
+            "or save a key in Settings → API Configuration, then restart the job."
+        )
+    if (config.llm.environment or "").lower() == "local":
+        return
+    key = (config.llm.api_key or "").strip() if isinstance(config.llm.api_key, str) else ""
+    if not key:
+        raise MissingLLMAPIKeyError(
+            "No LLM API key configured. Set llm.api_key in ~/.crew-ai/config.yaml "
+            "or save a key in Settings → API Configuration, then restart the job."
+        )
+
+
+def _normalize_api_key(api_key: Any) -> str:
+    if api_key is None:
+        return ""
+    if isinstance(api_key, bytes):
+        api_key = api_key.decode("utf-8", errors="replace")
+    return str(api_key).strip()
+
+
 # ---------------------------------------------------------------------------
 # ReAct capability inference
 # ---------------------------------------------------------------------------
@@ -400,8 +435,13 @@ class GenericLlamaLLM(LLM):
         headers = {
             "Content-Type": "application/json"
         }
-        if self.api_key:
-            headers["Authorization"] = f"Bearer {self.api_key}"
+        api_key = _normalize_api_key(self.api_key)
+        if not api_key:
+            raise MissingLLMAPIKeyError(
+                "No LLM API key configured. Set llm.api_key in ~/.crew-ai/config.yaml "
+                "or save a key in Settings → API Configuration, then restart the job."
+            )
+        headers["Authorization"] = f"Bearer {api_key}"
         
         _PAYLOAD_EXCLUDE_KEYS = {
             "num_beams", "tools", "tool_choice",
@@ -638,8 +678,13 @@ class GenericLlamaLLM(LLM):
         headers = {
             "Content-Type": "application/json"
         }
-        if self.api_key:
-            headers["Authorization"] = f"Bearer {self.api_key}"
+        api_key = _normalize_api_key(self.api_key)
+        if not api_key:
+            raise MissingLLMAPIKeyError(
+                "No LLM API key configured. Set llm.api_key in ~/.crew-ai/config.yaml "
+                "or save a key in Settings → API Configuration, then restart the job."
+            )
+        headers["Authorization"] = f"Bearer {api_key}"
         formatted_messages = self._format_messages_for_api(messages)
         api_kwargs = {k: v for k, v in kwargs.items() if k not in ["num_beams"]}
         payload = {
@@ -683,8 +728,13 @@ class GenericLlamaLLM(LLM):
         headers = {
             "Content-Type": "application/json"
         }
-        if self.api_key:
-            headers["Authorization"] = f"Bearer {self.api_key}"
+        api_key = _normalize_api_key(self.api_key)
+        if not api_key:
+            raise MissingLLMAPIKeyError(
+                "No LLM API key configured. Set llm.api_key in ~/.crew-ai/config.yaml "
+                "or save a key in Settings → API Configuration, then restart the job."
+            )
+        headers["Authorization"] = f"Bearer {api_key}"
         
         payload = {
             "model": self.model,
@@ -747,8 +797,13 @@ class GenericLlamaLLM(LLM):
         headers = {
             "Content-Type": "application/json"
         }
-        if self.api_key:
-            headers["Authorization"] = f"Bearer {self.api_key}"
+        api_key = _normalize_api_key(self.api_key)
+        if not api_key:
+            raise MissingLLMAPIKeyError(
+                "No LLM API key configured. Set llm.api_key in ~/.crew-ai/config.yaml "
+                "or save a key in Settings → API Configuration, then restart the job."
+            )
+        headers["Authorization"] = f"Bearer {api_key}"
         
         payload = {
             "model": self.model,
@@ -803,15 +858,19 @@ def clear_thread_config() -> None:
 
 @contextmanager
 def user_llm_context(job_id: str, job_db: Any, fallback_config: SecretConfig):
-    """Resolves and merges user-specific LLM config for the job owner, scoping it to this thread."""
+    """Resolves and merges user-specific LLM config for the job owner, scoping it to this thread.
+
+    Empty or undecryptable BYOK keys are ignored so they never wipe the server fallback.
+    """
     job = job_db.get_job(job_id)
     owner_id = job.get("owner_id") if job else None
     if owner_id:
         user_llm = job_db.get_llm_config(owner_id)
-        if user_llm:
+        user_key = _normalize_api_key(user_llm.get("api_key") if user_llm else None)
+        if user_llm and user_key:
             from copy import deepcopy
             merged = deepcopy(fallback_config)
-            merged.llm.api_key = user_llm["api_key"]
+            merged.llm.api_key = user_key
             merged.llm.api_base_url = user_llm["api_base_url"]
             merged.llm.model_manager = user_llm["model_manager"]
             merged.llm.model_worker = user_llm["model_worker"]
@@ -822,6 +881,11 @@ def user_llm_context(job_id: str, job_db: Any, fallback_config: SecretConfig):
             finally:
                 clear_thread_config()
             return
+        if user_llm and not user_key:
+            logger.warning(
+                "User LLM config for owner %s has an empty API key; using server config",
+                owner_id,
+            )
 
     set_thread_config(fallback_config)
     try:

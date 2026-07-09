@@ -273,9 +273,14 @@ def run_job_async(job_id: str, vision: str, job_config: SecretConfig = None, res
     """Run workflow in a separate thread with job-specific workspace"""
     if job_config is None:
         job_config = config
-    from src.llamaindex_crew.utils.llm_config import user_llm_context
-    with user_llm_context(job_id, job_db, job_config):
-        return _run_job_async_impl(job_id, vision, job_config, resume)
+    from src.llamaindex_crew.utils.llm_config import user_llm_context, ensure_llm_api_key
+    with user_llm_context(job_id, job_db, job_config) as active_config:
+        try:
+            ensure_llm_api_key(active_config)
+        except Exception as e:
+            job_db.mark_failed(job_id, str(e))
+            return
+        return _run_job_async_impl(job_id, vision, active_config, resume)
 
 
 def _run_job_async_impl(job_id: str, vision: str, job_config: SecretConfig = None, resume: bool = False):

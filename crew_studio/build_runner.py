@@ -74,6 +74,8 @@ def run_build_pipeline(
         )
 
         progress_callback("initializing", 5, "Initializing workflow...")
+        from src.llamaindex_crew.utils.llm_config import ensure_llm_api_key
+        ensure_llm_api_key(config)
         workflow = SoftwareDevWorkflow(
             project_id=job_id,
             workspace_path=workspace_path,
