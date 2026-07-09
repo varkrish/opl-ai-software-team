@@ -1509,7 +1509,10 @@ class JobDatabase:
         try:
             api_key = f.decrypt(row["encrypted_key"].encode()).decode()
         except Exception:
-            api_key = ""
+            # Corrupt/undecryptable key must not overwrite the server fallback with "".
+            return None
+        if not (api_key or "").strip():
+            return None
         return {
             "api_base_url": row["api_base_url"],
             "api_key": api_key,

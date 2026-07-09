@@ -71,14 +71,15 @@ def run_refactor_job(
     progress_callback: Optional[Callable] = None,
 ) -> Dict[str, Any]:
     from src.llamaindex_crew.config import ConfigLoader
-    from src.llamaindex_crew.utils.llm_config import user_llm_context
+    from src.llamaindex_crew.utils.llm_config import user_llm_context, ensure_llm_api_key
     fallback_config = ConfigLoader.load()
     if job_db:
         ctx = user_llm_context(job_id, job_db, fallback_config)
     else:
         from contextlib import nullcontext
         ctx = nullcontext(fallback_config)
-    with ctx:
+    with ctx as active_config:
+        ensure_llm_api_key(active_config)
         return _run_refactor_job_impl(
             job_id=job_id,
             workspace_path=workspace_path,

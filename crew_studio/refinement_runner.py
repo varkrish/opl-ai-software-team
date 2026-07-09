@@ -259,9 +259,10 @@ def run_refinement(
     refinement_kind: Optional[str] = None,
 ) -> Dict[str, Any]:
     from src.llamaindex_crew.config import ConfigLoader
-    from src.llamaindex_crew.utils.llm_config import user_llm_context
+    from src.llamaindex_crew.utils.llm_config import user_llm_context, ensure_llm_api_key
     fallback_config = ConfigLoader.load()
-    with user_llm_context(job_id, job_db, fallback_config):
+    with user_llm_context(job_id, job_db, fallback_config) as active_config:
+        ensure_llm_api_key(active_config)
         return _run_refinement_impl(
             job_id=job_id,
             workspace_path=workspace_path,

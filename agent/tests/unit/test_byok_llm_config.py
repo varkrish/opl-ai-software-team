@@ -171,6 +171,78 @@ class TestBYOKThreadLocalAndContext(unittest.TestCase):
             llm = get_llm_for_agent("worker")
             self.assertEqual(llm.api_key, "server-default-key")
 
+    def test_user_llm_context_ignores_empty_byok_key(self):
+        """Empty BYOK api_key must not overwrite the server fallback key."""
+        from src.llamaindex_crew.utils.llm_config import user_llm_context, get_llm_for_agent
+
+        owner_id = "user-empty"
+        self.db.create_job(
+            job_id="job-empty",
+            vision="Test",
+            workspace_path="/tmp/null",
+            owner_id=owner_id,
+        )
+        self.db.save_llm_config(
+            owner_id=owner_id,
+            api_base_url="https://user.url/v1",
+            api_key="placeholder",
+            model_manager="user-manager",
+            model_worker="user-worker",
+            model_reviewer="user-reviewer",
+        )
+        # Simulate corrupt/empty decrypt by patching get_llm_config
+        empty_cfg = {
+            "api_base_url": "https://user.url/v1",
+            "api_key": "",
+            "model_manager": "user-manager",
+            "model_worker": "user-worker",
+            "model_reviewer": "user-reviewer",
+            "updated_at": "now",
+        }
+        with patch.object(self.db, "get_llm_config", return_value=empty_cfg):
+            with user_llm_context("job-empty", self.db, self.mock_fallback) as active_config:
+                self.assertEqual(active_config.llm.api_key, "server-default-key")
+                llm = get_llm_for_agent("worker")
+                self.assertEqual(llm.api_key, "server-default-key")
+
+    def test_ensure_llm_api_key_fails_without_key(self):
+        from copy import deepcopy
+        from src.llamaindex_crew.utils.llm_config import (
+            ensure_llm_api_key,
+            MissingLLMAPIKeyError,
+        )
+
+        ensure_llm_api_key(self.mock_fallback)  # has a key — ok
+
+        empty = deepcopy(self.mock_fallback)
+        empty.llm.api_key = ""
+        with self.assertRaises(MissingLLMAPIKeyError):
+            ensure_llm_api_key(empty)
+
+        whitespace = deepcopy(self.mock_fallback)
+        whitespace.llm.api_key = "   "
+        with self.assertRaises(MissingLLMAPIKeyError):
+            ensure_llm_api_key(whitespace)
+
+        local = deepcopy(self.mock_fallback)
+        local.llm.api_key = ""
+        local.llm.environment = "local"
+        ensure_llm_api_key(local)  # local/Ollama — ok without key
+
+    def test_get_llm_config_returns_none_on_decrypt_failure(self):
+        owner_id = "user-bad"
+        self.db.save_llm_config(
+            owner_id=owner_id,
+            api_base_url="https://x/v1",
+            api_key="real-key",
+        )
+        with self.db._get_conn() as conn:
+            conn.execute(
+                "UPDATE user_llm_configs SET encrypted_key = ? WHERE owner_id = ?",
+                ("not-valid-fernet-ciphertext", owner_id),
+            )
+        self.assertIsNone(self.db.get_llm_config(owner_id))
+
 
 class TestBYOKApiEndpoints(unittest.TestCase):
     @classmethod
