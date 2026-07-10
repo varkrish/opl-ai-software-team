@@ -329,7 +329,7 @@ class TestBYOKApiEndpoints(unittest.TestCase):
         mock_llm_class.return_value = mock_llm_instance
 
         # Test success
-        mock_llm_instance.complete.return_value = MagicMock(text="OK")
+        mock_llm_instance.chat.return_value = MagicMock(message=MagicMock(content="OK"))
         payload = {
             "api_base_url": "https://test.com/v1",
             "api_key": "some-token"
@@ -339,7 +339,7 @@ class TestBYOKApiEndpoints(unittest.TestCase):
         self.assertTrue(resp.json()["ok"])
 
         # Test failure
-        mock_llm_instance.complete.side_effect = Exception("Auth failed")
+        mock_llm_instance.chat.side_effect = Exception("Auth failed")
         resp = self.client.post("/api/llm/test-connection", json=payload)
         self.assertEqual(resp.status_code, 200)
         self.assertFalse(resp.json()["ok"])
@@ -352,7 +352,7 @@ class TestBYOKApiEndpoints(unittest.TestCase):
         mock_llm_class.return_value = mock_llm_instance
 
         # Success case for all models
-        mock_llm_instance.complete.return_value = MagicMock(text="OK")
+        mock_llm_instance.chat.return_value = MagicMock(message=MagicMock(content="OK"))
         payload = {
             "api_base_url": "https://test.com/v1",
             "api_key": "some-token",
@@ -365,10 +365,10 @@ class TestBYOKApiEndpoints(unittest.TestCase):
         self.assertTrue(resp.json()["ok"])
 
         # Mocking individual model failure (say worker fails, others pass)
-        mock_llm_instance.complete.side_effect = [
-            MagicMock(text="OK"),  # manager
-            Exception("Model 2 not found"),  # worker
-            MagicMock(text="OK")   # reviewer
+        mock_llm_instance.chat.side_effect = [
+            MagicMock(message=MagicMock(content="OK")),  # manager
+            Exception("Model 2 not found"),              # worker
+            MagicMock(message=MagicMock(content="OK"))   # reviewer
         ]
         resp = self.client.post("/api/llm/test-connection", json=payload)
         self.assertEqual(resp.status_code, 200)
