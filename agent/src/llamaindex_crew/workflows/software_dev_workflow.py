@@ -465,6 +465,22 @@ class SoftwareDevWorkflow:
         sol_cfg = getattr(self.config, "solutioning", None) if self.config else None
         return bool(getattr(sol_cfg, "enabled", False))
 
+    def _enrich_project_context_for_solutioning(self) -> str:
+        """Return project_context enriched with an EXISTING CODEBASE section for brownfield jobs.
+
+        Falls back to plain project_context if the workspace is empty or tldr_tools
+        are unavailable so greenfield jobs are unaffected.
+        """
+        base = self.project_context or ""
+        try:
+            from ..tools.tldr_tools import build_solutioning_codebase_context
+            extra = build_solutioning_codebase_context(self.workspace_path)
+            if extra:
+                return f"{base}\n\n{extra}".strip()
+        except Exception:
+            pass
+        return base
+
     def _run_solutioning_loop(self):
         """Run research → architect → critique loop and persist artifacts."""
         from .solutioning_loop import run_solutioning_loop
@@ -487,7 +503,7 @@ class SoftwareDevWorkflow:
 
         result = run_solutioning_loop(
             vision=self.vision,
-            project_context=self.project_context or "",
+            project_context=self._enrich_project_context_for_solutioning(),
             workspace_path=self.workspace_path,
             config=self.config,
             budget_tracker=self.budget_tracker,
@@ -567,7 +583,7 @@ class SoftwareDevWorkflow:
             if prior.strip():
                 combined_feedback = f"{prior.strip()}\n\nLatest feedback:\n{feedback}"
 
-        architect.run(self.vision, self.project_context or "", candidates_json, feedback=combined_feedback)
+        architect.run(self.vision, self._enrich_project_context_for_solutioning(), candidates_json, feedback=combined_feedback)
         spec_path = self.workspace_path / "solution_spec.md"
         spec_content = spec_path.read_text(encoding="utf-8", errors="replace") if spec_path.exists() else ""
         critique_raw = critique_agent.run(self.vision, spec_content, candidates_json)
