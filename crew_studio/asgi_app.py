@@ -1434,7 +1434,7 @@ async def save_llm_config(
         if existing:
             api_key = existing["api_key"]
         else:
-            raise HTTPException(status_code=422, detail="Invalid API key format")
+            raise HTTPException(status_code=422, detail="API key is masked — please re-enter your full API key and save again")
 
     job_db.save_llm_config(
         owner_id=user.user_id,
