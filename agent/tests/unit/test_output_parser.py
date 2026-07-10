@@ -280,3 +280,50 @@ class TestDeepSeekTokenStripping:
         from llamaindex_crew.utils.output_parser import looks_like_raw_agent_dump
         assert looks_like_raw_agent_dump(_DS_COMMENTARY) is True
         assert looks_like_raw_agent_dump(_DS_TOOL_CALL) is True
+
+
+class TestSanitizeGherkin:
+    """sanitize_gherkin_content strips markdown wrappers from feature file content."""
+
+    def test_strips_gherkin_code_fence(self):
+        from llamaindex_crew.utils.output_parser import sanitize_gherkin_content
+        raw = (
+            "### 3.3 `features/responsive_layout.feature`\n\n"
+            "```gherkin\n"
+            "Feature: Responsive layout\n"
+            "  Scenario: Map scales\n"
+            "    Given the viewport is 320px\n"
+            "    Then the map adapts\n"
+            "```\n"
+        )
+        result = sanitize_gherkin_content(raw)
+        assert result.startswith("Feature:")
+        assert "```" not in result
+        assert "###" not in result
+
+    def test_strips_generic_code_fence(self):
+        from llamaindex_crew.utils.output_parser import sanitize_gherkin_content
+        raw = "```\nFeature: X\n  Scenario: Y\n    Given Z\n    Then W\n```"
+        result = sanitize_gherkin_content(raw)
+        assert result.startswith("Feature:")
+        assert "```" not in result
+
+    def test_plain_gherkin_unchanged(self):
+        from llamaindex_crew.utils.output_parser import sanitize_gherkin_content
+        plain = "Feature: Login\n  Scenario: Valid\n    Given I am on login\n    Then I log in"
+        assert sanitize_gherkin_content(plain) == plain
+
+    def test_sanitized_content_passes_validity_check(self):
+        from llamaindex_crew.utils.output_parser import sanitize_gherkin_content, is_valid_gherkin_feature
+        raw = (
+            "### 3.3 `features/offline.feature`\n\n"
+            "```gherkin\n"
+            "Feature: Offline availability\n"
+            "  Scenario: App works offline\n"
+            "    Given I have no network\n"
+            "    When I open the app\n"
+            "    Then I see cached content\n"
+            "```\n"
+        )
+        cleaned = sanitize_gherkin_content(raw)
+        assert is_valid_gherkin_feature(cleaned) is True

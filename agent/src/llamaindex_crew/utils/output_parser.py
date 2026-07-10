@@ -202,6 +202,33 @@ def product_owner_format_instruction() -> str:
     return _PRODUCT_OWNER_FORMAT_INSTRUCTION
 
 
+def sanitize_gherkin_content(content: str) -> str:
+    """Strip markdown wrappers from Gherkin content emitted by LLMs.
+
+    LLMs often wrap feature file content in markdown documentation with:
+    - Section headers like ``### 3.3 `features/foo.feature` ``
+    - Code fences: `` ```gherkin ... ``` ``
+
+    Extract the innermost Gherkin block when present; otherwise return
+    the original content unchanged so valid plain Gherkin is not mangled.
+    """
+    if not content:
+        return content
+    text = content.strip()
+    # Try to extract a gherkin (or generic) code fence
+    fence_match = re.search(
+        r"```(?:gherkin|cucumber)?\s*\n(.*?)```",
+        text,
+        re.DOTALL | re.IGNORECASE,
+    )
+    if fence_match:
+        inner = fence_match.group(1).strip()
+        # Only use the inner block if it looks like Gherkin
+        if re.search(r"^Feature:", inner, re.MULTILINE | re.IGNORECASE):
+            return inner
+    return text
+
+
 def is_valid_gherkin_feature(content: str, *, min_chars: int = 40) -> bool:
     """Return True if *content* looks like a real Gherkin feature file.
 
@@ -694,6 +721,8 @@ def write_files_from_response(
         for entry in entries:
             file_path = entry["file_path"]
             content = entry.get("content", "")
+            if file_path.endswith(".feature"):
+                content = sanitize_gherkin_content(content)
             if file_path.endswith(".feature") and not is_valid_gherkin_feature(content):
                 logger.warning(
                     "%sskipping invalid Gherkin for %r (%d chars)",
