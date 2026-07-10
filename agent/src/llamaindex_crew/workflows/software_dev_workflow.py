@@ -2819,6 +2819,7 @@ class SoftwareDevWorkflow:
             return
 
         MAX_FILE_RETRIES = 2
+        MAX_TRANSIENT_RETRIES = 3
         retry_prompt = None
         agent_simple = not getattr(agent, "supports_react", True)
         gen = self._generation_settings()
@@ -2834,7 +2835,9 @@ class SoftwareDevWorkflow:
             if skip_rag and is_likely_large_file(file_path):
                 skip_rag = False
 
-        for attempt in range(MAX_FILE_RETRIES + 1):
+        attempt = 0
+        transient_retries = 0
+        while attempt <= MAX_FILE_RETRIES:
             agent.agent.reset_chat()
 
             with lock:
@@ -2909,9 +2912,20 @@ class SoftwareDevWorkflow:
                     if agent_simple:
                         result_str += f"\n✅ Successfully wrote to {file_path}"
             except Exception as e:
+                if _is_transient_llm_error(e) and transient_retries < MAX_TRANSIENT_RETRIES:
+                    transient_retries += 1
+                    wait_secs = 30 * transient_retries
+                    logger.warning(
+                        "[%s] Task %s: transient error (task-retry %d/%d), retrying in %ds: %s",
+                        label, task.task_id, transient_retries, MAX_TRANSIENT_RETRIES, wait_secs, e,
+                    )
+                    time.sleep(wait_secs)
+                    continue  # retry same attempt, don't advance quality counter
                 logger.error("[%s] Task %s failed: %s", label, task.task_id, e)
                 self.task_manager.mark_task_executed(task.task_id, TaskStatus.FAILED, str(e))
                 return
+
+            transient_retries = 0  # reset on successful LLM call
 
             if not file_path:
                 self.task_manager.update_task_status(
@@ -2928,6 +2942,7 @@ class SoftwareDevWorkflow:
                         task.task_id, "skipped",
                         f"File {file_path} was not created by the agent",
                     )
+                attempt += 1
                 continue
 
             integration = CodeCompletenessValidator.validate_file_integration(
@@ -2987,6 +3002,7 @@ class SoftwareDevWorkflow:
                     + "\n".join(f"- {i}" for i in all_issues)
                     + f"\n\nPlease fix and rewrite `{file_path}` using file_writer."
                 )
+            attempt += 1
 
     def run_development_phase(self) -> str:
         """Run Development phase: iterate per-task, generating one file at a time.
