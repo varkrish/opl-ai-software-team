@@ -190,6 +190,12 @@ IMPORTANT: Only use the tools provided to you. If no tools are needed, provide a
                 return result
             tracked_fn = sync_tracked
 
+        # Preserve the original function's signature so LlamaIndex can correctly
+        # introspect parameters when building the tool's JSON schema.
+        # Without this, *args/**kwargs wrappers cause missing-argument errors.
+        import functools
+        functools.update_wrapper(tracked_fn, original_fn)
+
         return FunctionTool.from_defaults(
             fn=tracked_fn,
             name=tool_name,
