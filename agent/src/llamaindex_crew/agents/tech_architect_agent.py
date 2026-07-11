@@ -12,8 +12,32 @@ from ..tools.tool_loader import load_tools
 from ..config import ConfigLoader
 from ..utils.prompt_loader import load_prompt
 from ..utils.prompt_budget import PromptBudget
+from ..utils.vision_stack_analysis import (
+    build_stack_selection_brief,
+    extract_named_components,
+    format_approved_solution_contract,
+)
 
 logger = logging.getLogger(__name__)
+
+
+def _format_stack_manifest_section(workspace_path) -> str:
+    if not workspace_path:
+        return ""
+    try:
+        from ..workflows.solutioning_loop import read_stack_manifest
+        manifest = read_stack_manifest(workspace_path)
+    except Exception:
+        return ""
+    if not manifest:
+        return ""
+    import json
+    return (
+        "BINDING STACK MANIFEST (locked early — tech_stack.md MUST be consistent):\n"
+        f"{json.dumps(manifest, indent=2)}\n"
+        "Do NOT invent tiers listed in forbidden_tiers. "
+        "Produce tech_stack.md + implementation_plan.md within these constraints."
+    )
 
 
 class TechArchitectAgent:
@@ -76,100 +100,259 @@ You consider the project vision and constraints when making decisions."""
             verbose=True
         )
 
-    def define_tech_stack(
+    # ------------------------------------------------------------------
+    # Internal helpers shared by the three passes
+    # ------------------------------------------------------------------
+
+    def _prepare_context(
         self,
         design_spec: str,
         vision: str,
-        context_digest: Optional[str] = None,
-        reference_context: Optional[str] = None,
-    ) -> str:
-        """
-        Define technology stack based on design specification
-        
-        Args:
-            design_spec: Design specification content
-            vision: Project vision
-            context_digest: Optional Project Context Digest
-            reference_context: Optional RAG-retrieved reference excerpts
-        
-        Returns:
-            Result message
-        """
+        context_digest: Optional[str],
+        reference_context: Optional[str],
+        user_stories: Optional[str],
+        approved_solution: bool,
+        solution_spec: Optional[str],
+    ):
+        """Build the shared context dict used across passes."""
         skill_context = prefetch_skills(
             vision=vision,
             role="tech_architect",
             workspace_path=self.workspace_path,
         )
 
-        task_prompt = load_prompt(
-            'tech_architect/define_tech_stack_task.txt',
-            fallback=_DEFAULT_TECH_STACK_PROMPT,
+        stack_brief = build_stack_selection_brief(
+            vision or "",
+            user_stories or "",
+            approved_solution=approved_solution,
+        )
+        manifest_section = _format_stack_manifest_section(self.workspace_path)
+        if manifest_section:
+            stack_brief = f"{stack_brief}\n\n{manifest_section}"
+
+        if approved_solution and not (solution_spec or "").strip() and self.workspace_path:
+            spec_path = self.workspace_path / "solution_spec.md"
+            if spec_path.exists():
+                try:
+                    solution_spec = spec_path.read_text(encoding="utf-8", errors="replace")
+                except OSError:
+                    solution_spec = solution_spec or ""
+        solution_contract = (
+            format_approved_solution_contract(solution_spec or "")
+            if approved_solution
+            else ""
         )
 
-        # When no skill cleared the relevance threshold (e.g. the framework in the
-        # vision has no indexed skill — Camel, Angular, etc.), do NOT leave the
-        # "FRAMEWORK REFERENCE (GROUND TRUTH)" section blank. An empty section
-        # under a "you MUST follow this" heading is confusing; be explicit that
-        # there is no framework-specific reference and the model must rely on
-        # standard, well-known conventions for the requested technology instead.
         if not (skill_context or "").strip():
             skill_context = (
                 "(No indexed skill matched this project's technology closely enough to be "
-                "trustworthy — none was injected.) Use the well-established, standard "
-                "conventions for the EXACT technology named in the vision. Do NOT default to "
-                "a different framework's patterns (e.g. do NOT use Spring MVC-style "
-                "controllers/services for a framework that has no such concept, such as "
-                "Apache Camel route builders, event-driven systems, or ESB-style integration)."
+                "trustworthy — none was injected.) Infer the minimal appropriate stack from "
+                "the STACK SELECTION BRIEF and vision. Use standard conventions for the "
+                "chosen technology. Do NOT default to an unrelated application platform."
             )
 
-        # Fit sections into the model's context window; protect vision and design_spec first
+        return {
+            "design_spec": design_spec or "",
+            "context_digest": context_digest or "",
+            "vision": vision or "",
+            "skill_context": skill_context,
+            "stack_brief": stack_brief,
+            "solution_contract": solution_contract,
+            "solution_spec": solution_spec or "",
+            "reference_context": reference_context or "",
+            "approved_solution": approved_solution,
+        }
+
+    def _fit_and_format(self, ctx: dict, task_prompt: str) -> str:
+        """Trim context to fit the model's window, then format the prompt."""
         budget = PromptBudget.from_llm(self.agent.llm)
         sections = {
-            "design_spec":    design_spec or "",
-            "context_digest": context_digest or "",
-            "vision":         vision or "",
-            "skill_context":  skill_context,
+            "design_spec": ctx["design_spec"],
+            "context_digest": ctx["context_digest"],
+            "vision": ctx["vision"],
+            "skill_context": ctx["skill_context"],
+            "stack_brief": ctx["stack_brief"],
+            "solution_contract": ctx["solution_contract"],
         }
-        ref_overhead = len(reference_context) if reference_context and reference_context.strip() else 0
+        ref = ctx.get("reference_context", "")
+        ref_overhead = len(ref) if ref.strip() else 0
         fixed_overhead = len(task_prompt) + ref_overhead
-        trimmed = budget.fit(
-            sections,
-            fixed_overhead_chars=fixed_overhead,
-            priority=["vision", "design_spec", "context_digest", "skill_context"],
+        priority = (
+            ["solution_contract", "stack_brief", "design_spec", "vision", "context_digest", "skill_context"]
+            if ctx.get("approved_solution")
+            else ["vision", "stack_brief", "design_spec", "context_digest", "skill_context"]
         )
-
+        trimmed = budget.fit(sections, fixed_overhead_chars=fixed_overhead, priority=priority)
         prompt = task_prompt.format(**trimmed)
-        if reference_context and reference_context.strip():
+        if ref.strip():
             prompt = (
-                f"REFERENCE DOCUMENT EXCERPTS (retrieved — follow file structure and constraints):\n"
-                f"{reference_context.strip()}\n\n{prompt}"
+                f"REFERENCE DOCUMENT EXCERPTS (retrieved — follow constraints):\n"
+                f"{ref.strip()}\n\n{prompt}"
+            )
+        return prompt
+
+    @staticmethod
+    def _extract_and_write(response_text: str, path: Path, xml_tag: str) -> None:
+        """Extract content from <xml_tag>...</xml_tag> or fall back to full response."""
+        import re
+        match = re.search(rf'<{xml_tag}>\s*(.*?)\s*</{xml_tag}>', response_text, re.DOTALL)
+        if match:
+            path.write_text(match.group(1).strip(), encoding="utf-8")
+        elif not path.exists():
+            logger.warning("%s not found and <%s> tag missing. Writing full response.", path.name, xml_tag)
+            path.write_text(response_text, encoding="utf-8")
+
+    # ------------------------------------------------------------------
+    # Pass 1 — Stack selection (technologies + justification, ~short)
+    # ------------------------------------------------------------------
+
+    def _pass1_stack_selection(self, ctx: dict, stack_correction: Optional[str]) -> str:
+        prompt_template = _PASS1_STACK_SELECTION_PROMPT
+        prompt = self._fit_and_format(ctx, prompt_template)
+        if stack_correction:
+            prompt = f"{stack_correction.strip()}\n\n{prompt}"
+        self.agent.reset_chat()
+        logger.info("Tech Architect pass 1/3 — stack selection")
+        return str(self.agent.chat(prompt))
+
+    # ------------------------------------------------------------------
+    # Pass 2 — File tree (concrete filenames, ~medium)
+    # ------------------------------------------------------------------
+
+    def _pass2_file_tree(
+        self,
+        ctx: dict,
+        stack_decisions: str,
+        *,
+        correction: Optional[str] = None,
+    ) -> str:
+        components = extract_named_components(ctx.get("solution_spec", "")) or extract_named_components(
+            ctx["design_spec"]
+        )
+        component_section = ""
+        if components:
+            component_lines = "\n".join(f"- {name}" for name in components)
+            component_section = (
+                "NAMED COMPONENTS (each MUST have its own directory tree with "
+                f"concrete source files):\n{component_lines}\n"
             )
 
-        response = self.agent.chat(prompt)
-        response_text = str(response)
-        
-        # DeepSeek-R1 outputs the final files inside XML tags to avoid JSON serialization failures
-        # Extract them and write to disk
-        if self.workspace_path:
-            import re
-            tech_stack_path = self.workspace_path / "tech_stack.md"
-            impl_plan_path = self.workspace_path / "implementation_plan.md"
-            
-            tech_match = re.search(r'<tech_stack>\s*(.*?)\s*</tech_stack>', response_text, re.DOTALL)
-            if tech_match:
-                tech_stack_path.write_text(tech_match.group(1).strip())
-            elif not tech_stack_path.exists():
-                logger.warning("tech_stack.md not found and XML tags missing. Applying fallback.")
-                tech_stack_path.write_text(response_text)
-                
-            impl_match = re.search(r'<implementation_plan>\s*(.*?)\s*</implementation_plan>', response_text, re.DOTALL)
-            if impl_match:
-                impl_plan_path.write_text(impl_match.group(1).strip())
-            elif not impl_plan_path.exists():
-                logger.warning("implementation_plan.md not found and XML tags missing. Applying fallback.")
-                impl_plan_path.write_text(response_text)
+        prompt = _PASS2_FILE_TREE_PROMPT.format(
+            stack_decisions=stack_decisions,
+            design_spec=ctx["design_spec"][:6000],
+            skill_context=ctx["skill_context"][:3000],
+            solution_contract=(ctx.get("solution_contract") or "")[:4000],
+            component_section=component_section,
+        )
+        if correction:
+            prompt = f"{correction.strip()}\n\n{prompt}"
+        self.agent.reset_chat()
+        logger.info("Tech Architect pass 2/3 — file tree")
+        return str(self.agent.chat(prompt))
 
-        return response_text
+    def _validate_pass2_tree(self, ctx: dict, tree_content: str) -> list[str]:
+        """Run the same structural checks the workflow uses before development."""
+        from ..orchestrator.task_manager import TaskManager
+
+        combined = tree_content
+        db_path = str(self.workspace_path / "_tech_architect_validate.db") if self.workspace_path else ":memory:"
+        project_id = self.workspace_path.name.replace("job-", "") if self.workspace_path else "validate"
+        tm = TaskManager(db_path, project_id)
+        result = tm.validate_tech_stack_completeness(
+            combined,
+            design_spec=ctx.get("design_spec", ""),
+            solution_spec=ctx.get("solution_spec", ""),
+        )
+        return list(result.get("issues") or [])
+
+    # ------------------------------------------------------------------
+    # Pass 3 — Implementation plan (architecture, data flow, ~medium)
+    # ------------------------------------------------------------------
+
+    def _pass3_impl_plan(self, ctx: dict, stack_decisions: str) -> str:
+        prompt = _PASS3_IMPL_PLAN_PROMPT.format(
+            stack_decisions=stack_decisions,
+            design_spec=ctx["design_spec"][:6000],
+            vision=ctx["vision"],
+        )
+        self.agent.reset_chat()
+        logger.info("Tech Architect pass 3/3 — implementation plan")
+        return str(self.agent.chat(prompt))
+
+    # ------------------------------------------------------------------
+    # Main entry point — orchestrates all 3 passes
+    # ------------------------------------------------------------------
+
+    def define_tech_stack(
+        self,
+        design_spec: str,
+        vision: str,
+        context_digest: Optional[str] = None,
+        reference_context: Optional[str] = None,
+        user_stories: Optional[str] = None,
+        stack_correction: Optional[str] = None,
+        approved_solution: bool = False,
+        solution_spec: Optional[str] = None,
+    ) -> str:
+        """
+        Define technology stack in 3 focused LLM passes.
+
+        Pass 1: Stack selection — technologies + justification.
+        Pass 2: File tree — concrete filenames for every service.
+        Pass 3: Implementation plan — architecture, data flow, security.
+        """
+        ctx = self._prepare_context(
+            design_spec, vision, context_digest, reference_context,
+            user_stories, approved_solution, solution_spec,
+        )
+
+        # Pass 1 — stack choices
+        p1_response = self._pass1_stack_selection(ctx, stack_correction)
+
+        # Pass 2 — file tree → write tech_stack.md (retry until structurally complete)
+        p2_response = ""
+        pass2_issues: list[str] = []
+        max_pass2_attempts = 3
+        for attempt in range(max_pass2_attempts):
+            correction = None
+            if pass2_issues:
+                correction = (
+                    "Your previous file tree failed structural validation:\n"
+                    + "\n".join(f"- {i}" for i in pass2_issues)
+                )
+            p2_response = self._pass2_file_tree(ctx, p1_response, correction=correction)
+            pass2_issues = self._validate_pass2_tree(ctx, p2_response)
+            if not pass2_issues:
+                break
+            logger.warning(
+                "Tech Architect pass 2 attempt %d/%d failed validation: %s",
+                attempt + 1,
+                max_pass2_attempts,
+                pass2_issues,
+            )
+
+        if pass2_issues:
+            logger.error(
+                "Tech Architect pass 2 still incomplete after %d attempts: %s",
+                max_pass2_attempts,
+                pass2_issues,
+            )
+
+        tech_stack_body = (
+            f"# Technology Stack\n\n{p1_response.strip()}\n\n## File Structure\n\n{p2_response.strip()}"
+        )
+        if self.workspace_path:
+            tech_stack_path = self.workspace_path / "tech_stack.md"
+            tech_stack_path.write_text(tech_stack_body, encoding="utf-8")
+
+        # Pass 3 — implementation plan → write implementation_plan.md
+        p3_response = self._pass3_impl_plan(ctx, p1_response)
+        if self.workspace_path:
+            impl_plan_path = self.workspace_path / "implementation_plan.md"
+            self._extract_and_write(p3_response, impl_plan_path, "implementation_plan")
+
+        combined = f"{p1_response}\n\n{p2_response}\n\n{p3_response}"
+        return combined
     
     def generate_api_contract(
         self,
@@ -210,6 +393,10 @@ You consider the project vision and constraints when making decisions."""
         vision: str,
         context_digest: Optional[str] = None,
         reference_context: Optional[str] = None,
+        user_stories: Optional[str] = None,
+        stack_correction: Optional[str] = None,
+        approved_solution: bool = False,
+        solution_spec: Optional[str] = None,
     ) -> str:
         """
         Run the Tech Architect agent workflow
@@ -219,23 +406,34 @@ You consider the project vision and constraints when making decisions."""
             vision: Project vision
             context_digest: Optional Project Context Digest
             reference_context: Optional RAG-retrieved reference excerpts
+            user_stories: Optional user stories for capability inference
+            stack_correction: Optional correction message when a prior stack over-scoped
+            approved_solution: When True, solution_spec is binding (human reviewed)
+            solution_spec: Approved solution specification text
         
         Returns:
             Result message
         """
         return self.define_tech_stack(
-            design_spec, vision, context_digest, reference_context=reference_context,
+            design_spec,
+            vision,
+            context_digest,
+            reference_context=reference_context,
+            user_stories=user_stories,
+            stack_correction=stack_correction,
+            approved_solution=approved_solution,
+            solution_spec=solution_spec,
         )
 
 
-_DEFAULT_TECH_STACK_PROMPT = """\
-You are the Technical Architect. Define the concrete technology stack and the logical implementation plan for this project.
+_PASS1_STACK_SELECTION_PROMPT = """\
+You are the Technical Architect. This is PASS 1 of 3 — stack selection ONLY.
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-INPUTS
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+{stack_brief}
 
-Design Specification:
+{solution_contract}
+
+Design Specification (summary):
 {design_spec}
 
 Project Context:
@@ -244,54 +442,104 @@ Project Context:
 Project Vision:
 {vision}
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-FRAMEWORK REFERENCE (GROUND TRUTH — you MUST follow this)
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-The following skill documents describe the REAL conventions for the target framework.
-Your file structure and coding patterns MUST match these exactly.
-Do NOT invent folders, files, or patterns that are not shown here.
-
+FRAMEWORK REFERENCE:
 {skill_context}
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-TASK 1 — Define Tech Stack
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+━━━ TASK — Select Technologies ━━━
 
-Based on the FRAMEWORK REFERENCE above and the design specification:
+Based on the vision and design spec, select the technologies for each tier.
+For EACH technology you select, provide a one-line justification.
 
-1. Select specific technologies (database, framework, infrastructure) with justification.
-2. The file structure MUST be copied from the FRAMEWORK REFERENCE skill documents above
-   when one is present. Do NOT use generic MVC patterns (models/, controllers/, views/)
-   unless the framework reference explicitly shows them OR the EXACT technology named in
-   the vision is itself an MVC framework (e.g. Spring MVC, Django, Rails). When no skill
-   reference is present, use the well-known standard conventions of the named technology
-   instead of defaulting to MVC — e.g. Apache Camel uses Route/Processor classes, not
-   controllers/services; event-driven systems use handlers/consumers, not controllers.
-3. For Frappe apps: the structure comes from `bench new-app`. DocTypes are defined by
-   JSON files, not Python model classes. There are no migrations/ folders.
-4. List every file the developer agents need to create, using the exact folder layout
-   from the skill reference.
-5. You MUST enumerate concrete filenames with extensions using names specific to the
-   entities in the design spec (e.g., a Task entity in Apache Camel → routes/TaskRoute.java;
-   in Spring MVC → controller/TaskController.java + service/TaskService.java). NEVER list
-   only folders (e.g., controller/, service/, routes/) without the concrete files inside
-   them. The orchestrator cannot create tasks for folder names.
+Output a markdown table with columns: Layer | Technology | Justification
 
-Call file_writer(file_path='tech_stack.md', content='<your tech stack>')
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-TASK 2 — Write Logical Implementation Plan
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-After creating `tech_stack.md`, you MUST write a comprehensive logical implementation plan to `implementation_plan.md` detailing the technical architecture and logical solution rather than just listing files.
-The plan MUST contain:
-1. **Architectural Overview**: Logical system architecture and core design patterns (e.g. clean architecture, service layers, websocket handshake details, real-time message broadcasting).
-2. **Core Logical Components**: Description of how core business logic, database tables, socket handlers, and event emitters function logically.
-3. **Data Flow & Sequence**: Textual explanation or Mermaid diagrams showing request-response or message transmission paths through routing, controllers, services, database/socket, and client response.
-4. **Integration Strategy**: How the frontend integrates with the backend API, state management of socket connections, and reconnection loops.
-5. **Security, Validation & Error Handling**: Authentication/authorization enforcement (e.g. token extraction, RBAC, channel auth), inputs validation rules, rate-limiting, and resilience features for connection dropouts.
+Do NOT list files or folder structures — that comes in a later pass.
+Keep your response concise — under 1500 words.
 """
+
+_PASS2_FILE_TREE_PROMPT = """\
+You are the Technical Architect. This is PASS 2 of 3 — file tree ONLY.
+
+The stack has been decided (below). Now enumerate every concrete file the
+developer agents need to create — entry points, modules, services, models,
+controllers, and tests for EACH named component.
+
+{solution_contract}
+
+{component_section}
+
+STACK DECISIONS (from pass 1):
+{stack_decisions}
+
+Design Specification (for entity and module names):
+{design_spec}
+
+FRAMEWORK REFERENCE (for folder conventions):
+{skill_context}
+
+━━━ TASK — Enumerate File Tree ━━━
+
+Output a file tree inside a markdown code fence using Unicode tree characters
+(├──, └──, │). This format is REQUIRED — the orchestrator parses it to register
+per-file dev tasks.
+
+Example (note: every line is a FILE with an extension, not a folder):
+```
+project-root/
+├── apps/
+│   ├── api/
+│   │   ├── src/
+│   │   │   ├── main.ts
+│   │   │   ├── app.module.ts
+│   │   │   └── users/
+│   │   │       ├── users.controller.ts
+│   │   │       └── users.service.ts
+│   │   ├── package.json
+│   │   └── Dockerfile
+│   └── web/
+│       ├── src/pages/index.tsx
+│       └── package.json
+├── docker-compose.yml
+└── package.json
+```
+
+Rules:
+1. EVERY line must be a concrete file with extension — NO folder-only entries.
+2. Each named component above gets its own subtree with at least 3 source files
+   (entry point, module/service, and one domain file).
+3. Use entity and module names from the design spec in filenames.
+4. Include per-service package manifests (package.json, pom.xml, etc.) and Dockerfiles.
+5. Do NOT collapse multiple services into one directory.
+
+Wrap the tree in <tech_stack>...</tech_stack> tags.
+No prose — tree only.
+"""
+
+_PASS3_IMPL_PLAN_PROMPT = """\
+You are the Technical Architect. This is PASS 3 of 3 — implementation plan.
+
+STACK DECISIONS (from pass 1):
+{stack_decisions}
+
+Design Specification (summary):
+{design_spec}
+
+Project Vision:
+{vision}
+
+━━━ TASK — Write Implementation Plan ━━━
+
+Write a logical implementation plan covering:
+1. Architectural overview — design patterns, service boundaries.
+2. Core components — business logic, database schema, key modules.
+3. Data flow — request paths through the system (text or Mermaid).
+4. Integration strategy — how frontend talks to backend, inter-service communication.
+5. Security & error handling — auth, validation, rate limiting.
+
+Wrap your output in <implementation_plan>...</implementation_plan> tags.
+Keep your response focused — under 2000 words.
+"""
+
+_DEFAULT_TECH_STACK_PROMPT = _PASS1_STACK_SELECTION_PROMPT
 
 
 _DEFAULT_CONTRACT_PROMPT = """\

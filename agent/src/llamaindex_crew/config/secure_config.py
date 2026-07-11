@@ -139,7 +139,7 @@ class ToolsConfig(BaseModel):
 class GenerationConfig(BaseModel):
     """Code generation performance settings."""
     parallel_file_workers: int = Field(
-        5,
+        2,
         description=(
             "Number of concurrent LLM worker threads for file generation. "
             "Each worker holds its own independent agent and fires a separate API call. "
@@ -240,6 +240,10 @@ class PlanReviewConfig(BaseModel):
 class SolutioningConfig(BaseModel):
     """Solutioning loop configuration (research + architect + critique before PO)."""
     enabled: bool = Field(False, description="Enable solutioning loop before PO phase")
+    mode: str = Field(
+        "full",
+        description="Server fallback mode when job metadata omits capability_profile: full|fast|adaptive",
+    )
     max_passes: int = Field(3, description="Max research-critique passes")
     max_github_searches: int = Field(10, description="Rate limit for GitHub search API calls")
 

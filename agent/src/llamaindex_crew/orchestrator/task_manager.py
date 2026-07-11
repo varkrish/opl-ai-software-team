@@ -19,6 +19,10 @@ from ..utils.test_companion import (
     is_test_file_path,
     resolve_companion_source,
 )
+from ..utils.vision_stack_analysis import (
+    component_reflected_in_artifact,
+    extract_named_components,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -492,6 +496,16 @@ class TaskManager:
         'requirements.txt', 'pyproject.toml', 'go.mod', 'cargo.toml',
         'composer.json', 'gemfile',
     })
+    _SCAFFOLDING_PATH_RE = re.compile(
+        r"(?:^|/)("
+        r"\.github/|\.gitlab/|/workflows/|"
+        r"docker-compose|compose\.ya?ml|"
+        r"Dockerfile$|Containerfile$|"
+        r"\.config\.|eslint|prettier|jest\.config|tsconfig|"
+        r"\.env\.|Makefile$|README\.md$"
+        r")",
+        re.IGNORECASE,
+    )
     _TEST_FILE_TIER = 15  # after models (10), before repository (20)
 
     _STRUCTURE_LAYER_TIERS: Dict[int, str] = {
@@ -741,12 +755,45 @@ class TaskManager:
                     )
         return gaps
 
-    def validate_tech_stack_completeness(self, tech_stack_content: str) -> Dict[str, Any]:
+    @staticmethod
+    def _is_scaffolding_path(path: str) -> bool:
+        """Build/CI/config paths — not implementation sources the dev agent implements."""
+        if not path:
+            return True
+        lower = path.lower().replace("\\", "/")
+        if lower in TaskManager._CONFIG_ARTIFACT_NAMES:
+            return True
+        return bool(TaskManager._SCAFFOLDING_PATH_RE.search(lower))
+
+    @classmethod
+    def _implementation_source_paths(
+        cls,
+        file_entries: List[Dict[str, str]],
+    ) -> List[str]:
+        """Source files that represent application logic, not scaffolding."""
+        impl: List[str] = []
+        for entry in file_entries:
+            path = entry.get("path", "")
+            desc = entry.get("description", "")
+            if not cls._is_source_file_path(path, desc):
+                continue
+            if cls._is_scaffolding_path(path):
+                continue
+            impl.append(path)
+        return impl
+
+    def validate_tech_stack_completeness(
+        self,
+        tech_stack_content: str,
+        *,
+        design_spec: str = "",
+        solution_spec: str = "",
+    ) -> Dict[str, Any]:
         """
-        Validate that the tech stack actually lists some files to generate.
-        We only check that at least one source file is enumerated — we do NOT
-        enforce any particular architectural pattern (MVC, layered, etc.) because
-        that is the architect's decision, not the validator's.
+        Validate that the tech stack lists enough concrete implementation files.
+
+        Thresholds are derived from named components in design/solution specs —
+        not from hardcoded framework rules.
         """
         if not tech_stack_content or not tech_stack_content.strip():
             return {
@@ -755,20 +802,52 @@ class TaskManager:
             }
 
         file_entries = self._extract_files_with_descriptions(tech_stack_content)
-        src_files = [f["path"] for f in file_entries if self._is_source_file_path(f["path"], f.get("description", ""))]
+        all_paths = [f["path"] for f in file_entries]
+        src_files = [
+            f["path"] for f in file_entries
+            if self._is_source_file_path(f["path"], f.get("description", ""))
+        ]
+        impl_files = self._implementation_source_paths(file_entries)
+
+        issues: List[str] = []
 
         if len(src_files) == 0:
-            return {
-                "valid": False,
-                "issues": [
-                    "No concrete source files found in tech_stack.md. "
-                    "List the project file structure with real filenames and extensions "
-                    "(e.g. src/main.py, com/example/App.java). "
-                    "Do NOT write file contents — just the tree structure."
-                ],
-            }
+            issues.append(
+                "No concrete source files found in tech_stack.md. "
+                "List the project file structure with real filenames and extensions "
+                "(e.g. src/main.py, com/example/App.java). "
+                "Do NOT write file contents — just the tree structure."
+            )
 
-        return {"valid": True, "issues": []}
+        components = extract_named_components(solution_spec) or extract_named_components(design_spec)
+        min_impl = max(4, len(components) * 2) if components else 4
+
+        if len(impl_files) < min_impl:
+            issues.append(
+                f"File tree is too shallow: found {len(impl_files)} implementation "
+                f"source file(s) but need at least {min_impl} "
+                f"(derived from {len(components) or 'default'} named component(s)). "
+                "Enumerate concrete source files for every module/service — not "
+                "directory-only entries or CI/config scaffolding."
+            )
+
+        if components:
+            missing = [
+                name for name in components
+                if not component_reflected_in_artifact(name, tech_stack_content, all_paths)
+            ]
+            if len(missing) > len(components) // 2:
+                issues.append(
+                    "File tree does not cover named components from the design/solution "
+                    f"spec. Missing or unrepresented: {missing[:8]}"
+                    + ("..." if len(missing) > 8 else "")
+                    + ". Each component needs its own directory with concrete source files."
+                )
+
+        if issues:
+            return {"valid": False, "issues": issues}
+
+        return {"valid": True, "issues": [], "implementation_files": len(impl_files)}
 
     
     def get_task_status(self, task_id: str) -> Optional[TaskStatus]:
@@ -1365,6 +1444,24 @@ class TaskManager:
                         full_path = full_path[len(root_dir) + 1:]
                     entries.append({"path": full_path, "description": description})
 
+        # ── Pass 3: plain path lists (one path per line, no tree chars) ──
+        # Tech architect pass 2 often outputs this format instead of unicode trees.
+        _PLAIN_PATH_RE = re.compile(
+            r'^([a-zA-Z0-9_.\-][a-zA-Z0-9_/.\-]*\.[a-zA-Z0-9]+)(?:\s+#\s*(.*))?\s*$'
+        )
+        for line in content.splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.startswith("```"):
+                continue
+            if stripped.startswith("#") and not _PLAIN_PATH_RE.match(stripped.lstrip("#").strip()):
+                continue
+            match = _PLAIN_PATH_RE.match(stripped)
+            if match and _is_valid_file_path(match.group(1)):
+                entries.append({
+                    "path": match.group(1).strip(),
+                    "description": (match.group(2) or "").strip(),
+                })
+
         seen: set = set()
         deduped: List[Dict[str, str]] = []
         for e in entries:
@@ -1372,6 +1469,37 @@ class TaskManager:
                 seen.add(e["path"])
                 deduped.append(e)
         return deduped
+
+    def scaffold_directories_from_tech_stack(
+        self,
+        tech_stack_content: str,
+        workspace_path: Path,
+    ) -> List[str]:
+        """Create empty parent directories for every file in the tech_stack tree."""
+        workspace_path = Path(workspace_path)
+        created: List[str] = []
+        seen_dirs: set[str] = set()
+        for entry in self._extract_files_with_descriptions(tech_stack_content):
+            rel = (entry.get("path") or "").strip()
+            if not rel:
+                continue
+            parent = (workspace_path / rel).parent
+            if parent == workspace_path or str(parent) in seen_dirs:
+                continue
+            if not parent.exists():
+                parent.mkdir(parents=True, exist_ok=True)
+                seen_dirs.add(str(parent))
+                try:
+                    created.append(str(parent.relative_to(workspace_path)))
+                except ValueError:
+                    created.append(str(parent))
+        if created:
+            logger.info(
+                "Scaffolded %d director(ies) from tech_stack tree under %s",
+                len(created),
+                workspace_path,
+            )
+        return created
 
     def _extract_bounded_contexts(self, design_spec: str) -> Dict[str, str]:
         """Extract bounded context name -> description from design spec."""

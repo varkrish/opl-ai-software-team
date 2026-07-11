@@ -6,15 +6,29 @@ import logging
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Sequence
 
 from ..agents.solution_agents import (
     SolutionArchitectAgent,
     SolutionCritiqueAgent,
     SolutionResearchAgent,
 )
+from ..utils.vision_stack_analysis import CapabilityProfile, infer_capability_profile
 
 logger = logging.getLogger(__name__)
+
+STACK_MANIFEST_FILENAME = "stack_manifest.json"
+_REQUIRED_MANIFEST_KEYS = (
+    "path",
+    "delivery_surface",
+    "complexity",
+    "chosen_stack",
+    "forbidden_tiers",
+    "rationale",
+    "skills_query",
+)
+
+_CLIENT_FORBIDDEN_TIERS = ["application_server", "database", "cms_platform"]
 
 
 @dataclass
@@ -24,6 +38,194 @@ class SolutionResult:
     spec_path: Path
     candidates_path: Path
     critique_history: list = field(default_factory=list)
+    path: str = "full"
+    stack_manifest_path: Optional[Path] = None
+
+
+def write_stack_manifest(workspace_path: Path, data: Dict[str, Any]) -> Path:
+    """Persist stack_manifest.json with required contract keys."""
+    workspace_path = Path(workspace_path)
+    workspace_path.mkdir(parents=True, exist_ok=True)
+    payload = dict(data)
+    for key in _REQUIRED_MANIFEST_KEYS:
+        payload.setdefault(key, [] if key in ("chosen_stack", "forbidden_tiers") else "")
+    path = workspace_path / STACK_MANIFEST_FILENAME
+    path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    return path
+
+
+def read_stack_manifest(workspace_path: Path) -> Optional[Dict[str, Any]]:
+    """Load stack_manifest.json from workspace, or None if missing/invalid."""
+    path = Path(workspace_path) / STACK_MANIFEST_FILENAME
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _minimal_chosen_stack(profile: CapabilityProfile, vision: str) -> List[str]:
+    if profile.explicit_technologies:
+        return list(profile.explicit_technologies)
+    text = (vision or "").lower()
+    stack: List[str] = []
+    if "html" in text or "<!doctype" in text or "<html" in text:
+        stack.append("html")
+    if "css" in text or "colour" in text or "color" in text or "style" in text:
+        stack.append("css")
+    if "svg" in text:
+        stack.append("svg")
+    if "javascript" in text or re.search(r"\bes\s+module", text):
+        stack.append("javascript")
+    if not stack:
+        stack = ["html", "css"]
+    seen = set()
+    ordered: List[str] = []
+    for item in stack:
+        if item not in seen:
+            seen.add(item)
+            ordered.append(item)
+    return ordered
+
+
+def _skills_query_for_profile(profile: CapabilityProfile, chosen_stack: Sequence[str]) -> str:
+    if profile.explicit_technologies:
+        return " ".join(profile.explicit_technologies)
+    parts = list(chosen_stack) + ["accessibility"]
+    if profile.delivery_surface == "client_deliverable":
+        parts.insert(0, "vanilla")
+    return " ".join(parts)
+
+
+def _minimal_solution_spec(
+    vision: str,
+    profile: CapabilityProfile,
+    chosen_stack: Sequence[str],
+    forbidden_tiers: Sequence[str],
+) -> str:
+    stack_line = ", ".join(chosen_stack) if chosen_stack else "minimal client stack"
+    forbidden = ", ".join(forbidden_tiers) if forbidden_tiers else "none"
+    return (
+        "# Solution Specification\n\n"
+        "**Path:** fast (stack lock without Research → Critique)\n\n"
+        f"**Vision:** {vision.strip()}\n\n"
+        f"**Delivery surface:** {profile.delivery_surface}\n\n"
+        f"**Complexity:** {profile.complexity}\n\n"
+        f"**Chosen stack:** {stack_line}\n\n"
+        f"**Forbidden tiers:** {forbidden}\n\n"
+        "## Approach\n\n"
+        "Lock the stack constraints above and proceed to Product Owner → Designer → "
+        "Tech Architect. Tech Architect must still produce `tech_stack.md` and "
+        "`implementation_plan.md` consistent with this contract.\n"
+    )
+
+
+def run_fast_stack_decision(
+    vision: str,
+    profile: Optional[CapabilityProfile],
+    workspace_path: Path,
+) -> SolutionResult:
+    """
+    Fast path: write stack_manifest.json + solution_spec.md without Research/Critique.
+    """
+    workspace_path = Path(workspace_path)
+    workspace_path.mkdir(parents=True, exist_ok=True)
+    resolved = profile or infer_capability_profile(vision)
+    chosen = _minimal_chosen_stack(resolved, vision)
+    forbidden = list(_CLIENT_FORBIDDEN_TIERS) if not resolved.needs_server_runtime else []
+    rationale = (
+        f"Fast path for {resolved.delivery_surface}/{resolved.complexity} vision "
+        "without Research → Critique."
+    )
+    manifest = {
+        "path": "fast",
+        "delivery_surface": resolved.delivery_surface,
+        "complexity": resolved.complexity,
+        "chosen_stack": chosen,
+        "forbidden_tiers": forbidden,
+        "rationale": rationale,
+        "skills_query": _skills_query_for_profile(resolved, chosen),
+        "source": "fast",
+        "suggested_path": resolved.suggested_path,
+        "explicit_technologies": list(resolved.explicit_technologies),
+        "needs_persistence": resolved.needs_persistence,
+        "needs_api": resolved.needs_api,
+        "needs_auth": resolved.needs_auth,
+        "needs_server_runtime": resolved.needs_server_runtime,
+    }
+    manifest_path = write_stack_manifest(workspace_path, manifest)
+
+    spec_path = workspace_path / "solution_spec.md"
+    spec_path.write_text(
+        _minimal_solution_spec(vision, resolved, chosen, forbidden),
+        encoding="utf-8",
+    )
+    candidates_path = workspace_path / "solution_candidates.json"
+    if not candidates_path.exists():
+        candidates_path.write_text("[]\n", encoding="utf-8")
+
+    return SolutionResult(
+        approved=True,
+        pass_count=0,
+        spec_path=spec_path,
+        candidates_path=candidates_path,
+        critique_history=[],
+        path="fast",
+        stack_manifest_path=manifest_path,
+    )
+
+
+def write_stack_manifest_from_solution_spec(
+    vision: str,
+    profile: Optional[CapabilityProfile],
+    workspace_path: Path,
+    spec_text: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Derive and write a full-path stack_manifest from an approved solution_spec."""
+    workspace_path = Path(workspace_path)
+    resolved = profile or infer_capability_profile(vision)
+    if spec_text is None:
+        spec_file = workspace_path / "solution_spec.md"
+        spec_text = (
+            spec_file.read_text(encoding="utf-8", errors="replace")
+            if spec_file.exists()
+            else ""
+        )
+
+    chosen = list(resolved.explicit_technologies)
+    lower_spec = (spec_text or "").lower()
+    from ..utils.vision_stack_analysis import _extract_named_technologies
+
+    for name in _extract_named_technologies(lower_spec):
+        if name not in chosen:
+            chosen.append(name)
+    if not chosen:
+        chosen = _minimal_chosen_stack(resolved, vision)
+
+    forbidden: List[str] = []
+    if resolved.delivery_surface == "client_deliverable" and not resolved.needs_server_runtime:
+        forbidden = list(_CLIENT_FORBIDDEN_TIERS)
+
+    manifest = {
+        "path": "full",
+        "delivery_surface": resolved.delivery_surface,
+        "complexity": resolved.complexity,
+        "chosen_stack": chosen,
+        "forbidden_tiers": forbidden,
+        "rationale": "Derived from approved solution_spec after full solutioning loop.",
+        "skills_query": _skills_query_for_profile(resolved, chosen),
+        "source": "full",
+        "suggested_path": resolved.suggested_path,
+        "explicit_technologies": list(resolved.explicit_technologies),
+        "needs_persistence": resolved.needs_persistence,
+        "needs_api": resolved.needs_api,
+        "needs_auth": resolved.needs_auth,
+        "needs_server_runtime": resolved.needs_server_runtime,
+    }
+    write_stack_manifest(workspace_path, manifest)
+    return manifest
 
 
 def _extract_json(text: str, expect_list: bool = False) -> Any:
@@ -134,7 +336,12 @@ def run_solutioning_loop(
         critique_raw = critique_agent.run(vision, spec_content, candidates_json, project_context)
         critique = _extract_json(critique_raw, expect_list=False)
         if not isinstance(critique, dict):
-            critique = {"approved": False, "score": 0, "issues": ["Invalid critique JSON"], "must_fix": []}
+            critique = {
+                "approved": False,
+                "score": 0,
+                "issues": ["Invalid critique JSON"],
+                "must_fix": [],
+            }
 
         critique_file = workspace_path / f"solution_critique_pass_{pass_count}.json"
         critique_file.write_text(json.dumps(critique, indent=2) + "\n", encoding="utf-8")
@@ -150,10 +357,24 @@ def run_solutioning_loop(
 
         feedback = _format_critique_feedback(critique)
 
+    profile = infer_capability_profile(vision)
+    write_stack_manifest_from_solution_spec(
+        vision,
+        profile,
+        workspace_path,
+        spec_text=(
+            spec_path.read_text(encoding="utf-8", errors="replace")
+            if spec_path.exists()
+            else ""
+        ),
+    )
+
     return SolutionResult(
         approved=approved,
         pass_count=pass_count,
         spec_path=spec_path,
         candidates_path=candidates_path,
         critique_history=critique_history,
+        path="full",
+        stack_manifest_path=workspace_path / STACK_MANIFEST_FILENAME,
     )
