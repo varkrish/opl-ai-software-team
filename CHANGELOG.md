@@ -28,6 +28,7 @@ Version tags match container releases (`v2.x.y` → `quay.io/varkrish/crew-backe
 - **Empty file-creation task list** — high-level directory trees no longer pass validation; orchestrator now requires concrete source filenames with extensions so `file_creation` tasks are registered per file.
 - **BYOK / Settings LLM** — isolated scripts and jobs resolve credentials from `user_llm_configs` (Settings → LLM) via `user_llm_context()`; stale `config.yaml` fallback no longer used when BYOK is configured.
 - **Solution agent chat reuse** — `reset_chat()` before each solutioning architect/critique pass.
+- **Python package `__init__.py` blocked by manifest guard** — strict dev-phase allowlist now includes companion `__init__.py` paths for registered subpackage modules; vendor stubs (e.g. `mlflow/__init__.py`) remain rejected.
 
 ### Changed
 

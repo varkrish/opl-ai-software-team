@@ -3414,10 +3414,12 @@ class SoftwareDevWorkflow:
             )
 
         from ..tools.file_tools import set_allowed_file_paths
-        from ..utils.manifest_guard import dev_phase_write_guard_enabled
+        from ..utils.manifest_guard import dev_phase_write_guard_enabled, dev_phase_write_allowlist
 
         if dev_phase_write_guard_enabled():
-            allowed = self.task_manager.get_registered_file_paths()
+            allowed = dev_phase_write_allowlist(
+                self.task_manager.get_registered_file_paths()
+            )
             set_allowed_file_paths(allowed, workspace=str(self.workspace_path))
             logger.info(
                 "🔒 file_writer allowlist enabled (strict): %d paths workspace=%s",

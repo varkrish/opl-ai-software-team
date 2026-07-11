@@ -1261,32 +1261,17 @@ class TaskManager:
         (e.g. won't create ``app/models/__init__.py`` when ``app/models.py``
         is already in the task list — that would be a file/package conflict).
         """
-        py_files = [
-            (t.metadata or {}).get("file_path", "")
-            for t in tasks
-            if (t.metadata or {}).get("file_path", "").endswith(".py")
-        ]
+        from ..utils.manifest_guard import expand_python_package_inits
+
+        existing_paths = {(t.metadata or {}).get("file_path", "") for t in tasks}
+        py_files = [p for p in existing_paths if p.endswith(".py")]
         if not py_files:
             return tasks
 
-        existing_paths = {(t.metadata or {}).get("file_path", "") for t in tasks}
-        needed_inits: set = set()
-
-        for fp in py_files:
-            parts = Path(fp).parts
-            for depth in range(1, len(parts)):
-                dir_path = "/".join(parts[:depth])
-                init_path = f"{dir_path}/__init__.py"
-                if init_path in existing_paths:
-                    continue
-                flat_module = f"{dir_path}.py"
-                if flat_module in existing_paths:
-                    logger.info(
-                        "Skipping %s — flat module %s already exists (file/package conflict)",
-                        init_path, flat_module,
-                    )
-                    continue
-                needed_inits.add(init_path)
+        needed_inits = {
+            p for p in expand_python_package_inits(existing_paths)
+            if p.endswith("/__init__.py") and p not in existing_paths
+        }
 
         for init_path in sorted(needed_inits):
             task = TaskDefinition(

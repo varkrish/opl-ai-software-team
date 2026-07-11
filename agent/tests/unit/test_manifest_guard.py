@@ -114,3 +114,70 @@ class TestManifestGuardPaths:
         assert dev_phase_write_guard_enabled(ManifestGuardMode.STRICT)
         assert not dev_phase_write_guard_enabled(ManifestGuardMode.RELAXED)
         assert not dev_phase_write_guard_enabled(ManifestGuardMode.OFF)
+
+
+class TestPythonPackageInits:
+    def test_expand_adds_package_init(self):
+        from src.llamaindex_crew.utils.manifest_guard import expand_python_package_inits
+
+        registered = {"notebooks/churn_visualization.py"}
+        expanded = expand_python_package_inits(registered)
+        assert "notebooks/__init__.py" in expanded
+        assert "notebooks/churn_visualization.py" in expanded
+
+    def test_expand_nested_packages(self):
+        from src.llamaindex_crew.utils.manifest_guard import expand_python_package_inits
+
+        registered = {"src/services/billing/invoice.py"}
+        expanded = expand_python_package_inits(registered)
+        assert "src/__init__.py" in expanded
+        assert "src/services/__init__.py" in expanded
+        assert "src/services/billing/__init__.py" in expanded
+
+    def test_expand_skips_flat_module_conflict(self):
+        from src.llamaindex_crew.utils.manifest_guard import expand_python_package_inits
+
+        registered = {"app/models.py", "app/models/user.py"}
+        expanded = expand_python_package_inits(registered)
+        assert "app/__init__.py" in expanded
+        assert "app/models/__init__.py" not in expanded
+
+    def test_is_companion_python_init(self):
+        from src.llamaindex_crew.utils.manifest_guard import is_companion_python_init
+
+        allowed = {"notebooks/churn_visualization.py"}
+        assert is_companion_python_init("notebooks/__init__.py", allowed)
+        assert not is_companion_python_init("mlflow/__init__.py", allowed)
+        assert not is_companion_python_init("notebooks/churn_visualization.py", allowed)
+
+    def test_dev_phase_allowlist_includes_inits(self):
+        from src.llamaindex_crew.utils.manifest_guard import dev_phase_write_allowlist
+
+        allowed = dev_phase_write_allowlist({"notebooks/churn_visualization.py"})
+        assert "notebooks/__init__.py" in allowed
+
+    def test_strict_remediation_includes_python_inits(self, tmp_path):
+        from src.llamaindex_crew.utils.manifest_guard import (
+            ManifestGuardMode,
+            remediation_write_allowlist,
+        )
+
+        registered = {"notebooks/churn_visualization.py"}
+        allowed = remediation_write_allowlist(
+            registered, tmp_path, ManifestGuardMode.STRICT
+        )
+        assert "notebooks/__init__.py" in allowed
+
+    def test_strict_validation_allows_package_init(self, tmp_path):
+        from src.llamaindex_crew.utils.manifest_guard import (
+            ManifestGuardMode,
+            is_path_manifest_authorized,
+        )
+
+        registered = {"notebooks/churn_visualization.py"}
+        assert is_path_manifest_authorized(
+            "notebooks/__init__.py",
+            registered,
+            tmp_path,
+            ManifestGuardMode.STRICT,
+        )
