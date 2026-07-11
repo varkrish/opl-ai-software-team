@@ -226,14 +226,18 @@ def file_writer(file_path: str, content: str, workspace_path: Optional[str] = No
                 if normalized in allowed:
                     file_path = normalized
                 else:
-                    logger.warning(
-                        "file_writer REJECTED %s — not in the registered task list (%d allowed paths) workspace=%s",
-                        file_path, len(allowed), ws_key,
-                    )
-                    return (
-                        f"❌ Rejected: '{file_path}' is not in the project file manifest. "
-                        "Only create files that are listed in the tech stack."
-                    )
+                    from ..utils.manifest_guard import is_companion_python_init
+                    if is_companion_python_init(file_path, allowed):
+                        pass  # implied package init for a registered module
+                    else:
+                        logger.warning(
+                            "file_writer REJECTED %s — not in the registered task list (%d allowed paths) workspace=%s",
+                            file_path, len(allowed), ws_key,
+                        )
+                        return (
+                            f"❌ Rejected: '{file_path}' is not in the project file manifest. "
+                            "Only create files that are listed in the tech stack."
+                        )
 
         # Normalize LLM serialization artifacts (literal \n etc.)
         content = _normalize_content(content, file_path)

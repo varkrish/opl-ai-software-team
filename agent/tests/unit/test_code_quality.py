@@ -2272,6 +2272,42 @@ class TestFileWriterAllowlist:
         finally:
             set_allowed_file_paths(None, workspace=ws_a)
 
+    def test_allows_companion_package_init(self, workspace):
+        """__init__.py is allowed when a sibling module is in the allowlist."""
+        from llamaindex_crew.tools.file_tools import (
+            file_writer, set_allowed_file_paths,
+        )
+
+        ws = str(workspace)
+        set_allowed_file_paths(
+            {"notebooks/churn_visualization.py"}, workspace=ws,
+        )
+        try:
+            result = file_writer(
+                "notebooks/__init__.py", "# package\n", workspace_path=ws,
+            )
+            assert "Successfully" in result
+            assert (workspace / "notebooks" / "__init__.py").exists()
+        finally:
+            set_allowed_file_paths(None, workspace=ws)
+
+    def test_rejects_unrelated_package_init(self, workspace):
+        """Stub vendor packages like mlflow/__init__.py stay blocked."""
+        from llamaindex_crew.tools.file_tools import (
+            file_writer, set_allowed_file_paths,
+        )
+
+        ws = str(workspace)
+        set_allowed_file_paths(
+            {"notebooks/churn_visualization.py"}, workspace=ws,
+        )
+        try:
+            result = file_writer("mlflow/__init__.py", "# stub\n", workspace_path=ws)
+            assert "Rejected" in result
+            assert not (workspace / "mlflow" / "__init__.py").exists()
+        finally:
+            set_allowed_file_paths(None, workspace=ws)
+
 
 class TestEntrypointHints:
     """build_file_prompt must include framework wiring hints for entrypoint files."""

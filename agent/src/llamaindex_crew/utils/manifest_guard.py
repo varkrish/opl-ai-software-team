@@ -71,6 +71,58 @@ def companion_test_paths(source_path: str) -> list[str]:
     return candidates
 
 
+def expand_python_package_inits(paths: Set[str]) -> Set[str]:
+    """Add ``<pkg>/__init__.py`` for registered Python modules in subpackages.
+
+    Mirrors ``TaskManager._inject_init_py_tasks``: every ``.py`` file inside a
+    directory implies that directory is a package and needs an ``__init__.py``,
+    unless a same-named flat module (``dir.py``) is already registered.
+    """
+    expanded: Set[str] = set(paths)
+    for fp in paths:
+        if not fp.endswith(".py") or fp.endswith("/__init__.py"):
+            continue
+        parts = Path(fp).parts
+        if len(parts) < 2:
+            continue
+        for depth in range(1, len(parts)):
+            dir_path = "/".join(parts[:depth])
+            init_path = f"{dir_path}/__init__.py"
+            flat_module = f"{dir_path}.py"
+            if flat_module in paths:
+                continue
+            expanded.add(init_path)
+    return expanded
+
+
+def is_companion_python_init(file_path: str, allowed: Set[str]) -> bool:
+    """True when *file_path* is a package ``__init__.py`` implied by *allowed* modules."""
+    if not file_path.endswith("/__init__.py"):
+        return False
+    pkg = file_path[: -len("/__init__.py")]
+    if f"{pkg}.py" in allowed:
+        return False
+    prefix = f"{pkg}/"
+    return any(
+        p.startswith(prefix)
+        and p.endswith(".py")
+        and not p.endswith("/__init__.py")
+        for p in allowed
+    )
+
+
+def dev_phase_write_allowlist(registered: Set[str]) -> Set[str]:
+    """Strict dev-phase allowlist: registered paths plus implied package inits."""
+    expanded = expand_python_package_inits(registered)
+    added = len(expanded) - len(registered)
+    if added:
+        logger.info(
+            "Manifest guard: dev allowlist expanded with %d package __init__.py path(s)",
+            added,
+        )
+    return expanded
+
+
 def expand_remediation_paths(allowed: Set[str], workspace: Path) -> Set[str]:
     """Registered paths plus on-disk sources and companion test paths."""
     expanded: Set[str] = set(allowed)
@@ -110,7 +162,7 @@ def effective_manifest_paths(
     if mode == ManifestGuardMode.OFF:
         return None
     if mode == ManifestGuardMode.STRICT:
-        return set(registered)
+        return expand_python_package_inits(registered)
     return expand_remediation_paths(registered, workspace)
 
 
@@ -127,7 +179,7 @@ def remediation_write_allowlist(
     if mode == ManifestGuardMode.OFF:
         return None
     if mode == ManifestGuardMode.STRICT:
-        return set(registered)
+        return dev_phase_write_allowlist(registered)
     expanded = expand_remediation_paths(registered, workspace)
     logger.info(
         "Manifest guard [%s]: remediation allowlist %d paths (%d registered)",
