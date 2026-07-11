@@ -82,10 +82,22 @@ def is_valid_file_path(path: str) -> bool:
     return True
 
 
+def _has_file_content(content: str) -> bool:
+    """True when *content* is non-empty source text (not a tool-call stub)."""
+    return bool(content and content.strip())
+
+
 def _filter_valid_entries(entries: List[Dict[str, str]]) -> List[Dict[str, str]]:
     valid: List[Dict[str, str]] = []
     for entry in entries:
         raw_path = entry.get("file_path", "")
+        content = entry.get("content", "")
+        if not _has_file_content(content):
+            logger.debug(
+                "output_parser: rejecting entry with empty content: %r",
+                raw_path,
+            )
+            continue
         normalized = _normalize_file_path(raw_path)
         if is_valid_file_path(normalized):
             if normalized != raw_path:
@@ -163,20 +175,18 @@ _SINGLE_FILE_FORMAT_INSTRUCTION = """\
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 OUTPUT FORMAT — IMPORTANT (no tools available)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-You do NOT have tools. Output EXACTLY ONE of the following (no other text):
+You do NOT have tools. Output the COMPLETE file `{path}` using a fenced code block.
+Do NOT output anything else — no reasoning, no explanation, no preamble.
 
-OPTION A (preferred) — JSON array with one object:
-[{{"file_path": "{path}", "content": "<complete file body with \\\\n for newlines>"}}]
-
-OPTION B — if JSON is difficult, a single fenced code block with the full file:
 ```{lang}
-<complete file contents here>
+<complete file contents here — every line, no truncation>
 ```
 
 RULES:
-- NO reasoning, NO "assistant:" preamble, NO Thought/Action format.
-- The file must be COMPLETE — do not truncate large implementations.
-- Path must be exactly: {path}
+- Output ONLY the code block above — nothing before, nothing after.
+- The file must be COMPLETE — do not truncate or abbreviate.
+- Do NOT use Thought/Action/Observation format.
+- Do NOT use JSON format. Just output the code block.
 """
 
 
@@ -329,8 +339,25 @@ def _strip_deepseek_tokens(text: str) -> str:
     ``<|start|>assistant<|channel|>`` for internal tool dispatch.  In simple
     mode these tokens are never executed but DO appear in the raw response,
     preventing the JSON parser from finding the file array.
+
+    Content inside ``<|message|>...<|end|>`` blocks is **preserved** so that
+    embedded JSON (``{"file_path": ..., "content": ...}``) or raw code can
+    still be picked up by downstream parsers.
     """
-    cleaned = _DS_CHANNEL_TOKEN_RE.sub("", text)
+    _MSG_CONTENT_RE = re.compile(
+        r"<\|message\|>(.*?)(?:<\|(?:end|call)\|>|$)", re.DOTALL,
+    )
+
+    def _replace_channel_block(match: re.Match) -> str:
+        block = match.group(0)
+        msg = _MSG_CONTENT_RE.search(block)
+        if msg:
+            inner = msg.group(1).strip()
+            if inner:
+                return inner
+        return ""
+
+    cleaned = _DS_CHANNEL_TOKEN_RE.sub(_replace_channel_block, text)
     cleaned = _DS_BARE_MARKER_RE.sub("", cleaned)
     return cleaned
 
@@ -555,6 +582,41 @@ _CODE_FENCE_RE = re.compile(
 )
 
 
+def _try_raw_source_for_target(text: str, target_path: str) -> List[Dict[str, str]]:
+    """Recover source code emitted directly inside a channel message block."""
+    stripped = text.strip()
+    if not stripped or stripped.startswith(("[", "{")):
+        return []
+    if looks_like_raw_agent_dump(stripped):
+        return []
+
+    content = stripped
+    lines = content.splitlines()
+    if lines and lines[0].strip().startswith("//"):
+        header = lines[0].strip()[2:].strip()
+        if header.endswith((".ts", ".tsx", ".js", ".jsx", ".py", ".go", ".rs", ".java")):
+            if Path(header).name == Path(target_path).name:
+                content = "\n".join(lines[1:]).strip()
+
+    if len(content) < 10:
+        return []
+
+    if not re.search(
+        r"(?m)^\s*(import|export|const|let|var|function|class|interface|type|#|Feature:|\<\?|<!DOCTYPE)",
+        content,
+        re.IGNORECASE,
+    ):
+        return []
+
+    logger.info(
+        "output_parser: recovered %r from raw source block (%d chars)",
+        target_path, len(content),
+    )
+    if not content.endswith("\n"):
+        content += "\n"
+    return [{"file_path": target_path, "content": content}]
+
+
 def _try_code_fence_for_target(text: str, target_path: str) -> List[Dict[str, str]]:
     """Recover a single file from ```lang ... ``` when the model skipped JSON."""
     candidates: List[str] = []
@@ -656,14 +718,28 @@ def extract_files_from_response(
     """Extract files from an LLM response.
 
     Returns ``(entries, strategy)`` where strategy is one of:
-    ``json``, ``xml``, ``path_fence``, ``file_writer``, ``code_fence``, ``none``.
+    ``json``, ``xml``, ``path_fence``, ``file_writer``, ``code_fence``,
+    ``raw_source``, ``none``.
     """
     if not response or not response.strip():
         return [], "none"
 
     text = _clean_response(response)
-    entries = parse_file_list(response)
-    strategy = "json" if entries else "none"
+
+    # For single-file targets, try code fence first (primary prompt format).
+    # This matches what small models produce most reliably.
+    entries: List[Dict[str, str]] = []
+    strategy = "none"
+
+    if target_file_path:
+        entries = _try_code_fence_for_target(text, target_file_path)
+        if entries:
+            strategy = "code_fence"
+
+    if not entries:
+        entries = parse_file_list(response)
+        if entries:
+            strategy = "json"
 
     if not entries:
         entries = _try_file_writer_calls(text)
@@ -671,9 +747,9 @@ def extract_files_from_response(
             strategy = "file_writer"
 
     if not entries and target_file_path:
-        entries = _try_code_fence_for_target(text, target_file_path)
+        entries = _try_raw_source_for_target(text, target_file_path)
         if entries:
-            strategy = "code_fence"
+            strategy = "raw_source"
 
     entries = _narrow_to_target(entries, target_file_path)
 
@@ -779,6 +855,12 @@ def _try_json(text: str) -> List[Dict[str, str]] | None:
     """
     # First try: whole stripped text
     stripped = text.strip()
+    if stripped.startswith("{"):
+        data = _json_loads_lenient(stripped)
+        if data is not None:
+            normalised = _normalise_json(data)
+            if normalised:
+                return normalised
     if stripped.startswith("["):
         data = _json_loads_lenient(stripped)
         if data is not None:
@@ -825,12 +907,16 @@ def _try_json(text: str) -> List[Dict[str, str]] | None:
 
 def _normalise_json(data: object) -> List[Dict[str, str]]:
     """Validate and normalise parsed JSON into the canonical file-list format."""
-    if not isinstance(data, list):
-        logger.debug("output_parser JSON: root is not a list, skipping")
+    if isinstance(data, dict):
+        items: List[object] = [data]
+    elif isinstance(data, list):
+        items = data
+    else:
+        logger.debug("output_parser JSON: root is not a list or object, skipping")
         return []
 
     result: List[Dict[str, str]] = []
-    for item in data:
+    for item in items:
         if not isinstance(item, dict):
             continue
         file_path = item.get("file_path") or item.get("path") or item.get("filename")
@@ -840,6 +926,12 @@ def _normalise_json(data: object) -> List[Dict[str, str]]:
             continue
         if not isinstance(content, str):
             content = str(content)
+        if not _has_file_content(content):
+            logger.debug(
+                "output_parser JSON: entry missing content, skipping: %r",
+                file_path,
+            )
+            continue
         result.append({"file_path": str(file_path).strip(), "content": content})
 
     logger.debug("output_parser JSON: extracted %d file(s)", len(result))

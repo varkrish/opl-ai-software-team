@@ -6,6 +6,7 @@ from typing import Any, Dict, Optional
 DEFAULT_WORKFLOW_PREFS: Dict[str, Any] = {
     "plan_review_enabled": False,
     "solutioning_enabled": False,
+    "solutioning_mode": "full",
     "solutioning_max_passes": 3,
     "solutioning_max_github_searches": 10,
     "auto_approve_plan": False,
@@ -13,6 +14,7 @@ DEFAULT_WORKFLOW_PREFS: Dict[str, Any] = {
     "tldr_max_chars": 6000,
     "tldr_include_structure": True,
     "tldr_min_completed_files": 1,
+    "parallel_file_workers": 2,
 }
 
 
@@ -27,13 +29,43 @@ def normalize_workflow_prefs(raw: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     merged["plan_review_enabled"] = bool(merged["plan_review_enabled"])
     merged["solutioning_enabled"] = bool(merged["solutioning_enabled"])
     merged["auto_approve_plan"] = bool(merged["auto_approve_plan"])
+    mode = str(merged.get("solutioning_mode") or "full").strip().lower()
+    if mode not in ("full", "fast", "adaptive"):
+        mode = "full"
+    merged["solutioning_mode"] = mode
     merged["solutioning_max_passes"] = max(1, min(5, int(merged["solutioning_max_passes"])))
     merged["solutioning_max_github_searches"] = max(1, min(50, int(merged["solutioning_max_github_searches"])))
     merged["tldr_enabled"] = bool(merged["tldr_enabled"])
     merged["tldr_include_structure"] = bool(merged["tldr_include_structure"])
     merged["tldr_max_chars"] = max(500, min(50_000, int(merged["tldr_max_chars"])))
     merged["tldr_min_completed_files"] = max(0, min(100, int(merged["tldr_min_completed_files"])))
+    merged["parallel_file_workers"] = max(1, min(10, int(merged["parallel_file_workers"])))
     return merged
+
+
+def normalize_capability_profile_metadata(
+    meta: Optional[Dict[str, Any]],
+    capability_profile: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Ensure job metadata carries capability_profile with default path=full."""
+    out = dict(meta) if meta else {}
+    profile = capability_profile
+    if profile is None:
+        profile = out.get("capability_profile")
+    if not isinstance(profile, dict):
+        profile = {}
+    path = (profile.get("solutioning_path") or "full")
+    if isinstance(path, str):
+        path = path.strip().lower()
+    if path not in ("full", "fast", "adaptive"):
+        path = "full"
+    normalized = {
+        **profile,
+        "solutioning_path": path,
+        "source": profile.get("source") or ("user" if capability_profile else "default"),
+    }
+    out["capability_profile"] = normalized
+    return out
 
 
 def merge_workflow_prefs_into_config(config: Any, prefs: Optional[Dict[str, Any]]) -> Any:
@@ -47,6 +79,7 @@ def merge_workflow_prefs_into_config(config: Any, prefs: Optional[Dict[str, Any]
     solutioning = config.solutioning.model_copy(
         update={
             "enabled": normalized["solutioning_enabled"],
+            "mode": normalized.get("solutioning_mode", "full"),
             "max_passes": normalized["solutioning_max_passes"],
             "max_github_searches": normalized["solutioning_max_github_searches"],
         }
@@ -57,6 +90,7 @@ def merge_workflow_prefs_into_config(config: Any, prefs: Optional[Dict[str, Any]
             "simple_mode_tldr_max_chars": normalized["tldr_max_chars"],
             "simple_mode_tldr_include_structure": normalized["tldr_include_structure"],
             "simple_mode_tldr_min_completed_files": normalized["tldr_min_completed_files"],
+            "parallel_file_workers": normalized["parallel_file_workers"],
         }
     )
     return config.model_copy(

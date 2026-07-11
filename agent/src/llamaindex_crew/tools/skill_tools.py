@@ -29,10 +29,80 @@ logger = logging.getLogger(__name__)
 # legacy and kept — the service-side threshold is the primary gate.
 MIN_SKILL_SCORE = float(os.environ.get("SKILLS_MIN_SCORE", "0.68"))
 
+# Skills that conflict with forbidden application-platform tiers on a client lock.
+_PLATFORM_SKILL_MARKERS = (
+    "frappe", "django", "fastapi", "flask", "spring", "rails", "laravel",
+    "erpnext", "doctype", "mariadb", "postgres", "mongodb",
+)
+
 
 def _passes_relevance(result: dict) -> bool:
     score = result.get("score")
     return score is None or score >= MIN_SKILL_SCORE
+
+
+def _load_stack_manifest(workspace_path: Optional[Path]) -> Optional[dict]:
+    if not workspace_path:
+        return None
+    try:
+        from ..workflows.solutioning_loop import read_stack_manifest
+        return read_stack_manifest(Path(workspace_path))
+    except Exception:
+        return None
+
+
+def _skill_conflicts_with_manifest(skill_name: str, content: str, manifest: dict) -> bool:
+    """Drop skills that pull forbidden platform tiers into a locked client stack."""
+    forbidden = {t.lower() for t in (manifest.get("forbidden_tiers") or [])}
+    if not forbidden.intersection({"application_server", "database", "cms_platform"}):
+        return False
+    chosen = {s.lower() for s in (manifest.get("chosen_stack") or [])}
+    blob = f"{skill_name} {content}".lower()
+    for marker in _PLATFORM_SKILL_MARKERS:
+        if marker in blob and marker not in chosen:
+            # Allow generic html/css/js skills even if they mention a marker in passing
+            # only when the skill name itself is platform-oriented.
+            name_l = (skill_name or "").lower()
+            if any(m in name_l for m in _PLATFORM_SKILL_MARKERS):
+                return True
+            if marker in ("frappe", "django", "fastapi", "flask", "spring", "rails",
+                          "laravel", "erpnext", "doctype"):
+                return True
+    return False
+
+
+def _queries_for_role(
+    vision: str,
+    role: str,
+    extra_queries: Optional[List[str]],
+    manifest: Optional[dict],
+) -> List[str]:
+    """Build prefetch queries; prefer stack_manifest.skills_query when locked."""
+    seed = (vision or "")[:200]
+    if manifest and (manifest.get("skills_query") or "").strip():
+        seed = manifest["skills_query"].strip()
+    elif manifest and manifest.get("chosen_stack"):
+        seed = " ".join(str(s) for s in manifest["chosen_stack"])
+
+    if role == "designer":
+        queries = [
+            f"design patterns UI architecture conventions {seed}",
+            f"component architecture implementation patterns {seed}",
+        ]
+    elif role == "tech_architect":
+        queries = [
+            f"folder structure scaffold file tree {seed}",
+            f"coding patterns implementation architecture {seed}",
+        ]
+    else:
+        queries = [
+            f"architecture conventions patterns {seed}",
+            f"folder structure implementation {seed}",
+        ]
+
+    if extra_queries:
+        queries.extend(extra_queries)
+    return queries
 
 def _record_skills_used(job_id: str, skill_names: List[str]):
     try:
@@ -136,24 +206,8 @@ def prefetch_skills(
         logger.warning("prefetch_skills: config load failed — skipping", exc_info=True)
         return ""
 
-    if role == "designer":
-        queries = [
-            f"design patterns UI architecture conventions {vision[:200]}",
-            f"component architecture implementation patterns {vision[:200]}",
-        ]
-    elif role == "tech_architect":
-        queries = [
-            f"folder structure scaffold file tree {vision[:200]}",
-            f"coding patterns implementation architecture {vision[:200]}",
-        ]
-    else:
-        queries = [
-            f"architecture conventions patterns {vision[:200]}",
-            f"folder structure implementation {vision[:200]}",
-        ]
-
-    if extra_queries:
-        queries.extend(extra_queries)
+    manifest = _load_stack_manifest(workspace_path)
+    queries = _queries_for_role(vision, role, extra_queries, manifest)
 
     seen_skills: set[str] = set()
     sections: list[str] = []
@@ -175,15 +229,22 @@ def prefetch_skills(
                     )
                     continue
                 skill_name = r["skill_name"]
+                content = r.get("content") or ""
+                if manifest and _skill_conflicts_with_manifest(skill_name, content, manifest):
+                    logger.info(
+                        "prefetch_skills [%s]: dropping skill %r — conflicts with stack_manifest",
+                        role, skill_name,
+                    )
+                    continue
                 if skill_name in seen_skills:
                     continue
                 seen_skills.add(skill_name)
-                sections.append(f"[Skill: {skill_name}]\n{r['content']}")
+                sections.append(f"[Skill: {skill_name}]\n{content}")
                 debug_entries.append({
                     "skill_name": skill_name,
                     "query": q,
                     "score": r.get("score"),
-                    "content": r["content"],
+                    "content": content,
                 })
         except Exception:
             logger.warning("prefetch_skills: query %r failed", q, exc_info=True)

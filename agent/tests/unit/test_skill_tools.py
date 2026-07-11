@@ -245,3 +245,110 @@ class TestPrefetchSkillsRelevanceFiltering:
 
         assert "frappe-api-patterns" in result
         assert "Use @whitelist" in result
+
+
+class TestPrefetchSkillsManifestGating:
+    """prefetch_skills must respect locked stack_manifest (stub HTTP only)."""
+
+    def _mock_config(self):
+        config = MagicMock()
+        config.skills.service_url = "http://test:8090"
+        return config
+
+    def _client_manifest(self, workspace: Path):
+        from llamaindex_crew.workflows.solutioning_loop import write_stack_manifest
+
+        write_stack_manifest(
+            workspace,
+            {
+                "path": "fast",
+                "delivery_surface": "client_deliverable",
+                "complexity": "minimal",
+                "chosen_stack": ["html", "css", "svg"],
+                "forbidden_tiers": ["application_server", "database", "cms_platform"],
+                "rationale": "Simple client page",
+                "skills_query": "vanilla html svg accessibility",
+            },
+        )
+
+    def test_drops_conflicting_frappe_skill_when_client_manifest_locked(self, tmp_path):
+        from llamaindex_crew.tools.skill_tools import prefetch_skills
+
+        self._client_manifest(tmp_path)
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status = MagicMock()
+        mock_resp.json.return_value = {
+            "results": [
+                {
+                    "skill_name": "frappe-doctype-patterns",
+                    "content": "Create DocType and hooks.py",
+                    "tags": ["frappe"],
+                    "score": 0.91,
+                },
+                {
+                    "skill_name": "html-accessibility",
+                    "content": "Use semantic HTML and ARIA",
+                    "tags": ["html"],
+                    "score": 0.88,
+                },
+            ]
+        }
+
+        with patch("llamaindex_crew.config.ConfigLoader.load", return_value=self._mock_config()), \
+             patch("httpx.post", return_value=mock_resp):
+            result = prefetch_skills(
+                vision="Build a Frappe invoicing app",
+                role="tech_architect",
+                workspace_path=tmp_path,
+            )
+
+        assert "frappe-doctype-patterns" not in result
+        assert "html-accessibility" in result
+
+    def test_uses_manifest_skills_query_not_raw_vision_alone(self, tmp_path):
+        from llamaindex_crew.tools.skill_tools import prefetch_skills
+
+        self._client_manifest(tmp_path)
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status = MagicMock()
+        mock_resp.json.return_value = {"results": []}
+
+        with patch("llamaindex_crew.config.ConfigLoader.load", return_value=self._mock_config()), \
+             patch("httpx.post", return_value=mock_resp) as mock_post:
+            prefetch_skills(
+                vision="Build a Frappe invoicing app with MariaDB",
+                role="designer",
+                workspace_path=tmp_path,
+            )
+
+        assert mock_post.called
+        payloads = [
+            (c.kwargs.get("json") or c[1].get("json"))
+            for c in mock_post.call_args_list
+        ]
+        queries = " ".join(str(p.get("query", "")) for p in payloads if p)
+        assert "vanilla" in queries.lower() or "html" in queries.lower() or "svg" in queries.lower()
+        assert "frappe" not in queries.lower()
+
+    def test_no_manifest_keeps_existing_behaviour(self, tmp_path):
+        from llamaindex_crew.tools.skill_tools import prefetch_skills
+
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status = MagicMock()
+        mock_resp.json.return_value = {
+            "results": [
+                {"skill_name": "frappe-api-patterns", "content": "Use @whitelist", "tags": ["frappe"], "score": 0.82},
+            ]
+        }
+
+        with patch("llamaindex_crew.config.ConfigLoader.load", return_value=self._mock_config()), \
+             patch("httpx.post", return_value=mock_resp) as mock_post:
+            result = prefetch_skills(
+                vision="Build a Frappe app",
+                role="tech_architect",
+                workspace_path=tmp_path,
+            )
+
+        assert "frappe-api-patterns" in result
+        payload = mock_post.call_args.kwargs.get("json") or mock_post.call_args[1].get("json")
+        assert "Frappe" in payload["query"] or "frappe" in payload["query"].lower()

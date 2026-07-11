@@ -5,19 +5,37 @@ Project Context: {context_digest}
 
 **PROJECT VISION (READ THIS CAREFULLY)**: {vision}
 
+{solution_contract}
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+STEP 0: STACK SELECTION FROM VISION (mandatory)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+{stack_brief}
+
+When APPROVED SOLUTION SPEC is present above, it is BINDING — implement its
+architecture exactly. Otherwise infer the minimal appropriate stack from the vision.
+The design specification is advisory only when no approved solution exists — if it
+over-scopes (adds backends, databases, or platforms the vision does not need),
+follow the vision and simplify. Framework skills below apply ONLY when required.
+
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 STEP 1: EXTRACT TECHNOLOGY FROM VISION
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-READ the vision and IDENTIFY the technology mentioned. Use EXACTLY what the user asked for:
+READ the vision and IDENTIFY technologies and capabilities mentioned. Use EXACTLY what the user asked for when named:
 - "Spring Boot" / "Java" → You MUST use Java with Spring Boot (Maven/Gradle, application.properties, etc.)
 - "PostgreSQL" → You MUST use PostgreSQL (not SQLite, not MySQL unless stated)
 - "OpenAPI" / "Swagger" → You MUST include OpenAPI/Swagger docs (springdoc-openapi or similar)
 - "React Native" → You MUST use React Native
 - "Python" / "FastAPI" / "Flask" → You MUST use Python with that framework
 - "mobile app" → You MUST use a mobile framework (React Native, Flutter, etc.)
-- "web app" → You MUST use HTML/CSS/JS or a web framework
+- "web app" → You MUST use HTML/CSS/JS or a web framework appropriate to the vision
 
-**CRITICAL**: Do NOT substitute a different technology! If the vision says "Spring Boot with PostgreSQL", you MUST use Spring Boot and PostgreSQL—do NOT use Python, FastAPI, or SQLite.
+When the vision does NOT name an application framework, choose the MINIMAL stack
+that delivers the described outcome. Do NOT default to CMS/ERP platforms, databases,
+or multi-tier backends unless the vision requires persistence, APIs, auth, or
+explicitly names those technologies.
+
+**CRITICAL**: Do NOT substitute a different technology when the vision names one.
+When the vision names none, do NOT over-build — match complexity to requirements.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 STEP 2: DESIGN COMPLETE BUILDABLE FILE STRUCTURE
@@ -115,10 +133,10 @@ app_root/
 
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-FRAMEWORK REFERENCE (from skills service — follow this exactly)
+FRAMEWORK REFERENCE (from skills service — when required by vision/brief)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-The following skill documents describe the REAL conventions for the target framework.
-Your file structure MUST match these. Do NOT invent folders or files not shown here.
+The following skill documents describe conventions for matching frameworks.
+Apply them only when the vision or stack brief requires that framework.
 
 {skill_context}
 

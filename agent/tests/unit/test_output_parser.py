@@ -282,6 +282,175 @@ class TestDeepSeekTokenStripping:
         assert looks_like_raw_agent_dump(_DS_TOOL_CALL) is True
 
 
+# ---------------------------------------------------------------------------
+# Model-agnostic extraction — production patterns from job c5253680
+# ---------------------------------------------------------------------------
+# These tests cover real LLM output patterns observed across gpt-oss-120b,
+# DeepSeek R1, and other models.  The parser must handle all of them so
+# simple-mode codegen works regardless of which model is behind the API.
+
+
+class TestCodeFenceFirstExtraction:
+    """Code fence is the primary output format — must be tried before JSON."""
+
+    def test_typescript_code_fence(self):
+        from llamaindex_crew.utils.output_parser import extract_files_from_response
+        response = (
+            "```typescript\n"
+            "import express from 'express';\n"
+            "const app = express();\n"
+            "app.listen(3000);\n"
+            "```"
+        )
+        entries, strategy = extract_files_from_response(
+            response, target_file_path="backend/src/index.ts"
+        )
+        assert strategy == "code_fence"
+        assert len(entries) == 1
+        assert entries[0]["file_path"] == "backend/src/index.ts"
+        assert "express" in entries[0]["content"]
+
+    def test_tsx_component_fence(self):
+        from llamaindex_crew.utils.output_parser import extract_files_from_response
+        response = (
+            "```tsx\n"
+            "import React from 'react';\n"
+            "export const App = () => <div>Hello</div>;\n"
+            "```"
+        )
+        entries, strategy = extract_files_from_response(
+            response, target_file_path="frontend/src/App.tsx"
+        )
+        assert strategy == "code_fence"
+        assert len(entries) == 1
+        assert entries[0]["file_path"] == "frontend/src/App.tsx"
+
+    def test_python_code_fence(self):
+        from llamaindex_crew.utils.output_parser import extract_files_from_response
+        response = '```python\ndef hello():\n    return "world"\n```'
+        entries, strategy = extract_files_from_response(
+            response, target_file_path="src/hello.py"
+        )
+        assert strategy == "code_fence"
+        assert len(entries) == 1
+        assert "def hello" in entries[0]["content"]
+
+    def test_code_fence_preferred_over_json_when_both_present(self):
+        """When response has a code fence AND the target matches, fence wins."""
+        from llamaindex_crew.utils.output_parser import extract_files_from_response
+        response = (
+            "Here is the file:\n"
+            "```typescript\n"
+            "export const config = { port: 3000 };\n"
+            "```\n"
+        )
+        entries, strategy = extract_files_from_response(
+            response, target_file_path="src/config.ts"
+        )
+        assert strategy == "code_fence"
+        assert len(entries) == 1
+
+    def test_json_still_works_without_target(self):
+        """JSON extraction must work for multi-file (no target_file_path)."""
+        from llamaindex_crew.utils.output_parser import extract_files_from_response
+        response = '[{"file_path": "a.ts", "content": "x"}, {"file_path": "b.ts", "content": "y"}]'
+        entries, strategy = extract_files_from_response(response)
+        assert strategy == "json"
+        assert len(entries) == 2
+
+
+class TestSingleJsonObjectExtraction:
+    """Models sometimes emit a single JSON object in a DS message block."""
+
+    def test_single_json_object_in_message_block(self):
+        from llamaindex_crew.utils.output_parser import extract_files_from_response
+        response = (
+            '<|channel|>commentary<|message|>'
+            '{\n  "file_path": "backend/src/config/config.ts",\n'
+            '  "content": "export const config = { jwtSecret: \'supersecret\' };\\n"\n'
+            '}<|end|>'
+        )
+        entries, strategy = extract_files_from_response(
+            response, target_file_path="backend/src/config/config.ts"
+        )
+        assert len(entries) == 1
+        assert entries[0]["file_path"] == "backend/src/config/config.ts"
+        assert "jwtSecret" in entries[0]["content"]
+
+    def test_empty_content_object_rejected(self):
+        """Tool-call stubs with file_path but no content must be filtered out."""
+        from llamaindex_crew.utils.output_parser import extract_files_from_response
+        response = (
+            '<|start|>assistant<|channel|>analysis to=functions.code_reader '
+            '<|constrain|>json<|message|>'
+            '{\n  "file_path": "backend/src/services/authService.ts"\n}'
+            '<|call|>'
+        )
+        entries, _ = extract_files_from_response(
+            response, target_file_path="backend/src/services/authService.ts"
+        )
+        assert entries == []
+
+
+class TestRawSourceRecovery:
+    """Models may emit raw source code inside channel message blocks."""
+
+    def test_raw_typescript_in_message_block(self):
+        from llamaindex_crew.utils.output_parser import extract_files_from_response
+        response = (
+            '<|channel|>commentary<|message|>'
+            '// backend/src/config/config.ts\n\n'
+            'export const config = {\n'
+            "  jwtSecret: 'supersecret',\n"
+            "  jwtExpiresIn: '15m',\n"
+            '};\n'
+            '<|end|>'
+        )
+        entries, strategy = extract_files_from_response(
+            response, target_file_path="backend/src/config/config.ts"
+        )
+        assert len(entries) == 1
+        assert strategy == "raw_source"
+        assert "jwtSecret" in entries[0]["content"]
+
+    def test_raw_source_strips_filename_comment(self):
+        """A leading '// path/to/file.ts' header is stripped from the output."""
+        from llamaindex_crew.utils.output_parser import extract_files_from_response
+        response = (
+            '<|channel|>commentary<|message|>'
+            '// app.ts\n'
+            'import express from "express";\n'
+            'const app = express();\n'
+            '<|end|>'
+        )
+        entries, _ = extract_files_from_response(
+            response, target_file_path="backend/src/app.ts"
+        )
+        assert len(entries) == 1
+        assert not entries[0]["content"].startswith("//")
+        assert "express" in entries[0]["content"]
+
+
+class TestDeepSeekTokenWithCodeFence:
+    """DS channel tokens followed by a code fence — fence must be recovered."""
+
+    def test_ds_preamble_then_code_fence(self):
+        from llamaindex_crew.utils.output_parser import extract_files_from_response
+        response = (
+            "<|channel|>commentary<|message|>Will create the file now.<|end|>\n"
+            "```typescript\n"
+            "const config = { port: 3000 };\n"
+            "export default config;\n"
+            "```"
+        )
+        entries, strategy = extract_files_from_response(
+            response, target_file_path="backend/src/config.ts"
+        )
+        assert len(entries) == 1
+        assert strategy == "code_fence"
+        assert "port: 3000" in entries[0]["content"]
+
+
 class TestSanitizeGherkin:
     """sanitize_gherkin_content strips markdown wrappers from feature file content."""
 

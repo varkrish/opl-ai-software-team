@@ -37,6 +37,13 @@ from ..utils.generation_prompt_utils import (
     trim_tech_stack_for_prompt,
     trim_user_stories_for_prompt,
 )
+from ..utils.vision_stack_analysis import (
+    build_stack_selection_brief,
+    decide_solutioning_path,
+    detect_solution_spec_mismatch,
+    detect_stack_overreach,
+    infer_capability_profile,
+)
 from .epic_story_loop import (
     StoryAssessment,
     assess_epic_stories,
@@ -63,6 +70,16 @@ try:
     logger.info("Global embed_model set to local HuggingFace (BAAI/bge-small-en-v1.5)")
 except Exception as _e:
     logger.warning("Could not set global embed_model: %s", _e)
+
+
+def _load_workspace_stack_manifest(workspace_path: Optional[Path]):
+    if not workspace_path:
+        return None
+    try:
+        from .solutioning_loop import read_stack_manifest
+        return read_stack_manifest(workspace_path)
+    except Exception:
+        return None
 
 # Number of times to retry a phase on transient LLM/network errors
 PHASE_RETRY_ATTEMPTS = 3
@@ -120,14 +137,39 @@ def _extract_vision_keywords(vision: str) -> List[str]:
     return [w for w in words if len(w) > 2 and w not in stop_words]
 
 
-def _check_vision_coherence(vision: str, artifact_text: str, artifact_name: str,
-                             min_keyword_ratio: float = 0.25) -> bool:
+def _check_vision_coherence(
+    vision: str,
+    artifact_text: str,
+    artifact_name: str,
+    min_keyword_ratio: float = 0.25,
+    user_stories: str = "",
+    workspace_path: Optional[Path] = None,
+) -> bool:
     """
-    Check that an artifact is coherent with the original vision by verifying
-    that a reasonable fraction of vision keywords appear in the artifact.
+    Check that an artifact is coherent with the original vision.
 
-    Returns True if coherent, False if the artifact seems off-topic.
+    Fails when vision keywords are missing OR when the artifact introduces
+    stack tiers/frameworks not justified by the vision (or locked manifest).
     """
+    stack_manifest = None
+    if workspace_path:
+        try:
+            from .solutioning_loop import read_stack_manifest
+            stack_manifest = read_stack_manifest(workspace_path)
+        except Exception:
+            stack_manifest = None
+
+    overreach = detect_stack_overreach(
+        vision, artifact_text, user_stories, stack_manifest=stack_manifest
+    )
+    if overreach:
+        logger.warning(
+            "⚠️ Stack overreach FAILED for %s: %s",
+            artifact_name,
+            overreach,
+        )
+        return False
+
     keywords = _extract_vision_keywords(vision)
     if not keywords:
         return True  # nothing to check
@@ -457,13 +499,127 @@ class SoftwareDevWorkflow:
         return bool(getattr(pr_cfg, "enabled", False))
 
     def _solutioning_enabled(self) -> bool:
-        """Return True when the solutioning loop should run before PO phase."""
+        """Return True when a stack contract phase should run before PO.
+
+        Prefer job ``capability_profile.solutioning_path`` when present; otherwise
+        fall back to legacy solutioning config / auto_approve_solution metadata.
+        """
+        if self._resolve_effective_solutioning_path() is not None:
+            return True
+        return False
+
+    def _resolve_effective_solutioning_path(self) -> Optional[str]:
+        """
+        Resolve Fast/Full path for this job, or None to skip stack contract.
+
+        - capability_profile.solutioning_path = full|fast|adaptive → resolved path
+        - absent capability_profile → config.solutioning.enabled ? full : None
+        """
         metadata = self._load_job_metadata()
-        auto_approve = metadata.get("auto_approve_solution")
-        if auto_approve is not None:
-            return not bool(auto_approve)
+        # Legacy override: auto_approve_solution=True means skip solutioning entirely
+        if metadata.get("auto_approve_solution") is True and not metadata.get("capability_profile"):
+            return None
+        if metadata.get("auto_approve_solution") is False and not metadata.get("capability_profile"):
+            return "full"
+
+        profile_meta = metadata.get("capability_profile")
+        if isinstance(profile_meta, dict) and profile_meta.get("solutioning_path"):
+            return decide_solutioning_path(
+                self.vision or "",
+                solutioning_path=profile_meta.get("solutioning_path"),
+            )
+
         sol_cfg = getattr(self.config, "solutioning", None) if self.config else None
-        return bool(getattr(sol_cfg, "enabled", False))
+        if bool(getattr(sol_cfg, "enabled", False)):
+            mode = (getattr(sol_cfg, "mode", None) or "full")
+            return decide_solutioning_path(self.vision or "", solutioning_path=mode)
+        return None
+
+    def _run_fast_stack_decision(self):
+        """Lock stack_manifest + solution_spec without Research/Critique."""
+        from .solutioning_loop import run_fast_stack_decision
+
+        profile = infer_capability_profile(self.vision or "")
+        result = run_fast_stack_decision(self.vision or "", profile, self.workspace_path)
+        if result.spec_path.exists():
+            try:
+                self.solution_spec = result.spec_path.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                pass
+        metadata = self._load_job_metadata()
+        cap = dict(metadata.get("capability_profile") or {})
+        cap["solutioning_path"] = "fast"
+        cap["effective_path"] = "fast"
+        cap["suggested_path"] = profile.suggested_path
+        metadata["capability_profile"] = cap
+        metadata["solution_approved"] = True  # fast path does not pause for review
+        self._update_job_metadata(metadata)
+        self._report_progress(
+            "solutioning",
+            28,
+            "Fast stack contract locked (stack_manifest.json)",
+        )
+        return result
+
+    def _load_solution_spec_text(self) -> str:
+        if self.solution_spec:
+            return self.solution_spec
+        spec_path = self.workspace_path / "solution_spec.md"
+        if spec_path.exists():
+            try:
+                return spec_path.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                pass
+        return ""
+
+    def _solution_contract_active(self) -> bool:
+        """True when the user approved solution review and a spec exists."""
+        metadata = self._load_job_metadata()
+        if not metadata.get("solution_approved"):
+            return False
+        return bool(self._load_solution_spec_text().strip())
+
+    def _ensure_solution_contract_locked(self) -> None:
+        """Persist stack_manifest.json from the approved solution_spec if missing."""
+        if not self._solution_contract_active():
+            return
+        if _load_workspace_stack_manifest(self.workspace_path):
+            return
+        try:
+            from .solutioning_loop import write_stack_manifest_from_solution_spec
+
+            write_stack_manifest_from_solution_spec(
+                self.vision or "",
+                infer_capability_profile(self.vision or "", self.user_stories or ""),
+                self.workspace_path,
+                spec_text=self._load_solution_spec_text(),
+            )
+            logger.info("Locked stack_manifest.json from approved solution_spec")
+        except Exception as exc:
+            logger.warning("Could not lock stack_manifest from approved solution: %s", exc)
+
+    def _run_stack_contract_phase(self):
+        """
+        After Meta: run Fast lock or Full solutioning based on capability_profile.
+
+        Returns a pause dict when Full path awaits human review; otherwise None.
+        """
+        path = self._resolve_effective_solutioning_path()
+        if path is None:
+            return None
+
+        metadata = self._load_job_metadata()
+        if path == "full" and metadata.get("solution_approved"):
+            self._ensure_solution_contract_locked()
+            return None
+
+        if path == "fast":
+            self._run_fast_stack_decision()
+            return None
+
+        # Full solutioning loop then pause for review
+        self._run_solutioning_loop()
+        return self._pause_for_solution_review()
 
     def _enrich_project_context_for_solutioning(self) -> str:
         """Return project_context enriched with an EXISTING CODEBASE section for brownfield jobs.
@@ -834,11 +990,9 @@ class SoftwareDevWorkflow:
         if start_index == 0 and not resume:
             self.run_meta_phase()
 
-            if self._solutioning_enabled():
-                metadata = self._load_job_metadata()
-                if not metadata.get("solution_approved"):
-                    self._run_solutioning_loop()
-                    return self._pause_for_solution_review()
+            pause = self._run_stack_contract_phase()
+            if pause is not None:
+                return pause
 
             # Assess existing stories to decide whether to skip PO
             assessment = assess_epic_stories(
@@ -2076,7 +2230,8 @@ class SoftwareDevWorkflow:
 
         # Coherence check
         if self.user_stories and not _check_vision_coherence(
-            self.vision, self.user_stories, "user_stories.md"
+            self.vision, self.user_stories, "user_stories.md",
+            user_stories=self.user_stories or "",
         ):
             logger.warning("⚠️ User stories failed coherence check — re-running PO")
             if user_stories_file.exists():
@@ -2147,16 +2302,30 @@ class SoftwareDevWorkflow:
             workspace_path=self.workspace_path,
         )
         
+        contract_active = self._solution_contract_active()
+        try:
+            brief = build_stack_selection_brief(
+                self.vision or "",
+                self.user_stories or "",
+                approved_solution=contract_active,
+            )
+            (self.workspace_path / "stack_selection_brief.md").write_text(brief, encoding="utf-8")
+        except Exception as e:
+            logger.warning("Could not save stack_selection_brief.md: %s", e)
+
         # Run designer agent with vision for grounding
         designer_rag = get_phase_rag_context(
             self.document_indexer, "designer", self.config,
             extra_query=(self.user_stories or "")[:1500],
         )
+        solution_spec_text = self._load_solution_spec_text() if contract_active else ""
         result = self.designer_agent.run(
             self.user_stories or "",
             self.project_context,
             vision=self.vision,
             reference_context=designer_rag,
+            approved_solution=contract_active,
+            solution_spec=solution_spec_text,
         )
         
         # Fallback: if agent returned content but didn't call file_writer
@@ -2168,20 +2337,61 @@ class SoftwareDevWorkflow:
             with open(design_spec_file, 'r', encoding='utf-8') as f:
                 self.design_spec = f.read()
             
-            # Validate design spec coherence with vision
-            if not _check_vision_coherence(self.vision, self.design_spec, "design_spec.md"):
-                logger.warning("⚠️ Design spec failed coherence check — re-running designer with stronger grounding")
+            # Validate design spec coherence with vision (keywords + stack overreach)
+            overreach = None
+            spec_mismatch = None
+            if contract_active:
+                spec_mismatch = detect_solution_spec_mismatch(
+                    solution_spec_text,
+                    self.design_spec,
+                    stack_manifest=_load_workspace_stack_manifest(self.workspace_path),
+                )
+            else:
+                overreach = detect_stack_overreach(
+                    self.vision,
+                    self.design_spec,
+                    self.user_stories or "",
+                    stack_manifest=_load_workspace_stack_manifest(self.workspace_path),
+                )
+            coherence_ok = True
+            if not contract_active:
+                coherence_ok = _check_vision_coherence(
+                    self.vision,
+                    self.design_spec,
+                    "design_spec.md",
+                    user_stories=self.user_stories or "",
+                    workspace_path=self.workspace_path,
+                )
+            if spec_mismatch or overreach or not coherence_ok:
+                reason = spec_mismatch or overreach or "design did not align with vision keywords"
+                logger.warning(
+                    "⚠️ Design spec failed coherence check — re-running designer (%s)",
+                    reason,
+                )
                 self.designer_agent = DesignerAgent(
                     custom_backstory=backstory,
                     budget_tracker=self.budget_tracker,
                     workspace_path=self.workspace_path,
+                )
+                correction = (
+                    f"SOLUTION CONTRACT VIOLATION: {reason}\n"
+                    "Rewrite design_spec.md to match the APPROVED SOLUTION SPEC exactly."
+                    if contract_active
+                    else (
+                        f"STACK CORRECTION REQUIRED: {reason}\n"
+                        "Simplify the design to the minimal architecture the vision requires."
+                    )
                 )
                 result = self.designer_agent.run(
                     self.user_stories or "",
                     self.project_context,
                     vision=self.vision,
                     reference_context=designer_rag,
+                    stack_correction=correction,
+                    approved_solution=contract_active,
+                    solution_spec=solution_spec_text,
                 )
+                _persist_phase_artifact(self.workspace_path, "design_spec.md", result)
                 if design_spec_file.exists():
                     self.design_spec = design_spec_file.read_text(encoding="utf-8", errors="replace")
 
@@ -2215,25 +2425,42 @@ class SoftwareDevWorkflow:
             self.document_indexer, "tech_architect", self.config,
             extra_query=(self.design_spec or "")[:1500],
         )
+        contract_active = self._solution_contract_active()
+        solution_spec_text = self._load_solution_spec_text() if contract_active else ""
         
         result = ""
         max_attempts = 3
         validation_msg = ""
+        stack_correction: Optional[str] = None
         
         for attempt in range(max_attempts):
-            if attempt == 0:
+            if attempt == 0 or stack_correction:
                 result = self.tech_architect_agent.run(
                     self.design_spec or "",
                     self.vision,
                     self.project_context,
                     reference_context=ta_rag,
+                    user_stories=self.user_stories or "",
+                    stack_correction=stack_correction,
+                    approved_solution=contract_active,
+                    solution_spec=solution_spec_text,
                 )
+                stack_correction = None
             else:
                 logger.info(f"🔄 Tech Architect retry attempt {attempt + 1}/{max_attempts}")
                 self._report_progress('tech_architect', 60 + attempt, f"Retrying tech stack definition (Attempt {attempt + 1})...")
-                result = str(self.tech_architect_agent.agent.chat(
-                    f"Your previous tech stack definition was incomplete. Please rewrite tech_stack.md addressing these issues:\n{validation_msg}"
-                ))
+                result = self.tech_architect_agent.run(
+                    self.design_spec or "",
+                    self.vision,
+                    self.project_context,
+                    reference_context=ta_rag,
+                    user_stories=self.user_stories or "",
+                    stack_correction=(
+                        f"Your previous tech stack was incomplete. Fix these issues:\n{validation_msg}"
+                    ),
+                    approved_solution=contract_active,
+                    solution_spec=solution_spec_text,
+                )
             
             # Fallback: if agent returned content but didn't call file_writer
             _persist_phase_artifact(self.workspace_path, "tech_stack.md", result)
@@ -2243,26 +2470,96 @@ class SoftwareDevWorkflow:
                 with open(tech_stack_file, 'r', encoding='utf-8') as f:
                     self.tech_stack = f.read()
                     
-                validation_result = self.task_manager.validate_tech_stack_completeness(self.tech_stack)
-                if validation_result["valid"]:
+                validation_result = self.task_manager.validate_tech_stack_completeness(
+                    self.tech_stack,
+                    design_spec=self.design_spec or "",
+                    solution_spec=solution_spec_text if contract_active else "",
+                )
+                spec_mismatch = None
+                overreach = None
+                if contract_active:
+                    spec_mismatch = detect_solution_spec_mismatch(
+                        solution_spec_text,
+                        self.tech_stack,
+                        stack_manifest=_load_workspace_stack_manifest(self.workspace_path),
+                    )
+                else:
+                    overreach = detect_stack_overreach(
+                        self.vision,
+                        self.tech_stack,
+                        self.user_stories or "",
+                        stack_manifest=_load_workspace_stack_manifest(self.workspace_path),
+                    )
+                coherent = True
+                if not contract_active:
+                    coherent = _check_vision_coherence(
+                        self.vision,
+                        self.tech_stack,
+                        "tech_stack.md",
+                        user_stories=self.user_stories or "",
+                        workspace_path=self.workspace_path,
+                    )
+                if validation_result["valid"] and coherent and not overreach and not spec_mismatch:
                     break
+                if spec_mismatch:
+                    validation_msg = spec_mismatch
+                    stack_correction = (
+                        f"SOLUTION CONTRACT VIOLATION: {spec_mismatch}\n"
+                        "The user approved the solution_spec architecture. Rewrite "
+                        "tech_stack.md and implementation_plan.md to implement it exactly — "
+                        "same frameworks, services, and folder layout."
+                    )
+                    logger.warning("Tech stack deviates from approved solution_spec: %s", spec_mismatch)
+                elif overreach:
+                    validation_msg = overreach
+                    stack_correction = (
+                        f"STACK CORRECTION REQUIRED: {overreach}\n"
+                        "Choose the minimal stack that satisfies the PROJECT VISION. "
+                        "Rewrite tech_stack.md and implementation_plan.md."
+                    )
+                    logger.warning("Tech stack over-scoped relative to vision: %s", overreach)
+                elif not coherent:
+                    validation_msg = "tech_stack.md does not align with the project vision"
+                    stack_correction = (
+                        "The tech stack does not match the project vision. "
+                        "Rewrite tech_stack.md using the STACK SELECTION BRIEF."
+                    )
                 else:
                     validation_msg = "\n".join(f"- {i}" for i in validation_result["issues"])
                     logger.warning(f"Tech stack validation failed: {validation_msg}")
-                    # Only delete the file if there are more retries remaining,
-                    # so the last attempt's tech_stack.md is preserved and the
-                    # pipeline can always proceed to register_granular_tasks.
-                    if attempt < max_attempts - 1:
-                        tech_stack_file.unlink()
-        
+                if attempt < max_attempts - 1:
+                    tech_stack_file.unlink()
+
+        if tech_stack_file.exists() and contract_active:
+            final_mismatch = detect_solution_spec_mismatch(
+                solution_spec_text,
+                self.tech_stack or tech_stack_file.read_text(encoding="utf-8", errors="replace"),
+                stack_manifest=_load_workspace_stack_manifest(self.workspace_path),
+            )
+            if final_mismatch:
+                raise RuntimeError(
+                    f"Cannot proceed: tech_stack.md violates approved solution_spec — {final_mismatch}"
+                )
+
         if tech_stack_file.exists():
-            # Validate tech stack coherence with vision
-            _check_vision_coherence(self.vision, self.tech_stack, "tech_stack.md")
+            if not contract_active:
+                # Final coherence log (retry loop already attempted correction)
+                _check_vision_coherence(
+                    self.vision,
+                    self.tech_stack,
+                    "tech_stack.md",
+                    user_stories=self.user_stories or "",
+                    workspace_path=self.workspace_path,
+                )
 
             # Register granular per-file tasks with domain context from design spec
             self.task_manager.register_granular_tasks(
                 self.design_spec or "",
                 self.tech_stack,
+            )
+            self.task_manager.scaffold_directories_from_tech_stack(
+                self.tech_stack,
+                self.workspace_path,
             )
 
             # Skills-first test plan (2nd pass — non-fatal, reuses existing test_plan.md)
@@ -2593,7 +2890,7 @@ class SoftwareDevWorkflow:
         Resolution order (first match wins):
         1. ``PARALLEL_FILE_WORKERS`` environment variable (runtime override).
         2. ``generation.parallel_file_workers`` from the loaded config.yaml.
-        3. Hard-coded default of 5.
+        3. Hard-coded default of 2.
         """
         env_val = os.environ.get("PARALLEL_FILE_WORKERS")
         if env_val:
@@ -2602,7 +2899,7 @@ class SoftwareDevWorkflow:
             gen = getattr(self.config, "generation", None)
             if gen is not None:
                 return max(1, int(gen.parallel_file_workers))
-        return 5
+        return 2
 
     def _generation_settings(self):
         """Return generation config or sensible defaults."""
@@ -2723,6 +3020,9 @@ class SoftwareDevWorkflow:
         def worker(worker_id: int) -> int:
             set_thread_workspace(str(self.workspace_path))
             set_allowed_file_paths(None, workspace=str(self.workspace_path))
+            from ..utils.llm_config import set_thread_config
+            if self.config is not None:
+                set_thread_config(self.config)
 
             agent = agent_factory()
             local_count = 0
@@ -3004,6 +3304,35 @@ class SoftwareDevWorkflow:
                 )
             attempt += 1
 
+    def _ensure_granular_file_tasks_registered(self) -> None:
+        """Register per-file dev tasks when missing (resume after tech_architect failure)."""
+        existing = sum(
+            1 for t in self.task_manager.get_all_tasks()
+            if t.task_type == "file_creation"
+        )
+        if existing:
+            return
+        ts_path = self.workspace_path / "tech_stack.md"
+        if not (self.tech_stack or "").strip() and ts_path.exists():
+            try:
+                self.tech_stack = ts_path.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                pass
+        if not (self.tech_stack or "").strip():
+            logger.warning("No file_creation tasks and no tech_stack.md — dev cannot scaffold files")
+            return
+        logger.warning(
+            "No file_creation tasks registered — recovering from tech_stack.md (resume path)"
+        )
+        self.task_manager.register_granular_tasks(
+            self.design_spec or "",
+            self.tech_stack,
+        )
+        self.task_manager.scaffold_directories_from_tech_stack(
+            self.tech_stack,
+            self.workspace_path,
+        )
+
     def run_development_phase(self) -> str:
         """Run Development phase: iterate per-task, generating one file at a time.
 
@@ -3019,6 +3348,13 @@ class SoftwareDevWorkflow:
         # Ensure test_plan.md exists on resume (idempotent — skips if present)
         self._generate_test_plan()
 
+        self._ensure_granular_file_tasks_registered()
+
+        if self.tech_stack:
+            self.task_manager.scaffold_directories_from_tech_stack(
+                self.tech_stack,
+                self.workspace_path,
+            )
 
         if self.state_machine.get_current_state() != ProjectState.DEVELOPMENT:
             if self.state_machine.can_transition(ProjectState.DEVELOPMENT):
@@ -3500,14 +3836,19 @@ class SoftwareDevWorkflow:
         import concurrent.futures
         _DEVOPS_TIMEOUT_SECS = int(os.environ.get("DEVOPS_TIMEOUT_SECS", "180"))
 
+        def _devops_worker():
+            from ..utils.llm_config import set_thread_config
+            if self.config is not None:
+                set_thread_config(self.config)
+            devops_agent.run(
+                tech_stack=self.tech_stack or "",
+                pipeline_type=pipeline_type,
+                project_context=project_context,
+            )
+
         try:
             with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-                future = pool.submit(
-                    devops_agent.run,
-                    tech_stack=self.tech_stack or "",
-                    pipeline_type=pipeline_type,
-                    project_context=project_context,
-                )
+                future = pool.submit(_devops_worker)
                 future.result(timeout=_DEVOPS_TIMEOUT_SECS)
             logger.info("✅ DevOps phase completed")
             self._report_progress('devops', 95, "Containerfiles and pipelines created")
@@ -3515,6 +3856,9 @@ class SoftwareDevWorkflow:
             logger.warning("⚠️ DevOps phase timed out after %ds — continuing", _DEVOPS_TIMEOUT_SECS)
             self._report_progress('devops', 95, "DevOps phase timed out — continuing")
         except Exception as exc:
+            if _is_transient_llm_error(exc):
+                logger.warning("⚠️ DevOps phase hit transient error: %s — propagating for retry", exc)
+                raise
             logger.warning("⚠️ DevOps phase failed: %s — continuing", exc)
             self._report_progress('devops', 95, f"DevOps phase failed: {exc}")
 
@@ -3522,6 +3866,9 @@ class SoftwareDevWorkflow:
 
     def _run_phase_with_retry(self, phase_name: str, phase_fn: Callable[[], Any]) -> Any:
         """Run a phase with retries on transient LLM/network errors."""
+        from ..utils.llm_config import set_thread_config
+        if self.config is not None:
+            set_thread_config(self.config)
         last_error = None
         for attempt in range(PHASE_RETRY_ATTEMPTS):
             try:
@@ -3618,12 +3965,10 @@ class SoftwareDevWorkflow:
             else:
                 # Phase 1: Meta (has its own retry logic)
                 self.run_meta_phase()
-                # Solutioning loop (config-gated)
-                if self._solutioning_enabled():
-                    metadata = self._load_job_metadata()
-                    if not metadata.get("solution_approved"):
-                        self._run_solutioning_loop()
-                        return self._pause_for_solution_review()
+                # Adaptive stack contract (Full / Fast / Adaptive)
+                pause = self._run_stack_contract_phase()
+                if pause is not None:
+                    return pause
                 # Phases 2–4: planning — can be paused for human review
                 self._run_phase_with_retry("product_owner", self.run_product_owner_phase)
                 self._run_phase_with_retry("designer", self.run_designer_phase)

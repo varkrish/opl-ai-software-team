@@ -138,6 +138,9 @@ class SolutionArchitectAgent:
             else None
         )
 
+        # Each architect pass is a fresh task; stale tool messages from pass N-1
+        # break Vertex/MaaS ("tool role without previous assistant message").
+        self.agent.reset_chat()
         result = str(self.agent.chat(prompt))
 
         if spec_path and result.strip():
@@ -185,4 +188,5 @@ class SolutionCritiqueAgent:
             spec_content=spec_content,
             project_context=project_context or "",
         )
+        self.agent.reset_chat()
         return str(self.agent.chat(prompt))

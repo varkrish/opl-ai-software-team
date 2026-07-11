@@ -199,7 +199,7 @@ async def health_live():
 # ---------------------------------------------------------------------------
 
 class CreateJobRequest(BaseModel):
-    vision: str
+    vision: str = ""
     backend: str = "opl-ai-team"
     team_id: Optional[str] = None
     github_urls: List[str] = []
@@ -209,6 +209,15 @@ class CreateJobRequest(BaseModel):
     jira_issue_key: Optional[str] = None   # e.g. "PROJ-123"
     jira_issue_url: Optional[str] = None   # full browse URL
     jira_issue_summary: Optional[str] = None  # issue title for display
+    capability_profile: Optional[Dict[str, Any]] = None
+
+
+class PreviewCapabilitiesRequest(BaseModel):
+    vision: str
+
+
+# Re-export for callers / tests that import from asgi_app
+from crew_studio.workflow_config import normalize_capability_profile_metadata  # noqa: E402
 
 
 def _resolve_backend(name: str):
@@ -254,6 +263,20 @@ def _build_forward_headers(request: Request) -> dict:
     return forward_headers
 
 
+@app.post("/api/jobs/preview-capabilities")
+async def preview_capabilities(body: PreviewCapabilitiesRequest, user: CurrentUser = Depends(get_current_user)):
+    """Heuristic CapabilityProfile for create-job UI (no LLM, no job created)."""
+    vision = (body.vision or "").strip()
+    if not vision:
+        raise HTTPException(status_code=422, detail="Vision is required")
+    try:
+        from llamaindex_crew.utils.vision_stack_analysis import infer_capability_profile
+    except ImportError:
+        from src.llamaindex_crew.utils.vision_stack_analysis import infer_capability_profile
+    profile = infer_capability_profile(vision)
+    return profile.to_dict()
+
+
 @app.post("/api/jobs")
 async def create_job(request: Request, user: CurrentUser = Depends(get_current_user)):
     """Create a new job. JSON for greenfield; multipart is delegated to Flask (ZIP, import, migration, refactor)."""
@@ -282,6 +305,40 @@ async def create_job(request: Request, user: CurrentUser = Depends(get_current_u
                 status_code=502,
                 detail="Multipart job create failed (see server logs).",
             ) from None
+
+        # Merge capability_profile into metadata when the form provided it
+        try:
+            payload = getattr(resp, "data", None) or resp.get_data()
+            if resp.status_code in (200, 201) and payload:
+                data = json.loads(payload)
+                job_id = data.get("job_id")
+                text = body_bytes.decode("utf-8", errors="ignore")
+                import re as _re
+                m = _re.search(
+                    r'name="capability_profile"[^\n]*\r?\n\r?\n(\{.*?\})\r?\n--',
+                    text,
+                    _re.DOTALL,
+                )
+                if job_id and m:
+                    try:
+                        cap = json.loads(m.group(1))
+                    except json.JSONDecodeError:
+                        cap = None
+                    if isinstance(cap, dict):
+                        job = job_db.get_job(job_id)
+                        if job:
+                            raw_meta = job.get("metadata") or {}
+                            meta = raw_meta if isinstance(raw_meta, dict) else {}
+                            if isinstance(raw_meta, str):
+                                try:
+                                    meta = json.loads(raw_meta) if raw_meta else {}
+                                except (json.JSONDecodeError, TypeError):
+                                    meta = {}
+                            meta = normalize_capability_profile_metadata(meta, cap)
+                            job_db.update_job(job_id, {"metadata": json.dumps(meta)})
+        except Exception:
+            logger.debug("Multipart capability_profile merge skipped", exc_info=True)
+
         out_ct = resp.headers.get("Content-Type") or "application/json"
         media = out_ct.split(";")[0].strip()
         payload = getattr(resp, "data", None) or resp.get_data()
@@ -360,6 +417,7 @@ async def create_job(request: Request, user: CurrentUser = Depends(get_current_u
         meta["jira_issue_url"] = body.jira_issue_url
     if body.jira_issue_summary:
         meta["jira_issue_summary"] = body.jira_issue_summary
+    meta = normalize_capability_profile_metadata(meta, body.capability_profile)
 
     effective_mode = body.mode
     if body.mode == "fix":
@@ -541,6 +599,27 @@ async def approve_job(job_id: str, user: CurrentUser = Depends(get_current_user)
 
     if status == "pending_solution_review":
         meta["solution_approved"] = True
+        workspace = job.get("workspace_path")
+        if workspace:
+            try:
+                from pathlib import Path as _Path
+                from src.llamaindex_crew.workflows.solutioning_loop import (
+                    write_stack_manifest_from_solution_spec,
+                )
+                from src.llamaindex_crew.utils.vision_stack_analysis import (
+                    infer_capability_profile,
+                )
+
+                write_stack_manifest_from_solution_spec(
+                    job.get("vision", ""),
+                    infer_capability_profile(job.get("vision", "")),
+                    _Path(workspace),
+                )
+            except Exception:
+                logger.exception(
+                    "Could not lock stack_manifest on solution approval for job %s",
+                    job_id,
+                )
         updates = {
             "status": "queued",
             "current_phase": "product_owner",
@@ -1204,6 +1283,7 @@ async def test_github_connection_endpoint(
 class WorkflowConfigRequest(BaseModel):
     plan_review_enabled: bool = False
     solutioning_enabled: bool = False
+    solutioning_mode: str = "full"
     solutioning_max_passes: int = 3
     solutioning_max_github_searches: int = 10
     auto_approve_plan: bool = False
@@ -1211,12 +1291,14 @@ class WorkflowConfigRequest(BaseModel):
     tldr_max_chars: int = 6000
     tldr_include_structure: bool = True
     tldr_min_completed_files: int = 1
+    parallel_file_workers: int = 2
 
 
 class WorkflowConfigResponse(BaseModel):
     configured: bool
     plan_review_enabled: bool = False
     solutioning_enabled: bool = False
+    solutioning_mode: str = "full"
     solutioning_max_passes: int = 3
     solutioning_max_github_searches: int = 10
     auto_approve_plan: bool = False
@@ -1224,6 +1306,7 @@ class WorkflowConfigResponse(BaseModel):
     tldr_max_chars: int = 6000
     tldr_include_structure: bool = True
     tldr_min_completed_files: int = 1
+    parallel_file_workers: int = 2
     updated_at: Optional[str] = None
 
 

@@ -12,12 +12,39 @@ from ..config import ConfigLoader
 from ..utils.prompt_loader import load_prompt
 from ..utils.llm_config import get_supports_react
 from ..utils.output_parser import simple_mode_format_instruction, write_files_from_response
+from ..utils.vision_stack_analysis import (
+    build_stack_selection_brief,
+    format_approved_solution_contract,
+)
+
+
+def _format_stack_manifest_section(workspace_path) -> str:
+    """Binding stack_manifest constraints for Designer / Tech Architect prompts."""
+    if not workspace_path:
+        return ""
+    try:
+        from ..workflows.solutioning_loop import read_stack_manifest
+        manifest = read_stack_manifest(workspace_path)
+    except Exception:
+        return ""
+    if not manifest:
+        return ""
+    import json
+    return (
+        "BINDING STACK MANIFEST (locked early — outranks design drafts for stack breadth):\n"
+        f"{json.dumps(manifest, indent=2)}\n"
+        "Do NOT invent tiers listed in forbidden_tiers. "
+        "chosen_stack and delivery_surface are binding constraints."
+    )
 
 logger = logging.getLogger(__name__)
 
 _DEFAULT_DESIGN_PROMPT = """\
 You are the High-Level Designer. Your goal is to translate user stories into a \
 logical, implementation-ready architecture.
+
+Match design complexity to what the vision actually requires — do not add application \
+platforms, databases, or backend tiers unless the vision or user stories need them.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 INPUTS
@@ -30,11 +57,8 @@ Project Context:
 {context_digest}
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-FRAMEWORK REFERENCE (from skills — use this to inform your design)
+FRAMEWORK REFERENCE (when required by vision — not a default platform choice)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-The following skill documents describe real conventions for the target framework.
-Use them to make your design CONCRETE and framework-aware.
-
 {skill_context}
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -46,27 +70,8 @@ TASK — Create design_spec.md
 3. For COMPLEX projects: Bounded Contexts, Data Flow, Domain Events, C4 diagrams.
 4. Define interface contracts.
 
-CRITICAL — Use the FRAMEWORK REFERENCE above to:
-- Name components and modules using the framework's actual terminology \
-(e.g. DocType, Page, Report for Frappe; Component, Service, Hook for React).
-- Describe domain entities using the framework's data modelling approach \
-(e.g. DocType JSON + controller.py for Frappe, Prisma schema for Node).
-- Specify UI patterns the framework actually supports \
-(e.g. Frappe Page, Workspace, Dialog; React Router, Context).
-- List framework-specific integration points \
-(e.g. hooks.py, fixtures, whitelisted APIs for Frappe).
-- When showing file paths, use the EXACT nesting from the FRAMEWORK REFERENCE.
-
-FRAPPE FILE PATHS — MANDATORY RULE:
-If this is a Frappe app, every file path MUST use THREE levels of nesting:
-  app_name/app_name/module_name/doctype/doctype_name/file
-Example for app "leave_tracker", module "Leave Tracker":
-  CORRECT: leave_tracker/leave_tracker/leave_tracker/doctype/leave_request/leave_request.json
-  WRONG:   leave_tracker/leave_tracker/doctype/leave_request/leave_request.json
-The doctype/ folder is ALWAYS inside a module folder, never directly under the inner package.
-
-The goal is a design that a developer familiar with the framework can \
-immediately start implementing — not a generic DDD document.
+Use framework terminology only when the vision requires that framework.
+The goal is a design a developer can implement immediately — not over-scoped architecture.
 
 Call file_writer(file_path='design_spec.md', content='<your design>')
 """
@@ -144,6 +149,9 @@ You create C4 Model diagrams and define component capabilities."""
         context_digest: Optional[str] = None,
         vision: Optional[str] = None,
         reference_context: Optional[str] = None,
+        stack_correction: Optional[str] = None,
+        approved_solution: bool = False,
+        solution_spec: Optional[str] = None,
     ) -> str:
         """
         Create design specification based on user stories
@@ -163,6 +171,31 @@ You create C4 Model diagrams and define component capabilities."""
                 role="designer",
                 workspace_path=self.workspace_path,
             )
+            if not (skill_context or "").strip():
+                skill_context = (
+                    "(No indexed skill matched closely enough.) Infer architecture from "
+                    "the STACK SELECTION BRIEF and vision. Use framework terminology "
+                    "only when the vision requires that framework."
+                )
+
+        stack_brief = build_stack_selection_brief(
+            vision or "",
+            user_stories or "",
+            approved_solution=approved_solution,
+        )
+        manifest_section = _format_stack_manifest_section(self.workspace_path)
+        if approved_solution and not (solution_spec or "").strip() and self.workspace_path:
+            spec_path = self.workspace_path / "solution_spec.md"
+            if spec_path.exists():
+                try:
+                    solution_spec = spec_path.read_text(encoding="utf-8", errors="replace")
+                except OSError:
+                    solution_spec = solution_spec or ""
+        solution_contract = (
+            format_approved_solution_contract(solution_spec or "")
+            if approved_solution
+            else ""
+        )
 
         task_prompt = load_prompt(
             'designer/create_design_spec_task.txt',
@@ -178,8 +211,23 @@ You create C4 Model diagrams and define component capabilities."""
         if vision:
             prompt = (
                 f"ORIGINAL PROJECT VISION (this is the ground truth — your design MUST implement this):\n"
-                f"{vision}\n\n{prompt}"
+                f"{vision}\n\n"
+                f"{solution_contract + chr(10) + chr(10) if solution_contract else ''}"
+                f"{stack_brief}\n\n"
+                f"{manifest_section + chr(10) + chr(10) if manifest_section else ''}"
+                f"{prompt}"
             )
+        elif stack_brief:
+            prefix = f"{solution_contract + chr(10) + chr(10) if solution_contract else ''}{stack_brief}\n\n"
+            if manifest_section:
+                prefix = f"{solution_contract + chr(10) + chr(10) if solution_contract else ''}{stack_brief}\n\n{manifest_section}\n\n"
+            prompt = f"{prefix}{prompt}"
+        elif manifest_section:
+            prompt = f"{manifest_section}\n\n{prompt}"
+        elif solution_contract:
+            prompt = f"{solution_contract}\n\n{prompt}"
+        if stack_correction:
+            prompt = f"{stack_correction.strip()}\n\n{prompt}"
         if reference_context and reference_context.strip():
             prompt = (
                 f"REFERENCE DOCUMENT EXCERPTS (retrieved — use for architecture decisions):\n"
@@ -216,7 +264,10 @@ You create C4 Model diagrams and define component capabilities."""
         return response_str
     
     def run(self, user_stories: str, context_digest: Optional[str] = None,
-            vision: Optional[str] = None, reference_context: Optional[str] = None) -> str:
+            vision: Optional[str] = None, reference_context: Optional[str] = None,
+            stack_correction: Optional[str] = None,
+            approved_solution: bool = False,
+            solution_spec: Optional[str] = None) -> str:
         """
         Run the Designer agent workflow
         
@@ -225,10 +276,15 @@ You create C4 Model diagrams and define component capabilities."""
             context_digest: Optional Project Context Digest
             vision: Original project vision
             reference_context: Optional RAG-retrieved reference excerpts
+            approved_solution: When True, solution_spec is binding (human reviewed)
+            solution_spec: Approved solution specification text
         
         Returns:
             Result message
         """
         return self.create_design_spec(
             user_stories, context_digest, vision=vision, reference_context=reference_context,
+            stack_correction=stack_correction,
+            approved_solution=approved_solution,
+            solution_spec=solution_spec,
         )

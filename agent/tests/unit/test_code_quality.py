@@ -234,9 +234,12 @@ src/
 src/
 ├── Application.java
 ├── models/
-│   └── User.java
-└── tests/
-    └── UserTest.java
+│   ├── User.java
+│   └── Account.java
+├── services/
+│   └── UserService.java
+└── controllers/
+    └── UserController.java
 ```
 """
         result = task_mgr.validate_tech_stack_completeness(tech_stack)
@@ -248,16 +251,82 @@ src/
 src/
 ├── main.py
 ├── models.py
-└── tests/
-    └── test_models.py
+├── services.py
+└── api.py
 ```
 """
         result = task_mgr.validate_tech_stack_completeness(tech_stack)
         assert result["valid"] is True
 
+    def test_accepts_plain_path_list_without_tree_chars(self, task_mgr):
+        tech_stack = """
+# Root
+apps/gateway/src/main.ts
+apps/gateway/src/app.module.ts
+apps/gateway/src/auth.service.ts
+apps/web/src/pages/index.tsx
+docker-compose.yml
+"""
+        result = task_mgr.validate_tech_stack_completeness(tech_stack)
+        assert result["valid"] is True
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# 2. Granular Task Decomposition
+    def test_rejects_shallow_directory_only_tree(self, task_mgr):
+        """High-level dirs + config only — like a83b36dd before fix."""
+        tech_stack = """
+```
+/repo
+├── apps/
+│   ├── gateway/
+│   ├── banking/
+│   ├── tax-engine/
+│   └── web/
+├── infra/
+│   └── docker-compose.yml
+├── jest.config.js
+├── eslint.config.js
+└── prettier.config.js
+```
+"""
+        solution_spec = """
+## Major Components / Modules
+1. **Gateway API (NestJS)**
+2. **Open-Banking Service**
+3. **Accounting Core**
+4. **Tax Engine Service**
+5. **Reporting Front-end**
+"""
+        result = task_mgr.validate_tech_stack_completeness(
+            tech_stack,
+            solution_spec=solution_spec,
+        )
+        assert result["valid"] is False
+        assert any("too shallow" in i.lower() for i in result["issues"])
+
+    def test_rejects_missing_named_components(self, task_mgr):
+        tech_stack = """
+```
+apps/api/src/main.ts
+apps/api/src/app.module.ts
+apps/api/src/users.service.ts
+apps/api/src/users.controller.ts
+```
+"""
+        solution_spec = """
+1. **Gateway API**
+2. **Open-Banking Service**
+3. **Tax Engine Service**
+4. **Reporting Front-end**
+"""
+        result = task_mgr.validate_tech_stack_completeness(
+            tech_stack,
+            solution_spec=solution_spec,
+        )
+        assert result["valid"] is False
+        assert any(
+            phrase in i.lower()
+            for i in result["issues"]
+            for phrase in ("named components", "too shallow")
+        )
 # ═══════════════════════════════════════════════════════════════════════════════
 
 

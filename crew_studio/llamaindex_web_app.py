@@ -1223,6 +1223,20 @@ def create_job():
         target_repo_name = request.form.get('target_repo_name', '').strip()
         if target_repo_name:
             metadata['target_repo_name'] = target_repo_name
+        raw_cap = request.form.get('capability_profile')
+        if raw_cap:
+            try:
+                cap = json.loads(raw_cap)
+            except (json.JSONDecodeError, TypeError):
+                cap = None
+            if isinstance(cap, dict):
+                from crew_studio.workflow_config import normalize_capability_profile_metadata
+                metadata = normalize_capability_profile_metadata(
+                    metadata if isinstance(metadata, dict) else {}, cap
+                )
+        elif isinstance(metadata, dict) and 'capability_profile' not in metadata:
+            from crew_studio.workflow_config import normalize_capability_profile_metadata
+            metadata = normalize_capability_profile_metadata(metadata, None)
     else:
         data = request.json or {}
         vision = data.get('vision', '')
@@ -1236,6 +1250,15 @@ def create_job():
         target_repo_name = str(data.get('target_repo_name', '') or '').strip()
         if target_repo_name:
             metadata['target_repo_name'] = target_repo_name
+        if data.get('capability_profile') is not None:
+            from crew_studio.workflow_config import normalize_capability_profile_metadata
+            metadata = normalize_capability_profile_metadata(
+                metadata if isinstance(metadata, dict) else {},
+                data.get('capability_profile'),
+            )
+        elif isinstance(metadata, dict) and 'capability_profile' not in metadata:
+            from crew_studio.workflow_config import normalize_capability_profile_metadata
+            metadata = normalize_capability_profile_metadata(metadata, None)
     
     # Validate backend
     try:
