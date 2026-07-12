@@ -177,13 +177,52 @@ def run_fast_stack_decision(
     )
 
 
+_SPEC_DATA_TIER_SIGNALS = re.compile(
+    r"\b(?:redis|upstash|memcached|dynamodb|firestore|supabase|planetscale|"
+    r"neon|turso|postgres(?:ql)?|mysql|mariadb|mongodb|sqlite|cockroachdb|"
+    r"prisma|sequelize|typeorm|drizzle|knex|sqlalchemy)\b",
+    re.IGNORECASE,
+)
+
+_SPEC_GENERIC_DATA_WORDS = re.compile(
+    r"\b(?:cache|caching|database|orm|persistence)\b",
+    re.IGNORECASE,
+)
+
+_SPEC_NEGATION_PREFIX = re.compile(
+    r"(?:no|not|without|avoid|never|lack|exclude|skip)\s+"
+    r"(?:a\s+|any\s+|the\s+|separate\s+|additional\s+|complex\s+)*",
+    re.IGNORECASE,
+)
+
+
+def _spec_needs_data_tier(spec_text: str) -> bool:
+    """True when the approved spec actively selects persistence, caching, or databases.
+
+    Named products (Redis, PostgreSQL, etc.) are strong signals.
+    Generic words (cache, database, orm) are only counted when not negated.
+    """
+    if _SPEC_DATA_TIER_SIGNALS.search(spec_text or ""):
+        return True
+    for m in _SPEC_GENERIC_DATA_WORDS.finditer(spec_text or ""):
+        window = (spec_text or "")[max(0, m.start() - 60):m.start()]
+        if not _SPEC_NEGATION_PREFIX.search(window):
+            return True
+    return False
+
+
 def write_stack_manifest_from_solution_spec(
     vision: str,
     profile: Optional[CapabilityProfile],
     workspace_path: Path,
     spec_text: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Derive and write a full-path stack_manifest from an approved solution_spec."""
+    """Derive and write a full-path stack_manifest from an approved solution_spec.
+
+    The approved spec is the higher-authority contract — if it mentions Redis,
+    caching, Postgres, etc. then ``database`` must NOT be in ``forbidden_tiers``
+    even when the short vision text didn't mention persistence.
+    """
     workspace_path = Path(workspace_path)
     resolved = profile or infer_capability_profile(vision)
     if spec_text is None:
@@ -209,11 +248,23 @@ def write_stack_manifest_from_solution_spec(
     if not chosen:
         chosen = _minimal_chosen_stack(resolved, vision)
 
+    # --- Reconcile vision profile with approved spec content ---
+    spec_has_data = _spec_needs_data_tier(spec_text or "")
+    needs_persistence = resolved.needs_persistence or spec_has_data
+
     # Start from capability-based defaults, then unlock any tier already
     # selected by chosen_stack (technology-agnostic overlap — no framework lists).
     candidate_forbidden: List[str] = []
     if resolved.delivery_surface == "client_deliverable" and not resolved.needs_server_runtime:
         candidate_forbidden = list(_CLIENT_FORBIDDEN_TIERS)
+
+    # Approved spec explicitly uses data/cache → never forbid the database tier
+    if spec_has_data and "database" in candidate_forbidden:
+        candidate_forbidden.remove("database")
+        logger.info(
+            "Spec mentions data/cache tier — unlocking 'database' from forbidden_tiers"
+        )
+
     forbidden = _effective_forbidden_tiers(candidate_forbidden, chosen)
 
     delivery_surface = resolved.delivery_surface
@@ -234,7 +285,7 @@ def write_stack_manifest_from_solution_spec(
         "source": "full",
         "suggested_path": resolved.suggested_path,
         "explicit_technologies": list(resolved.explicit_technologies),
-        "needs_persistence": resolved.needs_persistence,
+        "needs_persistence": needs_persistence,
         "needs_api": resolved.needs_api or needs_server,
         "needs_auth": resolved.needs_auth,
         "needs_server_runtime": needs_server,

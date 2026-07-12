@@ -89,6 +89,56 @@ class TestRunFastStackDecision:
         assert "react" in [s.lower() for s in manifest["chosen_stack"]]
 
 
+TRAVEL_VISION = (
+    "Create an AI-powered Travel Planner UI called Voyager for families "
+    "to plan trips easily. Web UI with itinerary generation."
+)
+
+TRAVEL_SPEC_WITH_REDIS = """\
+# Solution Specification for Voyager
+
+## Technology Stack
+| Layer | Technology |
+|-------|------------|
+| Front-end | React 18 + Next.js 14 |
+| Backend | Express (Node.js) |
+| Caching | Upstash Redis |
+
+## Caching Strategy (Redis)
+1. AI Cache — Key: `ai:itinerary:{hash}` → JSON, TTL 15 min.
+2. Flight/Hotel Cache — Key: `amadeus:flights:{query}`, TTL 30 min.
+
+## Non-Goals
+- No on-premise self-hosted Redis.
+- No complex AI agents (LangChain).
+"""
+
+TRAVEL_SPEC_WITH_POSTGRES = """\
+# Solution Specification for Voyager
+
+## Technology Stack
+| Layer | Technology |
+|-------|------------|
+| Front-end | React 18 + Next.js 14 |
+| Backend | Express (Node.js) |
+| Database | PostgreSQL with Prisma ORM |
+
+Persistence layer stores user itineraries.
+"""
+
+TRAVEL_SPEC_NO_DATA = """\
+# Solution Specification for Voyager
+
+## Technology Stack
+| Layer | Technology |
+|-------|------------|
+| Front-end | React 18 + Next.js 14 |
+| Backend | Express (Node.js) |
+
+No persistence or caching required. All data is ephemeral.
+"""
+
+
 class TestFullPathManifestFromSpec:
     def test_full_path_writer_from_approved_solution_spec(self, tmp_path: Path):
         spec = (
@@ -106,3 +156,36 @@ class TestFullPathManifestFromSpec:
         assert manifest["path"] == "full"
         assert any("frappe" in s.lower() for s in manifest["chosen_stack"])
         assert read_stack_manifest(tmp_path)["path"] == "full"
+
+    def test_redis_in_spec_unlocks_database_tier(self, tmp_path: Path):
+        """Approved spec with Redis/Upstash must NOT forbid the database tier."""
+        profile = infer_capability_profile(TRAVEL_VISION)
+        manifest = write_stack_manifest_from_solution_spec(
+            TRAVEL_VISION, profile, tmp_path, spec_text=TRAVEL_SPEC_WITH_REDIS
+        )
+        assert "database" not in manifest["forbidden_tiers"], (
+            "database tier should be unlocked when approved spec mentions Redis/caching"
+        )
+        assert manifest["needs_persistence"] is True
+
+    def test_postgres_in_spec_unlocks_database_tier(self, tmp_path: Path):
+        """Approved spec with PostgreSQL must NOT forbid the database tier."""
+        profile = infer_capability_profile(TRAVEL_VISION)
+        manifest = write_stack_manifest_from_solution_spec(
+            TRAVEL_VISION, profile, tmp_path, spec_text=TRAVEL_SPEC_WITH_POSTGRES
+        )
+        assert "database" not in manifest["forbidden_tiers"], (
+            "database tier should be unlocked when approved spec mentions PostgreSQL"
+        )
+        assert manifest["needs_persistence"] is True
+
+    def test_no_data_spec_keeps_database_forbidden(self, tmp_path: Path):
+        """Spec without data/cache mentions should keep database forbidden for client visions."""
+        profile = infer_capability_profile(MAP_VISION)
+        manifest = write_stack_manifest_from_solution_spec(
+            MAP_VISION, profile, tmp_path, spec_text=TRAVEL_SPEC_NO_DATA
+        )
+        assert "database" in manifest["forbidden_tiers"], (
+            "database tier should stay forbidden when spec has no data signals"
+        )
+        assert manifest["needs_persistence"] is False

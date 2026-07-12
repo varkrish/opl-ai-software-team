@@ -7,6 +7,11 @@ Version tags match container releases (`v2.x.y` → `quay.io/varkrish/crew-backe
 
 ## [Unreleased]
 
+## [2.4.5] - 2026-07-13
+
+### Fixed
+- **Manifest derivation from approved solution_spec** — `write_stack_manifest_from_solution_spec` now scans the approved spec for data/cache/persistence signals (Redis, Upstash, PostgreSQL, etc.) and unlocks the `database` forbidden tier when the spec explicitly selects one. Previously the manifest was derived only from the short vision text, so specs with Redis caching still forbade `database`, causing false Tech Architect failures.
+
 ## [2.4.4] - 2026-07-13
 
 ### Changed
