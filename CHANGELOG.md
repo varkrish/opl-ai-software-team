@@ -7,6 +7,11 @@ Version tags match container releases (`v2.x.y` → `quay.io/varkrish/crew-backe
 
 ## [Unreleased]
 
+## [2.4.2] - 2026-07-13
+
+### Fixed
+- **Named-component path matching** — solution-spec folder contracts like `/pages` / `/api` are normalized and matched as directory prefixes in the file tree (no longer fail Tech Architect pass 2 coverage).
+
 ## [2.4.1] - 2026-07-13
 
 ### Fixed
@@ -80,7 +85,8 @@ Version tags match container releases (`v2.x.y` → `quay.io/varkrish/crew-backe
 
 Earlier releases: solutioning loop, plan review, BYOK LLM config, workflow prefs API, refinement flows. See git tags for details.
 
-[Unreleased]: https://github.com/varkrish/opl-ai-software-team/compare/v2.4.1...HEAD
+[Unreleased]: https://github.com/varkrish/opl-ai-software-team/compare/v2.4.2...HEAD
+[2.4.2]: https://github.com/varkrish/opl-ai-software-team/compare/v2.4.1...v2.4.2
 [2.4.1]: https://github.com/varkrish/opl-ai-software-team/compare/v2.4.0...v2.4.1
 [2.4.0]: https://github.com/varkrish/opl-ai-software-team/compare/v2.3.0...v2.4.0
 [2.3.0]: https://github.com/varkrish/opl-ai-software-team/compare/v2.2.0...v2.3.0
