@@ -1,7 +1,7 @@
 import unittest
 from unittest.mock import MagicMock, patch
 from llama_index.core.llms import ChatMessage, MessageRole
-from src.llamaindex_crew.utils.llm_config import GenericLlamaLLM
+from src.llamaindex_crew.utils.llm_config import GenericLlamaLLM, _LLM_MAX_RETRIES
 import httpx
 
 class TestGenericLlamaLLM(unittest.TestCase):
@@ -119,7 +119,43 @@ class TestGenericLlamaLLM(unittest.TestCase):
             mock_post.side_effect = socket.timeout("SSL read timed out")
             with self.assertRaises(socket.timeout):
                 self.llm.chat(messages)
-            self.assertEqual(mock_post.call_count, 5)  # 5 attempts
+            self.assertEqual(mock_post.call_count, _LLM_MAX_RETRIES)  # transport error attempts
+
+    @patch('time.sleep', return_value=None)
+    def test_429_rate_limit_retries_until_success(self, mock_sleep):
+        """HTTP 429 must retry with backoff instead of failing the job immediately."""
+        from llamaindex_crew.utils.llm_config import _LLM_RATE_LIMIT_MAX_RETRIES
+
+        messages = [ChatMessage(role=MessageRole.USER, content="Hi")]
+        rate_body = (
+            '{"error":{"message":"Rate limit exceeded. Limit resets at: 2026-07-12 22:53:04 UTC"}}'
+        )
+
+        with patch('httpx.Client.post') as mock_post:
+            mock_post.side_effect = [
+                MagicMock(status_code=429, text=rate_body, headers={}),
+                MagicMock(status_code=429, text=rate_body, headers={}),
+                MagicMock(
+                    status_code=200,
+                    json=lambda: {"choices": [{"message": {"content": "Success"}}]},
+                ),
+            ]
+            response = self.llm.chat(messages)
+            self.assertEqual(response.message.content, "Success")
+            self.assertEqual(mock_post.call_count, 3)
+
+    @patch('time.sleep', return_value=None)
+    def test_429_honours_retry_after_header(self, mock_sleep):
+        from llamaindex_crew.utils.llm_config import _retry_delay_seconds
+
+        delay = _retry_delay_seconds(
+            0,
+            status_code=429,
+            response_text="",
+            retry_after="42",
+        )
+        self.assertGreaterEqual(delay, 42.0)
+        self.assertLessEqual(delay, 45.0)
 
     @patch('time.sleep', return_value=None)
     def test_oserror_stall_retried(self, mock_sleep):

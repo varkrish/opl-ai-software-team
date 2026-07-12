@@ -5,9 +5,11 @@ Uses secure configuration from config files instead of environment variables.
 Supports multiple OpenAI-compatible providers.
 """
 import logging
+import re
 import socket
 import threading
 from contextlib import contextmanager
+from datetime import datetime, timezone
 from typing import Optional, Callable, Any
 from llama_index.core.llms import LLM, LLMMetadata, ChatMessage, ChatResponse, CompletionResponse
 from llama_index.core.llms.callbacks import llm_chat_callback, llm_completion_callback
@@ -18,6 +20,68 @@ from ..config import SecretConfig
 from .prompt_budget import trim_text, estimate_tokens
 
 logger = logging.getLogger(__name__)
+
+# Retry policy for MaaS / OpenAI-compatible endpoints
+_LLM_MAX_RETRIES = 8
+_LLM_RATE_LIMIT_MAX_RETRIES = 15
+_LLM_BASE_DELAY_S = 5.0
+_LLM_MAX_DELAY_S = 120.0
+_LLM_RATE_LIMIT_MAX_DELAY_S = 900.0  # up to 15 min when provider says when limit resets
+
+_RATE_LIMIT_RESET_RE = re.compile(
+    r"limit resets at:\s*(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})\s*UTC",
+    re.IGNORECASE,
+)
+
+
+def _seconds_until_rate_limit_reset(
+    response_text: str = "",
+    retry_after: Optional[str] = None,
+) -> Optional[float]:
+    """Return seconds to wait before retrying a 429, or None to use exponential backoff."""
+    if retry_after:
+        try:
+            return max(1.0, float(retry_after))
+        except (TypeError, ValueError):
+            pass
+    match = _RATE_LIMIT_RESET_RE.search(response_text or "")
+    if match:
+        try:
+            reset_at = datetime.strptime(match.group(1), "%Y-%m-%d %H:%M:%S").replace(
+                tzinfo=timezone.utc
+            )
+            wait = (reset_at - datetime.now(timezone.utc)).total_seconds() + 2.0
+            return max(1.0, wait)
+        except ValueError:
+            pass
+    return None
+
+
+def _retry_delay_seconds(
+    attempt: int,
+    *,
+    status_code: Optional[int] = None,
+    response_text: str = "",
+    retry_after: Optional[str] = None,
+) -> float:
+    """Exponential backoff with jitter; honour Retry-After / provider reset timestamps."""
+    import random
+
+    if status_code == 429:
+        reset_wait = _seconds_until_rate_limit_reset(response_text, retry_after)
+        if reset_wait is not None:
+            return min(reset_wait + random.uniform(0, 3), _LLM_RATE_LIMIT_MAX_DELAY_S)
+
+    return min(
+        _LLM_BASE_DELAY_S * (2 ** attempt) + random.uniform(0, 3),
+        _LLM_MAX_DELAY_S,
+    )
+
+
+def _retry_limit_for_status(status_code: Optional[int]) -> int:
+    if status_code == 429:
+        return _LLM_RATE_LIMIT_MAX_RETRIES
+    return _LLM_MAX_RETRIES
 
 
 class MissingLLMAPIKeyError(ValueError):
@@ -491,9 +555,7 @@ class GenericLlamaLLM(LLM):
                 payload = trimmed
         # -----------------------------------------------------
         
-        max_retries = 5
-        base_delay = 5
-        max_delay = 120
+        max_retries = _LLM_RATE_LIMIT_MAX_RETRIES
         # Granular timeouts:  connect quickly, allow MaaS up to 5 min for 8k-token responses,
         # but cap any individual read() syscall at 120 s so a stalled SSL socket doesn't hang
         # the entire pytest session past the overall test timeout.
@@ -506,15 +568,13 @@ class GenericLlamaLLM(LLM):
         import random
         
         # Transient errors: connection/transport and timeouts.
-        # socket.timeout (= TimeoutError = OSError with ETIMEDOUT) is raised when the
-        # OS-level SSL socket read stalls — it is distinct from httpx.ReadTimeout and
-        # was previously unhandled, causing the process to hang until pytest killed it.
+        # socket.timeout is raised when the OS-level SSL socket read stalls.
         retryable_exceptions = (
             httpx.RemoteProtocolError,
             httpx.ConnectError,
             httpx.ReadTimeout,
-            socket.timeout,    # OS-level SSL/TCP stall (Python 3.3+ alias: TimeoutError)
-            TimeoutError,      # same as socket.timeout on Python 3.3+, explicit for clarity
+            socket.timeout,
+            TimeoutError,
         )
         if getattr(httpx, "TimeoutException", None) is not None:
             retryable_exceptions = retryable_exceptions + (httpx.TimeoutException,)
@@ -527,13 +587,24 @@ class GenericLlamaLLM(LLM):
                     
                     if response.status_code != 200:
                         # Retry on server errors (5xx) and rate limit (429)
-                        if response.status_code in (429, 502, 503, 504) and attempt < max_retries - 1:
-                            delay = min(base_delay * (2 ** attempt) + random.uniform(0, 3), max_delay)
-                            logger.warning(
-                                f"⚠️ LLM API returned {response.status_code}. Retrying in {delay:.1f}s... (attempt {attempt + 1}/{max_retries})"
-                            )
-                            time.sleep(delay)
-                            continue
+                        if response.status_code in (429, 502, 503, 504):
+                            limit = _retry_limit_for_status(response.status_code)
+                            if attempt < limit - 1:
+                                delay = _retry_delay_seconds(
+                                    attempt,
+                                    status_code=response.status_code,
+                                    response_text=response.text,
+                                    retry_after=response.headers.get("Retry-After"),
+                                )
+                                logger.warning(
+                                    "⚠️ LLM API returned %s. Retrying in %.1fs... (attempt %d/%d)",
+                                    response.status_code,
+                                    delay,
+                                    attempt + 1,
+                                    limit,
+                                )
+                                time.sleep(delay)
+                                continue
                         # 400: check for context-length overflow and retry with trimmed input.
                         # Error pattern: "input tokens ... output tokens ... context length is only N"
                         if response.status_code == 400 and attempt < max_retries - 1:
@@ -584,14 +655,14 @@ class GenericLlamaLLM(LLM):
                         raw=data
                     )
             except retryable_exceptions as e:
-                if attempt < max_retries - 1:
-                    delay = min(base_delay * (2 ** attempt) + random.uniform(0, 3), max_delay)
+                if attempt < _LLM_MAX_RETRIES - 1:
+                    delay = _retry_delay_seconds(attempt)
                     logger.warning(
-                        f"⚠️ LLM API connection error ({type(e).__name__}): {e}. Retrying in {delay:.1f}s... (attempt {attempt + 1}/{max_retries})"
+                        f"⚠️ LLM API connection error ({type(e).__name__}): {e}. Retrying in {delay:.1f}s... (attempt {attempt + 1}/{_LLM_MAX_RETRIES})"
                     )
                     time.sleep(delay)
                 else:
-                    logger.error(f"❌ LLM API failed after {max_retries} attempts: {e}")
+                    logger.error(f"❌ LLM API failed after {_LLM_MAX_RETRIES} attempts: {e}")
                     raise
             except Exception as e:
                 # Catch-all for transient transport errors not covered by retryable_exceptions
@@ -604,10 +675,10 @@ class GenericLlamaLLM(LLM):
                     or "timeout" in msg      # catches "timed out", "ssl read timed out", etc.
                     or "reset" in msg        # "connection reset by peer"
                 )
-                if _transient and attempt < max_retries - 1:
-                    delay = min(base_delay * (2 ** attempt) + random.uniform(0, 3), max_delay)
+                if _transient and attempt < _LLM_MAX_RETRIES - 1:
+                    delay = _retry_delay_seconds(attempt)
                     logger.warning(
-                        f"⚠️ LLM API error ({type(e).__name__}): {e}. Retrying in {delay:.1f}s... (attempt {attempt + 1}/{max_retries})"
+                        f"⚠️ LLM API error ({type(e).__name__}): {e}. Retrying in {delay:.1f}s... (attempt {attempt + 1}/{_LLM_MAX_RETRIES})"
                     )
                     time.sleep(delay)
                 else:
@@ -677,6 +748,7 @@ class GenericLlamaLLM(LLM):
 
     @llm_chat_callback()
     async def achat(self, messages: list[ChatMessage], **kwargs) -> ChatResponse:
+        import asyncio
         import httpx
         from llama_index.core.llms import ChatResponse, ChatMessage, MessageRole
         
@@ -701,27 +773,46 @@ class GenericLlamaLLM(LLM):
             **api_kwargs
         }
         
-        # Granular timeouts to prevent SSL read stalls
         _async_timeout = httpx.Timeout(connect=30.0, write=60.0, read=240.0, pool=10.0)
-        async with httpx.AsyncClient(timeout=_async_timeout) as client:
-            response = await client.post(url, headers=headers, json=payload)
-            if response.status_code != 200:
-                raise ValueError(f"HTTP {response.status_code}: {response.text[:200]}")
-            response.raise_for_status()
-            data = response.json()
-            
-            if not data or not data.get("choices"):
-                err_msg = data.get("error", {}).get("message") if isinstance(data.get("error"), dict) else str(data)
-                raise ValueError(f"LLM returned invalid format: {err_msg}")
+        max_retries = _LLM_RATE_LIMIT_MAX_RETRIES
+        for attempt in range(max_retries):
+            async with httpx.AsyncClient(timeout=_async_timeout) as client:
+                response = await client.post(url, headers=headers, json=payload)
+                if response.status_code in (429, 502, 503, 504):
+                    limit = _retry_limit_for_status(response.status_code)
+                    if attempt < limit - 1:
+                        delay = _retry_delay_seconds(
+                            attempt,
+                            status_code=response.status_code,
+                            response_text=response.text,
+                            retry_after=response.headers.get("Retry-After"),
+                        )
+                        logger.warning(
+                            "⚠️ LLM achat() got %s, retrying in %.1fs... (attempt %d/%d)",
+                            response.status_code,
+                            delay,
+                            attempt + 1,
+                            limit,
+                        )
+                        await asyncio.sleep(delay)
+                        continue
+                if response.status_code != 200:
+                    raise ValueError(f"HTTP {response.status_code}: {response.text[:200]}")
+                response.raise_for_status()
+                data = response.json()
                 
-            choice = data["choices"][0]
-            return ChatResponse(
-                message=ChatMessage(
-                    role=MessageRole.ASSISTANT,
-                    content=choice["message"]["content"]
-                ),
-                raw=data
-            )
+                if not data or not data.get("choices"):
+                    err_msg = data.get("error", {}).get("message") if isinstance(data.get("error"), dict) else str(data)
+                    raise ValueError(f"LLM returned invalid format: {err_msg}")
+                    
+                choice = data["choices"][0]
+                return ChatResponse(
+                    message=ChatMessage(
+                        role=MessageRole.ASSISTANT,
+                        content=choice["message"]["content"]
+                    ),
+                    raw=data
+                )
 
     @llm_completion_callback()
     def complete(self, prompt: str, **kwargs) -> CompletionResponse:
@@ -750,9 +841,7 @@ class GenericLlamaLLM(LLM):
             **kwargs
         }
         
-        max_retries = 5
-        base_delay = 5
-        max_delay = 120
+        max_retries = _LLM_RATE_LIMIT_MAX_RETRIES
         retryable = (
             httpx.RemoteProtocolError,
             httpx.ConnectError,
@@ -768,11 +857,24 @@ class GenericLlamaLLM(LLM):
             try:
                 with httpx.Client(timeout=_complete_timeout) as client:
                     response = client.post(url, headers=headers, json=payload)
-                    if response.status_code in (429, 502, 503, 504) and attempt < max_retries - 1:
-                        delay = min(base_delay * (2 ** attempt) + random.uniform(0, 3), max_delay)
-                        logger.warning(f"⚠️ LLM complete() got {response.status_code}, retrying in {delay:.1f}s...")
-                        time.sleep(delay)
-                        continue
+                    if response.status_code in (429, 502, 503, 504):
+                        limit = _retry_limit_for_status(response.status_code)
+                        if attempt < limit - 1:
+                            delay = _retry_delay_seconds(
+                                attempt,
+                                status_code=response.status_code,
+                                response_text=response.text,
+                                retry_after=response.headers.get("Retry-After"),
+                            )
+                            logger.warning(
+                                "⚠️ LLM complete() got %s, retrying in %.1fs... (attempt %d/%d)",
+                                response.status_code,
+                                delay,
+                                attempt + 1,
+                                limit,
+                            )
+                            time.sleep(delay)
+                            continue
                     if response.status_code != 200:
                         raise ValueError(f"HTTP {response.status_code}: {response.text[:200]}")
                     response.raise_for_status()
@@ -787,8 +889,8 @@ class GenericLlamaLLM(LLM):
                         raw=data
                     )
             except retryable as e:
-                if attempt < max_retries - 1:
-                    delay = min(base_delay * (2 ** attempt) + random.uniform(0, 3), max_delay)
+                if attempt < _LLM_MAX_RETRIES - 1:
+                    delay = _retry_delay_seconds(attempt)
                     logger.warning(f"⚠️ LLM complete() connection error: {e}. Retrying in {delay:.1f}s...")
                     time.sleep(delay)
                 else:
@@ -796,6 +898,7 @@ class GenericLlamaLLM(LLM):
 
     @llm_completion_callback()
     async def acomplete(self, prompt: str, **kwargs) -> CompletionResponse:
+        import asyncio
         import httpx
         from llama_index.core.llms import CompletionResponse
         
@@ -820,21 +923,41 @@ class GenericLlamaLLM(LLM):
         }
         
         _acomplete_timeout = httpx.Timeout(connect=30.0, write=60.0, read=180.0, pool=10.0)
-        async with httpx.AsyncClient(timeout=_acomplete_timeout) as client:
-            response = await client.post(url, headers=headers, json=payload)
-            if response.status_code != 200:
-                raise ValueError(f"HTTP {response.status_code}: {response.text[:200]}")
-            response.raise_for_status()
-            data = response.json()
-            
-            if not data or not data.get("choices"):
-                err_msg = data.get("error", {}).get("message") if isinstance(data.get("error"), dict) else str(data)
-                raise ValueError(f"LLM returned invalid format: {err_msg}")
+        max_retries = _LLM_RATE_LIMIT_MAX_RETRIES
+        for attempt in range(max_retries):
+            async with httpx.AsyncClient(timeout=_acomplete_timeout) as client:
+                response = await client.post(url, headers=headers, json=payload)
+                if response.status_code in (429, 502, 503, 504):
+                    limit = _retry_limit_for_status(response.status_code)
+                    if attempt < limit - 1:
+                        delay = _retry_delay_seconds(
+                            attempt,
+                            status_code=response.status_code,
+                            response_text=response.text,
+                            retry_after=response.headers.get("Retry-After"),
+                        )
+                        logger.warning(
+                            "⚠️ LLM acomplete() got %s, retrying in %.1fs... (attempt %d/%d)",
+                            response.status_code,
+                            delay,
+                            attempt + 1,
+                            limit,
+                        )
+                        await asyncio.sleep(delay)
+                        continue
+                if response.status_code != 200:
+                    raise ValueError(f"HTTP {response.status_code}: {response.text[:200]}")
+                response.raise_for_status()
+                data = response.json()
                 
-            return CompletionResponse(
-                text=data["choices"][0]["text"],
-                raw=data
-            )
+                if not data or not data.get("choices"):
+                    err_msg = data.get("error", {}).get("message") if isinstance(data.get("error"), dict) else str(data)
+                    raise ValueError(f"LLM returned invalid format: {err_msg}")
+                    
+                return CompletionResponse(
+                    text=data["choices"][0]["text"],
+                    raw=data
+                )
 
     def stream_chat(self, messages, **kwargs):
         raise NotImplementedError("Streaming not implemented in generic wrapper")

@@ -7,8 +7,8 @@ Version tags match container releases (`v2.x.y` → `quay.io/varkrish/crew-backe
 
 ## [Unreleased]
 
-### Added
-- **Stack contract E2E tests** — Voyager-style scenarios (Redis spec unlocks database tier, negated-database prose regression, fast-path HTML, capability_profile API) in `tests/e2e/test_stack_contract_e2e.py`; no LLM required.
+### Fixed
+- **LLM rate-limit (HTTP 429) resilience** — exponential backoff with `Retry-After` and provider reset timestamps; up to 15 retries (15 min wait) on `chat`/`achat`/`complete`/`acomplete` instead of failing file-creation tasks immediately.
 
 ## [2.4.5] - 2026-07-13
 
