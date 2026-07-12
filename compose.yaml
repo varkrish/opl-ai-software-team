@@ -77,6 +77,10 @@ services:
     environment:
       - LOG_LEVEL=${VALIDATOR_LOG_LEVEL:-INFO}
       - PYTHONUNBUFFERED=1
+    command: >
+      uvicorn crew_validator.app:create_app --factory
+      --host 0.0.0.0 --port 8080
+      --no-access-log
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/healthz')"]
@@ -128,6 +132,10 @@ services:
   #     - SKILLS_BASE_DIR=/app/skills
   #     - SKILLS_INDEX_CACHE_DIR=/app/cache
   #     - PYTHONUNBUFFERED=1
+  #   command: >
+  #     uvicorn main:app
+  #     --host 0.0.0.0 --port 8090
+  #     --no-access-log
   #   restart: unless-stopped
   #   healthcheck:
   #     test: ["CMD", "curl", "-sf", "http://localhost:8090/health/ready"]

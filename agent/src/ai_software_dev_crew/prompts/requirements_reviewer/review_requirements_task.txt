@@ -30,23 +30,30 @@ Review Criteria:
    - Check for missing edge cases
    - Ensure acceptance criteria are specific
 
-Output your review findings in a structured format:
+Output your review findings in this structured format:
 
 **Needs Clarification:** Yes/No
 
 **Identified Gaps:**
-- [list each gap found]
+- [list each gap found, or "None"]
 
 **Ambiguities:**
-- [list each ambiguous requirement]
+- [list each ambiguous requirement, or "None"]
 
 **Technical Concerns:**
-- [list each technical issue]
+- [list each technical issue, or "None"]
 
 **Recommendations:**
-- [list specific recommendations]
+- [list specific, actionable recommendations]
 
-If clarification is needed, generate specific questions that should be asked to the user to resolve the gaps and ambiguities.
+**Clarification Questions** (only if Needs Clarification is Yes):
+- [numbered list of questions the user must answer before development begins]
 
-CRITICAL: Write your complete review to 'requirements_review.md' file using the file_writer tool.
+CRITICAL: Write your complete review to 'requirements_review.md' using the file_writer tool.
 
+The very last line of 'requirements_review.md' MUST be one of these two machine-readable verdict lines (no other text after it):
+VERDICT: APPROVED
+VERDICT: NEEDS_CLARIFICATION
+
+Use APPROVED only when all four review criteria are satisfactorily met with no blockers.
+Use NEEDS_CLARIFICATION when ANY ambiguity, gap, or technical concern would block successful implementation.
