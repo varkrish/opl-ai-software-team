@@ -377,6 +377,19 @@ class TestTestToolsUseThreadLocal:
 class TestBuildRunnerThreadLocal:
     """build_runner.run_build_pipeline sets thread-local workspace and cleans up."""
 
+    @pytest.fixture(autouse=True)
+    def _add_crew_studio_to_path(self):
+        """Add opl-ai-software-team root to sys.path so crew_studio is importable,
+        and suppress the LLM API key check which requires a real key."""
+        import sys
+        crew_studio_root = str(Path(__file__).resolve().parents[3])
+        if crew_studio_root not in sys.path:
+            sys.path.insert(0, crew_studio_root)
+        with patch("src.llamaindex_crew.utils.llm_config.ensure_llm_api_key"):
+            yield
+        if crew_studio_root in sys.path:
+            sys.path.remove(crew_studio_root)
+
     def test_sets_thread_workspace_to_job_path(self, tmp_path):
         """The workspace seen inside the workflow must be the job workspace."""
         from crew_studio.build_runner import run_build_pipeline

@@ -93,7 +93,7 @@ class TestDevAgentToolWiring:
                 mock_cl.load.return_value = config
                 with patch(
                     "llamaindex_crew.agents.dev_agent.append_tldr_tools",
-                    side_effect=lambda tools, wp: tools,
+                    side_effect=lambda tools, wp, **kw: tools,
                 ) as mock_append:
                     from llamaindex_crew.agents.dev_agent import DevAgent
                     ws = Path("/tmp/test-job-workspace")

@@ -2695,7 +2695,13 @@ class TestEnsureFeatureFiles:
         from llamaindex_crew.workflows.software_dev_workflow import _ensure_feature_files
         features_dir = workspace / "features"
         features_dir.mkdir()
-        (features_dir / "existing.feature").write_text("Feature: Existing\n")
+        (features_dir / "existing.feature").write_text(
+            "Feature: Existing feature\n"
+            "  Scenario: Basic scenario\n"
+            "    Given a valid state\n"
+            "    When the action occurs\n"
+            "    Then the result is correct\n"
+        )
         count = _ensure_feature_files(workspace, "any text")
         assert count == 1
 
