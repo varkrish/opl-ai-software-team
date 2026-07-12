@@ -72,6 +72,33 @@ run-mta-analysis.sh
 
 # Test output / scratch
 test_job_*.txt
+pytest-results.xml
+agent/test_db.py
+agent/test_db_debug.db
+agent/tests/e2e/test_workspace_adaptive_e2e/
+agent/tests/e2e/test_workspace_fast_e2e/
+agent/tests/e2e/test_workspace_full_e2e/
+# Job-run pollution inside committed e2e fixture workspaces
+agent/tests/e2e/test_workspace_*/calculator/
+agent/tests/e2e/test_workspace_*/calculator_project/
+agent/tests/e2e/test_workspace_*/stack_selection_brief.md
+agent/tests/e2e/test_workspace_*/*_validate.db
+agent/tests/e2e/test_workspace_*/install_dependencies/
+agent/tests/e2e/test_workspace_*/run_test_suite/
+agent/tests/e2e/test_workspace_*/Containerfile
+agent/tests/e2e/test_workspace_*/docker-compose.yml
+agent/tests/e2e/test_workspace_*/pyproject.toml
+agent/tests/e2e/test_workspace_*/setup.cfg
+agent/tests/e2e/test_workspace_*/.github/
+agent/tests/e2e/test_workspace_*/features/add_two_numbers.feature
+agent/tests/e2e/test_workspace_*/features/automated_verification_with_pytest.feature
+agent/tests/e2e/test_workspace_*/features/subtract_two_numbers.feature
+agent/tests/e2e/test_workspace_*/features/type_safety_enforcement.feature
+agent/tests/e2e/test_workspace_*/tests/conftest.py
+agent/tests/e2e/test_workspace_*/tests/test_add.py
+agent/tests/e2e/test_workspace_*/tests/test_subtract.py
+agent/tests/e2e/test_workspace_*/tests/test_validation.py
+agent/tests/e2e/test_workspace_*/tests/__init__.py
 
 # Generated design docs (workspace artifacts)
 /design_spec.md
