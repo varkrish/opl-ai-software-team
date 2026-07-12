@@ -241,7 +241,7 @@ class SolutioningConfig(BaseModel):
     """Solutioning loop configuration (research + architect + critique before PO)."""
     enabled: bool = Field(False, description="Enable solutioning loop before PO phase")
     mode: str = Field(
-        "full",
+        "adaptive",
         description="Server fallback mode when job metadata omits capability_profile: full|fast|adaptive",
     )
     max_passes: int = Field(3, description="Max research-critique passes")
@@ -265,6 +265,7 @@ class SecretConfig(BaseModel):
     plan_review: PlanReviewConfig = Field(default_factory=PlanReviewConfig)
     solutioning: SolutioningConfig = Field(default_factory=SolutioningConfig)
     generation: GenerationConfig = Field(default_factory=GenerationConfig)
+    workflows: Dict[str, List[Any]] = Field(default_factory=dict, description="Dynamic workflow phase mappings")
     
     # Encryption key for encrypted values
     _encryption_key: Optional[bytes] = None

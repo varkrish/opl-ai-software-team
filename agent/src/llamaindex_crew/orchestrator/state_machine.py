@@ -21,6 +21,8 @@ class ProjectState(Enum):
     DEVELOPMENT = "development"
     FRONTEND = "frontend"
     DEVOPS = "devops"
+    REFINEMENT = "refinement"
+    QA = "qa"
     COMPLETED = "completed"
     FAILED = "failed"
     ROLLBACK = "rollback"
@@ -84,13 +86,30 @@ class ProjectStateMachine:
                 ProjectState.FAILED
             ],
             ProjectState.TECH_ARCHITECT: [
+                ProjectState.QA,
+                ProjectState.REFINEMENT,
                 ProjectState.DEVELOPMENT,
                 ProjectState.DESIGNER,  # Rollback
+                ProjectState.FAILED
+            ],
+            ProjectState.QA: [
+                ProjectState.DEVELOPMENT,
+                ProjectState.REFINEMENT,
+                ProjectState.COMPLETED,
+                ProjectState.TECH_ARCHITECT, # Rollback
+                ProjectState.FAILED
+            ],
+            ProjectState.REFINEMENT: [
+                ProjectState.DEVELOPMENT,
+                ProjectState.FRONTEND,
+                ProjectState.COMPLETED,
+                ProjectState.QA, # Rollback
                 ProjectState.FAILED
             ],
             ProjectState.DEVELOPMENT: [
                 ProjectState.FRONTEND,
                 ProjectState.COMPLETED,       # Backend-only / epic workflows skip frontend
+                ProjectState.QA,              # Rollback
                 ProjectState.TECH_ARCHITECT,  # Rollback
                 ProjectState.FAILED
             ],
@@ -110,6 +129,8 @@ class ProjectStateMachine:
                 ProjectState.PRODUCT_OWNER,
                 ProjectState.DESIGNER,
                 ProjectState.TECH_ARCHITECT,
+                ProjectState.QA,
+                ProjectState.REFINEMENT,
                 ProjectState.DEVELOPMENT,
                 ProjectState.FAILED
             ],

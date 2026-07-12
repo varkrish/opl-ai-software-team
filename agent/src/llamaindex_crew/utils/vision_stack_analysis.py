@@ -192,11 +192,11 @@ def decide_solutioning_path(
         return "fast"
     if preference == "full":
         return "full"
-    if preference != "adaptive":
-        return "full"
-
-    resolved = profile or infer_capability_profile(vision, user_stories)
-    return _suggest_solutioning_path(resolved)
+    # "adaptive" or "" (unspecified / auto) → infer from vision
+    if preference in ("adaptive", ""):
+        resolved = profile or infer_capability_profile(vision, user_stories)
+        return _suggest_solutioning_path(resolved)
+    return "full"
 
 
 def _is_client_only_technology(technologies: Sequence[str]) -> bool:

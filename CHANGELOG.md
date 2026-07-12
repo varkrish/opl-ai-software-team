@@ -7,6 +7,18 @@ Version tags match container releases (`v2.x.y` → `quay.io/varkrish/crew-backe
 
 ## [Unreleased]
 
+## [2.4.0] - 2026-07-13
+
+### Added
+- **Pipeline-based workflow routing** — `_get_active_phases()` selects `fast` / `adaptive` / `full` phase lists; fast skips PO/Designer/Tech Architect and uses `seed_minimal_artifacts` before parallel development.
+- **`capability_profile` API** — accepts string shorthand (`"fast"`|`"full"`|`"adaptive"`) or dict; Auto/default maps to adaptive inference.
+- **Native FastAPI `/api/jobs/{id}/validation`** — authenticated validation report endpoint (no Flask header injection).
+
+### Fixed
+- Fast/Full job creation **422** — Pydantic model rejected plain-string `capability_profile`.
+- Auto-detect never inferred — empty/unspecified path defaulted to `full` instead of vision-based adaptive.
+- Fast mode produced **zero files** — task registration lived only in Tech Architect; seed phase now registers granular tasks and requires a parseable unicode file tree (with one strict retry).
+
 ## [2.3.0] - 2026-07-12
 
 ### Added
@@ -63,7 +75,8 @@ Version tags match container releases (`v2.x.y` → `quay.io/varkrish/crew-backe
 
 Earlier releases: solutioning loop, plan review, BYOK LLM config, workflow prefs API, refinement flows. See git tags for details.
 
-[Unreleased]: https://github.com/varkrish/opl-ai-software-team/compare/v2.3.0...HEAD
+[Unreleased]: https://github.com/varkrish/opl-ai-software-team/compare/v2.4.0...HEAD
+[2.4.0]: https://github.com/varkrish/opl-ai-software-team/compare/v2.3.0...v2.4.0
 [2.3.0]: https://github.com/varkrish/opl-ai-software-team/compare/v2.2.0...v2.3.0
 [2.2.0]: https://github.com/varkrish/opl-ai-software-team/compare/v2.1.0...v2.2.0
 [2.1.0]: https://github.com/varkrish/opl-ai-software-team/compare/v2.0.0...v2.1.0

@@ -16,7 +16,7 @@ import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 import httpx
 from fastapi import FastAPI, HTTPException, Query, Request, Depends
@@ -209,7 +209,7 @@ class CreateJobRequest(BaseModel):
     jira_issue_key: Optional[str] = None   # e.g. "PROJ-123"
     jira_issue_url: Optional[str] = None   # full browse URL
     jira_issue_summary: Optional[str] = None  # issue title for display
-    capability_profile: Optional[Dict[str, Any]] = None
+    capability_profile: Optional[Union[str, Dict[str, Any]]] = None
 
 
 class PreviewCapabilitiesRequest(BaseModel):
@@ -871,6 +871,33 @@ async def list_backends(user: CurrentUser = Depends(get_current_user)):
         return {"backends": [
             {"name": "opl-ai-team", "display_name": "OPL AI Team", "available": True}
         ]}
+
+
+@app.get("/api/jobs/{job_id}/validation")
+async def get_job_validation(job_id: str, user: CurrentUser = Depends(get_current_user)):
+    """Return validation issues and summary for a job."""
+    job = job_db.get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    if not user.is_admin:
+        has_access = (
+            (job.get("owner_id") == user.user_id) or
+            (job.get("team_id") and job.get("team_id").lstrip("/") in user.teams)
+        )
+        if not has_access:
+            raise HTTPException(status_code=404, detail="Job not found")
+
+    issues = job_db.get_validation_issues(job_id)
+    total = len(issues)
+    fixed = sum(1 for i in issues if i["status"] == "completed")
+    failed = sum(1 for i in issues if i["status"] == "failed")
+    pending = total - fixed - failed
+    return {
+        "issues": issues,
+        "summary": {"total": total, "fixed": fixed, "failed": failed, "pending": pending},
+        "overall": "PASS" if failed == 0 and pending == 0 else "ISSUES_FOUND",
+    }
 
 
 @app.get("/api/jobs/{job_id}/tool-stats")
