@@ -49,5 +49,7 @@ CRITICAL - YOU MUST WRITE FILES TO DISK:
 
 REMEMBER: You MUST use the file_writer tool. Do not just return text - write files to disk!
 
-Ask clarifying questions if the vision is ambiguous.
+If the vision is ambiguous or incomplete, DO NOT stall — document your assumptions clearly.
+Add an **## Assumptions** section to `requirements.md` and mark each assumption with ⚠️ so reviewers can spot and resolve them.
+Example: ⚠️ Assumed: "secure login" means username/password authentication (OAuth not specified).
 

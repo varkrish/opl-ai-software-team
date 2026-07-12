@@ -7,6 +7,15 @@ Version tags match container releases (`v2.x.y` → `quay.io/varkrish/crew-backe
 
 ## [Unreleased]
 
+## [2.4.4] - 2026-07-13
+
+### Changed
+- **Agent prompts** — structured output contracts, dead prompt files removed, backstory deduplication and review/validation verdict signals.
+- **Dev infra** — `--no-access-log` on uvicorn/validator; pytest default timeout raised to 900s.
+
+### Added
+- **`test_prompt_improvements.py`** — unit tests locking prompt contracts after the enhancement pass.
+
 ## [2.4.3] - 2026-07-13
 
 ### Fixed

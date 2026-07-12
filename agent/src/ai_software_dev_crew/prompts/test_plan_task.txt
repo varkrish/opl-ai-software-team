@@ -1,25 +1,62 @@
-You are a test architect. Given the project tech stack and skill context below, produce a
-test execution plan as EXACTLY six key-value lines — no prose, no markdown fences.
+You are a senior test architect. Given the project context below, produce a comprehensive
+Test Plan as a single Markdown document.
 
-PROJECT VISION:
+## Inputs
+
+**PROJECT VISION:**
 {vision}
 
-TECH STACK:
+**TECH STACK:**
 {tech_stack}
 
-SKILL CONTEXT (framework test conventions):
+**SKILL CONTEXT (framework test conventions):**
 {skill_context}
 
-Output ONLY these six lines (replace values with commands/paths appropriate for this stack):
+## Instructions
+
+- Base every recommendation strictly on the tech stack and skill context provided. Do not
+  assume tools, frameworks, or directories that aren't evidenced there.
+- If the tech stack is ambiguous or missing information needed for a section (e.g. no
+  clear test runner), state the assumption you're making inline rather than inventing
+  unstated facts.
+- Write for an engineer who will execute this plan directly — be concrete and actionable,
+  not generic boilerplate.
+
+## Required Output Structure
+
+Produce exactly these three top-level sections, in this order, using the exact headings shown:
+
+### `# 1. Test Strategy`
+- Testing approach and pyramid: what is covered at unit, integration, and e2e layers, and why.
+- How the framework conventions from SKILL CONTEXT are applied (naming, file layout, runners, assertion style, etc.).
+- Any tech-stack-specific considerations (e.g. async code, database layers, external APIs) and how they're tested or isolated.
+
+### `# 2. Test Data Strategy`
+- How fixtures/test data are created, mocked, or seeded (factories, fixture files, in-memory DB, mocked API responses, etc.).
+- Confirm test data covers: all entities required for the flows under test, edge cases, and error/failure scenarios — not just the happy path.
+- State whether data is reused across test runs or generated fresh per test, and how isolation between tests is guaranteed.
+
+### `# 3. Execution Configuration`
+End the document with **exactly** these six lines, in this exact order, each on its own line,
+using this exact `key: value` format (no markdown formatting, no extra commentary before/after them):
+
+```
 backend_test_command: <shell command to install deps and run backend tests>
 frontend_test_command: <shell command to install deps and run frontend tests>
 backend_test_dir: <relative path to backend test directory>
 frontend_test_dir: <relative path to frontend test directory>
 test_framework_backend: <e.g. pytest, JUnit, go test>
-test_framework_frontend: <e.g. Jest, Vitest, Cypress, or "none" if no frontend>
+test_framework_frontend: <e.g. Jest, Vitest, Cypress, or "none">
+```
 
-Rules:
-- Commands must be runnable inside a Linux container with the project mounted at /app.
-- Use relative paths from the project root.
-- If there is no frontend, set frontend_test_command to "echo no frontend tests" and frontend_test_dir to "."
-- Do NOT invent test directories that are absent from the tech stack file tree.
+**Rules for this section:**
+1. Commands must run non-interactively inside a Linux container with the project mounted at `/app`, and must include the dependency-install step (e.g. `pip install -r requirements.txt && pytest`).
+2. All paths must be relative to the project root — never absolute, never prefixed with `/app`.
+3. Every directory referenced in `backend_test_dir` / `frontend_test_dir` must be visible in the tech stack's file tree. If no such directory exists yet, use the conventional path for that framework and note it as an assumption in Section 1 — do not silently invent it.
+4. If there is no frontend in this project:
+   - `frontend_test_command` = `echo no frontend tests`
+   - `frontend_test_dir` = `.`
+   - `test_framework_frontend` = `none`
+5. If there is no backend (frontend-only project), apply the same pattern symmetrically to the backend fields.
+6. Do not include placeholder angle brackets (`<...>`) in the final output — replace every value with a real, stack-appropriate answer.
+7. These six lines must appear only once, only at the very end of the document, with nothing after them.

@@ -87,7 +87,21 @@ backend/
 ```
 Every Route file MUST be a concretely named class (e.g. `TaskRoute.java`, `UserRoute.java`) — one per bounded-context/entity from the design spec — never a generic placeholder or an empty folder line.
 
-You MUST specify a COMPLETE, BUILDABLE file structure that includes:
+**HTML/CSS/JavaScript (Vanilla) STRUCTURE RULE**: When the vision requires a plain HTML/CSS/JS app (no backend, no framework):
+Module system — pick ONE: **ES modules** (`import`/`export`, HTML uses `<script type="module">`) OR **Script tags** (no import/export, globals only, `<script src="...">`).
+Do NOT use `@testing-library/react` or import React in a Vanilla JS project.
+Use this minimal file structure:
+```text
+my_app/
+├── index.html                # [SOURCE] main entry point
+├── styles.css                # [SOURCE] styles
+├── src/
+│   └── app.js                # [SOURCE] main application logic
+├── tests/
+│   └── app.test.js           # [SOURCE] Jest + jsdom unit tests
+└── package.json              # [CONFIG] devDependencies: jest, jest-environment-jsdom
+```
+
 
 You MUST specify a COMPLETE, BUILDABLE file structure that strictly follows the active framework rules provided below in the skills context.
 If the SKILLS CONTEXT specifies a canonical file structure, architectural constraints, or forbidden files/folders, you MUST obey those constraints flawlessly.
@@ -188,12 +202,12 @@ CRITICAL RULES:
    - Python project → pytest
    - Java project → JUnit 5
    If the project does NOT use React, you MUST NOT reference @testing-library/react or import React in test files.
-8. ALL test dependencies MUST be declared in the dependency manifest:
+9. ALL test dependencies MUST be declared in the dependency manifest:
    - Java: test libraries (JUnit 5, Mockito, etc.) must have <dependency> entries in pom.xml with <scope>test</scope>
    - JavaScript: test libraries (jest, jsdom, etc.) must be in devDependencies in package.json
    - Python: test libraries (pytest, etc.) must be in requirements.txt or pyproject.toml
    If test code imports a library, that library MUST be in the manifest. A package.json MUST exist for every JS/TS directory that contains test files.
-9. You MUST explicitly declare the module system in the tech stack for JavaScript/TypeScript projects. Pick ONE and use it consistently:
+10. You MUST explicitly declare the module system in the tech stack for JavaScript/TypeScript projects. Pick ONE and use it consistently:
    - Vanilla JS browser app → "ES modules" (use `import`/`export`, HTML loads scripts with `<script type="module">`)
    - Vanilla JS browser app (legacy) → "Script tags" (no import/export, globals only, HTML uses plain `<script src="...">`)
    - Node.js app → "CommonJS" (use `require()`/`module.exports`) or "ES modules" (use `import`/`export` with `"type": "module"` in package.json)

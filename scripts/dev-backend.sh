@@ -18,4 +18,5 @@ exec uvicorn crew_studio.asgi_app:app \
     --reload \
     --reload-dir /app/crew_studio \
     --reload-dir /app/agent/src \
-    --log-level info
+    --log-level info \
+    --no-access-log

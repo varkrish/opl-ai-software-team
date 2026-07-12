@@ -1,14 +1,45 @@
 Review and validate the requirements document for quality.
 
+Requirements Document to validate: the contents of `requirements.md` and the `.feature` files in `features/`.
+
+Use the `file_reader` tool to read these files before starting your review.
+
 Check for:
-1. Completeness - Are all aspects covered?
-2. Clarity - Are requirements unambiguous?
-3. Testability - Can each requirement be tested?
-4. Gherkin syntax correctness in both requirements.md and .feature files
-5. Missing edge cases or error scenarios
-6. Feature files exist in features/ directory and are properly formatted
+1. **Completeness** — Are all aspects of the vision covered?
+2. **Clarity** — Are requirements unambiguous? No vague terms?
+3. **Testability** — Can each requirement be directly tested?
+4. **Gherkin syntax correctness** — Both in `requirements.md` and in `.feature` files.
+5. **Missing edge cases or error scenarios**
+6. **Feature files exist** in `features/` directory and are properly formatted.
 
-IMPORTANT: Use the file_writer tool to save your validation report to 'validation_report.md'
+**SMART Compliance** — For each requirement, check:
+- Specific: Is it precise?
+- Measurable: Does it have a quantifiable acceptance criterion?
+- Achievable: Is it technically realistic?
+- Relevant: Does it tie back to user goals?
+- Time-bound: If applicable, is a timeframe specified?
 
-Provide specific feedback and improvements.
+**Required Output Format** (write to `validation_report.md` using `file_writer`):
 
+```
+## Validation Status: PASS | FAIL
+
+## SMART Compliance
+| Requirement | S | M | A | R | T | Issues |
+|---|---|---|---|---|---|---|
+| <requirement summary> | ✅/❌ | ✅/❌ | ✅/❌ | ✅/❌ | ✅/❌ | <notes> |
+
+## Gherkin Syntax Issues
+- [list each issue with file and line reference, or "None found"]
+
+## Missing Edge Cases
+- [list each missing scenario, or "None found"]
+
+## Completeness Gaps
+- [list each gap, or "None found"]
+
+## Recommendations
+- [specific, actionable improvement suggestions]
+```
+
+IMPORTANT: Use the `file_writer` tool to save your validation report to `validation_report.md`.

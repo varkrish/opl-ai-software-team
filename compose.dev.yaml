@@ -91,6 +91,7 @@ services:
       uvicorn crew_validator.app:create_app --factory
       --host 0.0.0.0 --port 8080
       --reload --reload-dir /opt/app-root/src/crew_validator
+      --no-access-log
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "python3 -c 'import urllib.request; urllib.request.urlopen(\"http://localhost:8080/healthz\")'"]
@@ -129,6 +130,7 @@ services:
       uvicorn main:app
       --host 0.0.0.0 --port 8090
       --reload --reload-dir /app/src
+      --no-access-log
     working_dir: /app/src
     restart: unless-stopped
     healthcheck:
