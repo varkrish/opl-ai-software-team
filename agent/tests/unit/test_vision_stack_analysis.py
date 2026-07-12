@@ -2,6 +2,7 @@
 import pytest
 
 from llamaindex_crew.utils.vision_stack_analysis import (
+    _manifest_forbidden_violation,
     build_stack_selection_brief,
     decide_solutioning_path,
     detect_stack_overreach,
@@ -86,6 +87,30 @@ class TestDecideSolutioningPath:
     def test_default_missing_path_is_full(self):
         assert decide_solutioning_path(MAP_VISION, solutioning_path=None) == "full"
         assert decide_solutioning_path(MAP_VISION) == "full"
+
+
+class TestManifestForbiddenTier:
+    MANIFEST = {
+        "chosen_stack": ["react", "next.js", "express", "node.js"],
+        "forbidden_tiers": ["database", "cms_platform"],
+    }
+
+    def test_negated_database_mention_is_not_violation(self):
+        artifact = (
+            "Map uses OpenStreetMap without requiring a proprietary mapping service "
+            "or additional database tier."
+        )
+        assert _manifest_forbidden_violation(artifact, self.MANIFEST) is None
+
+    def test_formatting_does_not_trigger_orm_marker(self):
+        artifact = "Linting/formatting uses ESLint + Prettier for code quality."
+        assert _manifest_forbidden_violation(artifact, self.MANIFEST) is None
+
+    def test_real_database_still_violates(self):
+        artifact = "Persistence: PostgreSQL database with SQLAlchemy ORM."
+        reason = _manifest_forbidden_violation(artifact, self.MANIFEST)
+        assert reason is not None
+        assert "database" in reason
 
 
 class TestDetectStackOverreach:

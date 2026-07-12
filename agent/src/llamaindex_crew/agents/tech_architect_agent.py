@@ -494,7 +494,7 @@ project-root/
 │   │   │       ├── users.controller.ts
 │   │   │       └── users.service.ts
 │   │   ├── package.json
-│   │   └── Dockerfile
+│   │   └── Containerfile
 │   └── web/
 │       ├── src/pages/index.tsx
 │       └── package.json
@@ -507,7 +507,7 @@ Rules:
 2. Each named component above gets its own subtree with at least 3 source files
    (entry point, module/service, and one domain file).
 3. Use entity and module names from the design spec in filenames.
-4. Include per-service package manifests (package.json, pom.xml, etc.) and Dockerfiles.
+4. Include per-service package manifests (package.json, pom.xml, etc.) and Containerfiles.
 5. Do NOT collapse multiple services into one directory.
 
 Wrap the tree in <tech_stack>...</tech_stack> tags.

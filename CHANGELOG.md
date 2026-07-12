@@ -7,10 +7,15 @@ Version tags match container releases (`v2.x.y` → `quay.io/varkrish/crew-backe
 
 ## [Unreleased]
 
+## [2.4.3] - 2026-07-13
+
+### Fixed
+- **Forbidden-tier false positives** — negated mentions (`without database tier`) and substring noise (`orm` inside `formatting`) no longer fail Tech Architect stack validation.
+
 ## [2.4.2] - 2026-07-13
 
 ### Fixed
-- **Named-component path matching** — solution-spec folder contracts like `/pages` / `/api` are normalized and matched as directory prefixes in the file tree (no longer fail Tech Architect pass 2 coverage).
+- **Named-component extraction** — filesystem layout contracts (`/pages`, `src/api`, …) are excluded from named-component coverage; only real module names are checked. Folder layout remains enforced by concrete file-tree depth, not path hardcoding.
 
 ## [2.4.1] - 2026-07-13
 
