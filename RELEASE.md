@@ -30,13 +30,13 @@ Use this for production releases of `opl-ai-software-team` (backend image: `quay
 ```bash
 # In opl-ai-software-team submodule
 git add -A
-git commit -m "release: v2.3.0 — dynamic workflow routing and test regression fixes"
-git tag -a v2.3.0 -m "v2.3.0 — see CHANGELOG.md"
+git commit -m "release: v2.4.0 — pipeline routing, capability API, fast-mode seed fixes"
+git tag -a v2.4.0 -m "v2.4.0 — see CHANGELOG.md"
 git push origin main
-git push origin v2.3.0
+git push origin v2.4.0
 ```
 
-GitHub Actions builds and pushes `quay.io/varkrish/crew-backend:v2.3.0` and `:latest` (see `.github/workflows/`).
+GitHub Actions builds and pushes `quay.io/varkrish/crew-backend:v2.4.0` and `:latest` (see `.github/workflows/`).
 
 ## Mono repo bump
 
@@ -44,7 +44,7 @@ GitHub Actions builds and pushes `quay.io/varkrish/crew-backend:v2.3.0` and `:la
 cd opl-crew-mono   # or your prod checkout
 git submodule update --remote opl-ai-software-team
 git add opl-ai-software-team
-git commit -m "chore: bump opl-ai-software-team to v2.3.0"
+git commit -m "chore: bump opl-ai-software-team to v2.4.0"
 git push
 ```
 
@@ -52,7 +52,7 @@ git push
 
 ```bash
 cd /path/to/opl-crew
-podman pull quay.io/varkrish/crew-backend:v2.3.0
+podman pull quay.io/varkrish/crew-backend:v2.4.0
 # Pin image in compose.yml or:
 podman compose up -d --pull always backend
 podman compose restart backend

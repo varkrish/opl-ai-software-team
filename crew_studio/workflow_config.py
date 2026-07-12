@@ -45,20 +45,24 @@ def normalize_workflow_prefs(raw: Optional[Dict[str, Any]]) -> Dict[str, Any]:
 
 def normalize_capability_profile_metadata(
     meta: Optional[Dict[str, Any]],
-    capability_profile: Optional[Dict[str, Any]] = None,
+    capability_profile=None,
 ) -> Dict[str, Any]:
-    """Ensure job metadata carries capability_profile with default path=full."""
+    """Ensure job metadata carries capability_profile with default path=adaptive (auto-infer)."""
     out = dict(meta) if meta else {}
     profile = capability_profile
     if profile is None:
         profile = out.get("capability_profile")
+    # Accept plain string shorthand: "fast" | "full" | "adaptive"
+    if isinstance(profile, str):
+        s = profile.strip().lower()
+        profile = {"solutioning_path": s} if s in ("full", "fast", "adaptive") else {}
     if not isinstance(profile, dict):
         profile = {}
-    path = (profile.get("solutioning_path") or "full")
+    path = (profile.get("solutioning_path") or "adaptive")
     if isinstance(path, str):
         path = path.strip().lower()
     if path not in ("full", "fast", "adaptive"):
-        path = "full"
+        path = "adaptive"
     normalized = {
         **profile,
         "solutioning_path": path,

@@ -94,6 +94,8 @@ _RESUMABLE_PHASES = [
     ProjectState.DEVELOPMENT,
     ProjectState.FRONTEND,
     ProjectState.DEVOPS,
+    ProjectState.REFINEMENT,
+    ProjectState.QA,
 ]
 
 
@@ -443,6 +445,13 @@ class SoftwareDevWorkflow:
 
     def _load_job_metadata(self) -> dict:
         if not self.job_db:
+            try:
+                job_file = self.workspace_path / "job.json"
+                if job_file.exists():
+                    import json
+                    return json.loads(job_file.read_text(encoding="utf-8"))
+            except Exception:
+                pass
             return {}
         try:
             job = self.job_db.get_job(self.project_id)
@@ -523,6 +532,13 @@ class SoftwareDevWorkflow:
             return "full"
 
         profile_meta = metadata.get("capability_profile")
+        if isinstance(profile_meta, str):
+            if profile_meta == "adaptive":
+                return "adaptive"
+            return decide_solutioning_path(
+                self.vision or "",
+                solutioning_path=profile_meta,
+            )
         if isinstance(profile_meta, dict) and profile_meta.get("solutioning_path"):
             return decide_solutioning_path(
                 self.vision or "",
@@ -547,7 +563,8 @@ class SoftwareDevWorkflow:
             except OSError:
                 pass
         metadata = self._load_job_metadata()
-        cap = dict(metadata.get("capability_profile") or {})
+        profile_val = metadata.get("capability_profile")
+        cap = {"solutioning_path": profile_val} if isinstance(profile_val, str) else dict(profile_val or {})
         cap["solutioning_path"] = "fast"
         cap["effective_path"] = "fast"
         cap["suggested_path"] = profile.suggested_path
@@ -609,7 +626,7 @@ class SoftwareDevWorkflow:
             return None
 
         metadata = self._load_job_metadata()
-        if path == "full" and metadata.get("solution_approved"):
+        if path != "fast" and metadata.get("solution_approved"):
             self._ensure_solution_contract_locked()
             return None
 
@@ -3866,6 +3883,184 @@ class SoftwareDevWorkflow:
 
         return "DevOps phase completed"
 
+    def run_refinement_phase(self) -> str:
+        """Run refinement phase for brownfield/refactor."""
+        from ..agents.refinement_agent import RefinementAgent
+        logger.info("🚀 Starting Refinement phase...")
+        self._report_progress('refinement', 75, "Applying edits/refactoring...")
+        if self.state_machine.get_current_state() != ProjectState.REFINEMENT:
+            self.state_machine.force_transition(ProjectState.REFINEMENT, TransitionContext(phase="refinement", data={}))
+        
+        agent = RefinementAgent(
+            workspace_path=self.workspace_path,
+            project_id=self.project_id,
+            budget_tracker=self.budget_tracker,
+        )
+        context = self._enrich_project_context_for_solutioning()
+        prompt = f"Vision/Instruction:\n{self.vision}\n\nContext:\n{context}"
+        try:
+            agent.run(prompt)
+        except Exception as e:
+            logger.error("RefinementAgent failed: %s", e)
+            raise
+        return "Refinement phase completed"
+
+    def run_qa_phase(self) -> str:
+        """Run QA phase (TDD)."""
+        from ..agents.test_agent import TestAgent
+        logger.info("🚀 Starting QA phase...")
+        self._report_progress('qa', 65, "Writing/fixing tests...")
+        if self.state_machine.get_current_state() != ProjectState.QA:
+            self.state_machine.force_transition(ProjectState.QA, TransitionContext(phase="qa", data={}))
+        
+        agent = TestAgent(
+            workspace_path=self.workspace_path,
+            budget_tracker=self.budget_tracker,
+        )
+        context = self._enrich_project_context_for_solutioning()
+        prompt = f"Vision:\n{self.vision}\n\nTech Stack/Context:\n{self.tech_stack}\n{context}"
+        try:
+            agent.run([prompt])
+        except Exception as e:
+            logger.error("TestAgent failed: %s", e)
+            raise
+        return "QA phase completed"
+
+    def _seed_prompt(self, active_str: str, *, strict: bool = False) -> str:
+        """Build the seed prompt. *strict* adds an explicit tree example and forbids bullet lists."""
+        tree_rules = """
+CRITICAL — PROJECT FILE TREE (required, machine-parsed):
+- Inside <tech_stack>, include a markdown fenced code block with a unicode directory tree.
+- Use ONLY tree characters: ├── └── │
+- Every deliverable MUST be a real file with an extension (e.g. index.html, main.css, hello.py).
+- Do NOT use bullet lists (`- \`file\``), plain prose, or directory-only entries without files.
+- Keep the tree minimal — only files needed for the vision.
+
+Required shape (adapt names to the vision):
+```
+project/
+├── index.html
+├── styles/
+│   └── main.css
+└── README.md
+```
+"""
+        if strict:
+            tree_rules += """
+STRICT RETRY: Your previous tech_stack had ZERO extractable file paths.
+Re-emit <tech_stack> with a valid unicode tree ONLY — no bullet lists, no backticks around paths.
+"""
+        return f"""You are an AI architect. Based on the vision, write a minimal tech stack and user stories.
+You must explicitly include requirements necessary for the following downstream execution phases: {active_str}.
+If 'devops' is present, include explicit requirements for Containerfile, docker-compose, and CI/CD pipelines.
+{tree_rules}
+Vision:
+{self.vision}
+
+Return your response exactly in this format using XML tags:
+<tech_stack>
+## Stack
+- language / runtime / frameworks (minimal)
+
+## Repository Layout
+```
+project/
+├── <file with extension>
+└── ...
+```
+</tech_stack>
+<user_stories>
+markdown content here
+</user_stories>
+"""
+
+    def _seed_minimal_artifacts_phase(self) -> str:
+        """Dynamically seed planning artifacts using LLM when skipping full planning."""
+        from ..agents.base_agent import BaseLlamaIndexAgent
+        import json
+        import re
+        from pathlib import Path
+        logger.info("🚀 Seeding minimal artifacts...")
+
+        active = self._get_active_phases(self._load_job_metadata())
+        active_str = json.dumps(active)
+
+        agent = BaseLlamaIndexAgent(
+            role='Seeder',
+            goal='Seed minimal artifacts with a parseable file tree',
+            backstory='Architect generating initial artifacts',
+            tools=[],
+            agent_type='manager',
+            budget_tracker=self.budget_tracker
+        )
+
+        def _parse_seed(response: str) -> tuple[str, str]:
+            ts_match = re.search(r"<tech_stack>(.*?)</tech_stack>", response, re.DOTALL)
+            us_match = re.search(r"<user_stories>(.*?)</user_stories>", response, re.DOTALL)
+            ts = ts_match.group(1).strip() if ts_match else ""
+            us = us_match.group(1).strip() if us_match else ""
+            return ts, us
+
+        def _write_seed(ts: str, us: str) -> None:
+            Path(self.workspace_path / "tech_stack.md").write_text(ts)
+            Path(self.workspace_path / "user_stories.md").write_text(us)
+            self.tech_stack = ts
+            self.user_stories = us
+
+        ts, us = "", ""
+        try:
+            res = agent.chat(self._seed_prompt(active_str, strict=False))
+            ts, us = _parse_seed(res)
+            if not ts:
+                ts = "No tech stack generated."
+            if not us:
+                us = "No user stories generated."
+            _write_seed(ts, us)
+            logger.info("Successfully seeded minimal artifacts.")
+        except Exception as e:
+            logger.error(f"Failed to seed artifacts: {e}")
+            ts = f"# Tech Stack\nMinimal seeded stack for {active_str}."
+            us = f"# User Stories\n{self.vision}"
+            if "devops" in active_str.lower():
+                ts += "\n\n## DevOps Requirements\nMust include Containerfile, docker-compose.yaml, and standard CI/CD pipelines."
+            _write_seed(ts, us)
+
+        # If the seeder wrote an unparseable tree (bullet lists, etc.), retry once
+        # with a stricter prompt so fast-mode still gets file_creation tasks.
+        extracted = self.task_manager._extract_files_with_descriptions(self.tech_stack or "")
+        if not extracted:
+            logger.warning("Seed: tech_stack has 0 extractable files — retrying with strict tree prompt")
+            try:
+                res = agent.chat(self._seed_prompt(active_str, strict=True))
+                ts2, us2 = _parse_seed(res)
+                if ts2:
+                    ts = ts2
+                if us2:
+                    us = us2
+                _write_seed(ts, us)
+                extracted = self.task_manager._extract_files_with_descriptions(self.tech_stack or "")
+            except Exception as e:
+                logger.error("Strict seed retry failed: %s", e)
+
+        if not extracted:
+            logger.error(
+                "Seed: still 0 extractable files after retry — development will have nothing to build"
+            )
+
+        # Register file creation tasks so dev/frontend agents have work to do.
+        # In the full pipeline this happens inside tech_architect, but fast skips it.
+        self.task_manager.register_granular_tasks(
+            self.design_spec or "",
+            self.tech_stack,
+        )
+        self.task_manager.scaffold_directories_from_tech_stack(
+            self.tech_stack,
+            self.workspace_path,
+        )
+        logger.info("Seed: registered %d tasks from tech_stack",
+                     len(self.task_manager.get_incomplete_tasks()))
+        return "Seeding completed"
+
     def _run_phase_with_retry(self, phase_name: str, phase_fn: Callable[[], Any]) -> Any:
         """Run a phase with retries on transient LLM/network errors."""
         from ..utils.llm_config import set_thread_config
@@ -3888,9 +4083,47 @@ class SoftwareDevWorkflow:
         if last_error is not None:
             raise last_error
 
+    def _get_active_phases(self, metadata: Dict[str, Any]) -> List[Any]:
+        """Get the active phases list from YAML config or adaptive router."""
+        path = self._resolve_effective_solutioning_path()
+        if not path:
+            path = "full"
+            
+        workflows = {}
+        if self.config and hasattr(self.config, 'workflows') and isinstance(self.config.workflows, dict):
+            workflows = self.config.workflows
+            
+        if not workflows:
+            workflows = {
+                "full": [
+                    "meta", "stack_contract", "product_owner", "designer", "tech_architect", "qa",
+                    {"parallel": ["development", "frontend", "devops"]}
+                ],
+                "fast": [
+                    "meta", "stack_contract", "seed_minimal_artifacts",
+                    {"parallel": ["development", "frontend"]}
+                ],
+                "edit": [
+                    "meta", "qa", "refinement"
+                ],
+                "refactor": [
+                    "meta", "stack_contract", "tech_architect", "qa", "refinement"
+                ]
+            }
+            
+        if path == "adaptive":
+            from .smart_router import decide_workflow_phases
+            pipeline = decide_workflow_phases(self.vision, self.budget_tracker)
+        else:
+            pipeline = workflows.get(path, workflows.get("full"))
+            
+        metadata["selected_workflow_phases"] = pipeline
+        self._update_job_metadata(metadata)
+        return pipeline
+
     def run(self, resume: bool = False) -> Dict[str, Any]:
         """
-        Run complete workflow.
+        Run complete configuration-driven workflow.
 
         When resume=True, loads persisted artifacts and runs only from the
         current state (e.g. if state is FRONTEND, re-runs frontend then completes).
@@ -3919,10 +4152,7 @@ class SoftwareDevWorkflow:
                 elif current == ProjectState.FAILED:
                     inferred = self._infer_resume_state_from_artifacts()
                     if inferred:
-                        logger.info(
-                            "Resume: failed state — inferring checkpoint %s from workspace",
-                            inferred.value,
-                        )
+                        logger.info("Resume: failed state — inferring checkpoint %s", inferred.value)
                         self.state_machine.force_transition(inferred)
                         current = inferred
                         resume_from_checkpoint = True
@@ -3931,71 +4161,79 @@ class SoftwareDevWorkflow:
                 else:
                     resume_from_checkpoint = True
 
-            if resume_from_checkpoint:
-                try:
-                    start_idx = _RESUMABLE_PHASES.index(current)
-                except ValueError:
-                    start_idx = 0
-                logger.info("Resume: starting from phase %s (index %d)", current.value, start_idx)
-                remaining = _RESUMABLE_PHASES[start_idx:]
-                for phase_state in remaining:
-                    if phase_state == ProjectState.META:
-                        self.run_meta_phase()
-                    elif phase_state == ProjectState.PRODUCT_OWNER:
-                        self._run_phase_with_retry("product_owner", self.run_product_owner_phase)
-                    elif phase_state == ProjectState.DESIGNER:
-                        self._run_phase_with_retry("designer", self.run_designer_phase)
-                    elif phase_state == ProjectState.TECH_ARCHITECT:
-                        self._run_phase_with_retry("tech_architect", self.run_tech_architect_phase)
-                    elif phase_state == ProjectState.DEVELOPMENT:
-                        # Dev, Frontend, DevOps in parallel when resuming from dev
+            pipeline = self._get_active_phases(job_metadata)
+            
+            phase_handlers = {
+                "meta": self.run_meta_phase,
+                "stack_contract": self._run_stack_contract_phase,
+                "seed_minimal_artifacts": self._seed_minimal_artifacts_phase,
+                "product_owner": self.run_product_owner_phase,
+                "designer": self.run_designer_phase,
+                "tech_architect": self.run_tech_architect_phase,
+                "qa": self.run_qa_phase,
+                "refinement": self.run_refinement_phase,
+                "development": self.run_development_phase,
+                "frontend": self.run_frontend_phase,
+                "devops": self.run_devops_phase
+            }
+            
+            # Map enum to string name
+            current_phase_name = current.value if resume_from_checkpoint else None
+            
+            def flatten_pipeline(p):
+                res = []
+                for item in p:
+                    if isinstance(item, str):
+                        res.append(item)
+                    elif isinstance(item, dict) and "parallel" in item:
+                        res.extend(item["parallel"])
+                return res
+            
+            flat_pipeline = flatten_pipeline(pipeline)
+            start_idx = 0
+            if resume_from_checkpoint and current_phase_name in flat_pipeline:
+                start_idx = flat_pipeline.index(current_phase_name)
+                logger.info("Resume: starting from phase %s (index %d in flat pipeline)", current_phase_name, start_idx)
+            
+            current_flat_idx = 0
+            for phase in pipeline:
+                if isinstance(phase, str):
+                    if current_flat_idx >= start_idx:
+                        handler = phase_handlers.get(phase)
+                        if handler:
+                            if phase == "stack_contract":
+                                pause = handler()
+                                if pause is not None:
+                                    return pause
+                            elif phase == "meta":
+                                handler()
+                            else:
+                                self._run_phase_with_retry(phase, handler)
+                            
+                            if phase == "tech_architect":
+                                meta = self._load_job_metadata()
+                                if self._plan_review_enabled() and not meta.get("pending_review_approved"):
+                                    return self._pause_for_plan_review()
+                    current_flat_idx += 1
+                elif isinstance(phase, dict) and "parallel" in phase:
+                    # Check if any phase in parallel block needs to run
+                    parallel_phases = phase["parallel"]
+                    run_parallel = []
+                    for sub in parallel_phases:
+                        if current_flat_idx >= start_idx:
+                            run_parallel.append(sub)
+                        current_flat_idx += 1
+                        
+                    if run_parallel:
                         import concurrent.futures as _cf
-                        with _cf.ThreadPoolExecutor(max_workers=3) as pool:
-                            futs = [pool.submit(self._run_phase_with_retry, "development", self.run_development_phase)]
-                            if ProjectState.FRONTEND in remaining:
-                                futs.append(pool.submit(self._run_phase_with_retry, "frontend", self.run_frontend_phase))
-                            if ProjectState.DEVOPS in remaining:
-                                futs.append(pool.submit(self._run_phase_with_retry, "devops", self.run_devops_phase))
+                        with _cf.ThreadPoolExecutor(max_workers=len(run_parallel)) as pool:
+                            futs = []
+                            for sub_phase in run_parallel:
+                                handler = phase_handlers.get(sub_phase)
+                                if handler:
+                                    futs.append(pool.submit(self._run_phase_with_retry, sub_phase, handler))
                             for f in futs:
                                 f.result()
-                        break  # all remaining phases handled
-                    elif phase_state == ProjectState.FRONTEND:
-                        self._run_phase_with_retry("frontend", self.run_frontend_phase)
-                    elif phase_state == ProjectState.DEVOPS:
-                        self._run_phase_with_retry("devops", self.run_devops_phase)
-                # Fall through to transition to completed + final sweep below
-            else:
-                # Phase 1: Meta (has its own retry logic)
-                self.run_meta_phase()
-                # Adaptive stack contract (Full / Fast / Adaptive)
-                pause = self._run_stack_contract_phase()
-                if pause is not None:
-                    return pause
-                # Phases 2–4: planning — can be paused for human review
-                self._run_phase_with_retry("product_owner", self.run_product_owner_phase)
-                self._run_phase_with_retry("designer", self.run_designer_phase)
-                self._run_phase_with_retry("tech_architect", self.run_tech_architect_phase)
-                # Universal plan review gate (config-gated)
-                metadata = self._load_job_metadata()
-                if self._plan_review_enabled() and not metadata.get("pending_review_approved"):
-                    return self._pause_for_plan_review()
-                # Dev, Frontend, and DevOps run in parallel — DevOps only
-                # needs tech_stack (no dependency on generated code).
-                import concurrent.futures as _cf
-                with _cf.ThreadPoolExecutor(max_workers=3) as pool:
-                    dev_fut = pool.submit(
-                        self._run_phase_with_retry, "development", self.run_development_phase,
-                    )
-                    fe_fut = pool.submit(
-                        self._run_phase_with_retry, "frontend", self.run_frontend_phase,
-                    )
-                    devops_fut = pool.submit(
-                        self._run_phase_with_retry, "devops", self.run_devops_phase,
-                    )
-                    # Raise if any phase failed
-                    dev_fut.result()
-                    fe_fut.result()
-                    devops_fut.result()
 
             # Post-build validation + fix iteration loop.
             # Re-validates after dev+frontend phases and gives the dev agent a
