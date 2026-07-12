@@ -7,6 +7,11 @@ Version tags match container releases (`v2.x.y` → `quay.io/varkrish/crew-backe
 
 ## [Unreleased]
 
+## [2.4.1] - 2026-07-13
+
+### Fixed
+- **Stack manifest vs chosen_stack conflict** — technology-agnostic tier unlock: if `chosen_stack` already selects a tier, drop it from effective `forbidden_tiers` and do not re-apply vision overreach against the locked contract.
+
 ## [2.4.0] - 2026-07-13
 
 ### Added
@@ -75,7 +80,8 @@ Version tags match container releases (`v2.x.y` → `quay.io/varkrish/crew-backe
 
 Earlier releases: solutioning loop, plan review, BYOK LLM config, workflow prefs API, refinement flows. See git tags for details.
 
-[Unreleased]: https://github.com/varkrish/opl-ai-software-team/compare/v2.4.0...HEAD
+[Unreleased]: https://github.com/varkrish/opl-ai-software-team/compare/v2.4.1...HEAD
+[2.4.1]: https://github.com/varkrish/opl-ai-software-team/compare/v2.4.0...v2.4.1
 [2.4.0]: https://github.com/varkrish/opl-ai-software-team/compare/v2.3.0...v2.4.0
 [2.3.0]: https://github.com/varkrish/opl-ai-software-team/compare/v2.2.0...v2.3.0
 [2.2.0]: https://github.com/varkrish/opl-ai-software-team/compare/v2.1.0...v2.2.0

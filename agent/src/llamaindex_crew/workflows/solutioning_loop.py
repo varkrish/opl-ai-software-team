@@ -196,7 +196,12 @@ def write_stack_manifest_from_solution_spec(
 
     chosen = list(resolved.explicit_technologies)
     lower_spec = (spec_text or "").lower()
-    from ..utils.vision_stack_analysis import _extract_named_technologies
+    from ..utils.vision_stack_analysis import (
+        _effective_forbidden_tiers,
+        _extract_named_technologies,
+        _chosen_unlocks_tier,
+        _tier_markers,
+    )
 
     for name in _extract_named_technologies(lower_spec):
         if name not in chosen:
@@ -204,13 +209,23 @@ def write_stack_manifest_from_solution_spec(
     if not chosen:
         chosen = _minimal_chosen_stack(resolved, vision)
 
-    forbidden: List[str] = []
+    # Start from capability-based defaults, then unlock any tier already
+    # selected by chosen_stack (technology-agnostic overlap — no framework lists).
+    candidate_forbidden: List[str] = []
     if resolved.delivery_surface == "client_deliverable" and not resolved.needs_server_runtime:
-        forbidden = list(_CLIENT_FORBIDDEN_TIERS)
+        candidate_forbidden = list(_CLIENT_FORBIDDEN_TIERS)
+    forbidden = _effective_forbidden_tiers(candidate_forbidden, chosen)
+
+    delivery_surface = resolved.delivery_surface
+    needs_server = resolved.needs_server_runtime or _chosen_unlocks_tier(
+        chosen, _tier_markers("application_server")
+    )
+    if needs_server and delivery_surface == "client_deliverable":
+        delivery_surface = "fullstack"
 
     manifest = {
         "path": "full",
-        "delivery_surface": resolved.delivery_surface,
+        "delivery_surface": delivery_surface,
         "complexity": resolved.complexity,
         "chosen_stack": chosen,
         "forbidden_tiers": forbidden,
@@ -220,9 +235,9 @@ def write_stack_manifest_from_solution_spec(
         "suggested_path": resolved.suggested_path,
         "explicit_technologies": list(resolved.explicit_technologies),
         "needs_persistence": resolved.needs_persistence,
-        "needs_api": resolved.needs_api,
+        "needs_api": resolved.needs_api or needs_server,
         "needs_auth": resolved.needs_auth,
-        "needs_server_runtime": resolved.needs_server_runtime,
+        "needs_server_runtime": needs_server,
     }
     write_stack_manifest(workspace_path, manifest)
     return manifest

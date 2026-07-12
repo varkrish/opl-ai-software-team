@@ -53,15 +53,21 @@ def _load_stack_manifest(workspace_path: Optional[Path]) -> Optional[dict]:
 
 def _skill_conflicts_with_manifest(skill_name: str, content: str, manifest: dict) -> bool:
     """Drop skills that pull forbidden platform tiers into a locked client stack."""
-    forbidden = {t.lower() for t in (manifest.get("forbidden_tiers") or [])}
+    from ..utils.vision_stack_analysis import _effective_forbidden_tiers
+
+    chosen = [s.lower() for s in (manifest.get("chosen_stack") or [])]
+    forbidden = set(
+        _effective_forbidden_tiers(
+            [t.lower() for t in (manifest.get("forbidden_tiers") or [])],
+            chosen,
+        )
+    )
     if not forbidden.intersection({"application_server", "database", "cms_platform"}):
         return False
-    chosen = {s.lower() for s in (manifest.get("chosen_stack") or [])}
+    chosen_set = set(chosen)
     blob = f"{skill_name} {content}".lower()
     for marker in _PLATFORM_SKILL_MARKERS:
-        if marker in blob and marker not in chosen:
-            # Allow generic html/css/js skills even if they mention a marker in passing
-            # only when the skill name itself is platform-oriented.
+        if marker in blob and marker not in chosen_set:
             name_l = (skill_name or "").lower()
             if any(m in name_l for m in _PLATFORM_SKILL_MARKERS):
                 return True

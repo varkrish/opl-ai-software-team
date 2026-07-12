@@ -251,6 +251,41 @@ _TIER_MARKERS: Tuple[Tuple[str, Sequence[str]], ...] = (
 )
 
 
+def _chosen_unlocks_tier(chosen: Sequence[str], markers: Sequence[str]) -> bool:
+    """True when chosen_stack already selects something belonging to this tier.
+
+    Technology-agnostic: string overlap only — no per-framework companion lists.
+    """
+    chosen_l = [c.lower() for c in chosen if c]
+    markers_l = [m.lower() for m in markers]
+    for c in chosen_l:
+        for m in markers_l:
+            if m == c or m in c or c in m:
+                return True
+    return False
+
+
+def _tier_markers(tier: str) -> Sequence[str]:
+    for name, markers in _TIER_MARKERS:
+        if name == tier:
+            return markers
+    return ()
+
+
+def _effective_forbidden_tiers(
+    forbidden: Sequence[str],
+    chosen: Sequence[str],
+) -> List[str]:
+    """Drop forbidden tiers that chosen_stack already unlocks."""
+    out: List[str] = []
+    for tier in forbidden:
+        markers = _tier_markers(tier)
+        if markers and _chosen_unlocks_tier(chosen, markers):
+            continue
+        out.append(tier)
+    return out
+
+
 def detect_stack_overreach(
     vision: str,
     artifact: str,
@@ -268,22 +303,22 @@ def detect_stack_overreach(
     introduced = _frameworks_in_text(artifact)
 
     if stack_manifest:
-        forbidden = [t.lower() for t in (stack_manifest.get("forbidden_tiers") or [])]
+        violation = _manifest_forbidden_violation(artifact, stack_manifest)
+        if violation:
+            return violation
         chosen = [t.lower() for t in (stack_manifest.get("chosen_stack") or [])]
-        for tier, markers in _TIER_MARKERS:
-            if tier not in forbidden:
-                continue
-            if any(m in artifact_lower for m in markers):
-                return (
-                    f"Artifact violates locked stack_manifest: introduces forbidden "
-                    f"tier {tier!r} (markers matched against chosen_stack={chosen})."
-                )
-        for fw in introduced:
-            if fw in _SERVER_PLATFORMS and fw not in chosen:
-                return (
-                    f"Artifact introduces {fw!r} but locked stack_manifest forbids "
-                    f"application platforms (chosen_stack={chosen})."
-                )
+        # Locked contract wins: only reject named frameworks outside chosen_stack.
+        # Do not re-apply vision heuristics that contradict an approved solution.
+        if chosen:
+            for fw in introduced:
+                if fw in _SERVER_PLATFORMS and not any(
+                    fw == c or fw in c or c in fw for c in chosen
+                ):
+                    return (
+                        f"Artifact introduces {fw!r} but locked stack_manifest "
+                        f"chosen_stack={chosen} does not include it."
+                    )
+            return None
 
     profile = infer_capability_profile(vision, user_stories)
     if not introduced:
@@ -437,13 +472,21 @@ def _manifest_forbidden_violation(
     artifact: str,
     stack_manifest: Dict[str, Any],
 ) -> Optional[str]:
-    """Return a reason when artifact introduces tiers forbidden by stack_manifest."""
+    """Return a reason when artifact introduces a forbidden tier.
+
+    Technology-agnostic rule:
+    - If ``chosen_stack`` already selects something belonging to a tier, that
+      tier is unlocked (approved contract selected it) — do not flag it.
+    - Otherwise any marker hit for a remaining forbidden tier is a violation.
+    """
     artifact_lower = _normalize(artifact)
-    forbidden = [t.lower() for t in (stack_manifest.get("forbidden_tiers") or [])]
     chosen = [t.lower() for t in (stack_manifest.get("chosen_stack") or [])]
-    for tier, markers in _TIER_MARKERS:
-        if tier not in forbidden:
-            continue
+    forbidden = _effective_forbidden_tiers(
+        [t.lower() for t in (stack_manifest.get("forbidden_tiers") or [])],
+        chosen,
+    )
+    for tier in forbidden:
+        markers = _tier_markers(tier)
         if any(m in artifact_lower for m in markers):
             return (
                 f"Artifact violates locked stack_manifest: introduces forbidden "
