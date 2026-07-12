@@ -506,7 +506,7 @@ class TaskManager:
         r")",
         re.IGNORECASE,
     )
-    _TEST_FILE_TIER = 15  # after models (10), before repository (20)
+    _TEST_FILE_TIER = 95  # after all source tiers (max 80 + mock 90), registered last
 
     _STRUCTURE_LAYER_TIERS: Dict[int, str] = {
         10: "data/model/persistence",
