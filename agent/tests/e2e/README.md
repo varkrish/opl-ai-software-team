@@ -7,6 +7,8 @@ End-to-end tests for the AI Software Development Crew system.
 ```
 tests/e2e/
 ├── conftest.py                    # E2E fixtures and helpers
+├── fixtures/stack_contract/       # Voyager-style stack contract fixtures
+├── test_stack_contract_e2e.py    # Stack manifest + coherence E2E (no LLM)
 ├── test_workflow_e2e.py          # Core workflow E2E tests
 ├── test_web_api_e2e.py           # Web API E2E tests
 ├── test_web_ui_playwright.py     # UI E2E tests (Playwright)
@@ -65,6 +67,22 @@ pytest tests/e2e/ -m "e2e and not slow"
 ```
 
 ## Test Categories
+
+### Stack Contract E2E Tests (`test_stack_contract_e2e.py`)
+
+Deterministic tests for realistic full-path scenarios (no LLM, fast CI):
+- Voyager travel planner: Redis in approved `solution_spec` unlocks `database` tier
+- Regression for job `f84a5d82`: negated "without database tier" prose must pass
+- Real PostgreSQL in `tech_stack` fails when manifest forbids database
+- Fast path: Google HTML / map visions get correct forbidden tiers
+- Adaptive routing: map → fast, travel → full
+- API: `capability_profile` fast/full/auto accepted without 422
+
+```bash
+pytest tests/e2e/test_stack_contract_e2e.py -m e2e -v
+```
+
+**Cost**: Free (filesystem + API contract only)
 
 ### Workflow E2E Tests (`test_workflow_e2e.py`)
 

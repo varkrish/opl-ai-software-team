@@ -7,6 +7,9 @@ Version tags match container releases (`v2.x.y` → `quay.io/varkrish/crew-backe
 
 ## [Unreleased]
 
+### Added
+- **Stack contract E2E tests** — Voyager-style scenarios (Redis spec unlocks database tier, negated-database prose regression, fast-path HTML, capability_profile API) in `tests/e2e/test_stack_contract_e2e.py`; no LLM required.
+
 ## [2.4.5] - 2026-07-13
 
 ### Fixed

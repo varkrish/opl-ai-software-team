@@ -83,6 +83,24 @@ Features:
 Include pytest tests and store TODOs in memory."""
 
 
+@pytest.fixture
+def travel_planner_vision():
+    """Voyager-style full-path vision (Redis/caching in approved spec)."""
+    return (
+        "Create an AI-powered Travel Planner UI called Voyager for families "
+        "to plan trips easily. Web UI with itinerary generation."
+)
+
+
+@pytest.fixture
+def google_html_vision():
+    """Fast-path HTML mock vision."""
+    return (
+        "Create a simple HTML page that mocks a Google search homepage. "
+        "Pure HTML and CSS only, single index.html."
+)
+
+
 def verify_workflow_outputs(workspace: Path, expected_files: list[str] = None) -> dict:
     """
     Verify workflow generated expected outputs
