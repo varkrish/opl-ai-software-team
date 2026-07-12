@@ -16,6 +16,7 @@ An intelligent software development crew that transforms your vision into produc
 - **TDD/BDD Workflow** — Test-Driven Development with Gherkin scenarios
 - **Secure Configuration** — File-based config with encryption support
 - **Refinement** — Natural-language refinements after a job completes ([docs](docs/REFINEMENT_AND_UI.md))
+- **Dynamic Workflow Routing** — Three capability profiles: `fast` (direct stack decision, no solutioning loop), `adaptive` (lightweight arch pass), and `full` (Research → Architect → Critique with human review gate). Profile is auto-selected based on vision complexity or set via `capability_profile` in `job.json`.
 - **Solutioning loop** — Optional research + architect + critique phase before Product Owner; human review gate at `pending_solution_review` ([CHANGELOG](CHANGELOG.md))
 - **Workflow settings (UI or YAML)** — Per-user plan review, solutioning, and auto-approve via Settings → Workflow or `~/.crew-ai/config.yaml` `plan_review` / `solutioning` sections
 - **MTA Migration** — Upload an MTA report and auto-migrate legacy code with per-file issue tracking ([docs](docs/migration.md))
