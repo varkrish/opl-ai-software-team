@@ -7,6 +7,23 @@ Version tags match container releases (`v2.x.y` → `quay.io/varkrish/crew-backe
 
 ## [Unreleased]
 
+## [2.3.0] - 2026-07-12
+
+### Added
+- **Dynamic Workflow Routing** — Introduced `fast`, `adaptive`, and `full` workflow profiles. The `fast` lane bypasses the heavy multi-agent solution loop via `_run_fast_stack_decision()`, while the `full` lane retains the deep iterative review process with user approval.
+
+### Changed
+- Enhanced QA Agent test plan generation (`test_plan_task.txt`) to produce a comprehensive Markdown document with explicit `Test Strategy` and `Test Data Strategy` sections while preserving the execution configuration block for the test runner.
+
+### Fixed
+- Replaced `Dockerfile` requirements with `Containerfile` in Tech Architect prompts, resolving an issue where downstream DevOps agents would generate both files, enforcing compliance with Red Hat stack standards.
+- Silenced noisy Uvicorn HTTP access logs (`--no-access-log`) for the `backend`, `validator`, and `skills-service` containers in both development (`dev-backend.sh`, `compose.dev.yaml`) and production (`Containerfile.backend`, `compose.yaml`) environments.
+- **`_TEST_FILE_TIER` ordering bug** — test files were assigned tier 15 (below source-file default of 50), causing `earlier_tasks` to be empty when dependency inference ran; raised to tier 95 so test files are always registered after all source files, restoring correct test-to-source dependency wiring.
+- **`append_tldr_tools` mock signature** — test mock lambda lacked `**kwargs`, causing `TypeError` when the new `config=` keyword argument was added to the call site.
+- **`create_workspace_file_tools` tool count** — test asserted 5 tools; function now returns 6 after `bulk_file_writer` and `replace_file_content` were added; assertion and tool-name checks updated.
+- **`TestBuildRunnerThreadLocal` import path** — `crew_studio` sits above the `agent/` test root; added autouse fixture to inject the parent directory into `sys.path` and suppress `ensure_llm_api_key` in unit-test context (no real API key required).
+- **`test_skips_if_features_already_exist`** — stub feature content (`"Feature: Existing\n"`, 18 chars) failed `is_valid_gherkin_feature`'s `min_chars=40` + Scenario-structure check, causing the file to be deleted before the assertion; replaced with a complete valid Gherkin feature.
+
 ## [2.2.0] - 2026-07-12
 
 ### Added
@@ -46,7 +63,8 @@ Version tags match container releases (`v2.x.y` → `quay.io/varkrish/crew-backe
 
 Earlier releases: solutioning loop, plan review, BYOK LLM config, workflow prefs API, refinement flows. See git tags for details.
 
-[Unreleased]: https://github.com/varkrish/opl-ai-software-team/compare/v2.2.0...HEAD
+[Unreleased]: https://github.com/varkrish/opl-ai-software-team/compare/v2.3.0...HEAD
+[2.3.0]: https://github.com/varkrish/opl-ai-software-team/compare/v2.2.0...v2.3.0
 [2.2.0]: https://github.com/varkrish/opl-ai-software-team/compare/v2.1.0...v2.2.0
 [2.1.0]: https://github.com/varkrish/opl-ai-software-team/compare/v2.0.0...v2.1.0
 [2.0.0]: https://github.com/varkrish/opl-ai-software-team/releases/tag/v2.0.0
