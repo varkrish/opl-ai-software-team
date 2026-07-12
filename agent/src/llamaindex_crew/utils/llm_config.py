@@ -137,15 +137,20 @@ def get_supports_react(agent_type: str = "worker", config: Optional["SecretConfi
 socket.setdefaulttimeout(300)
 
 
-def _trim_payload_for_context(payload: dict) -> dict:
+def _trim_payload_for_context(payload: dict, trim_fraction: float = 0.25) -> dict:
     """
     Return a copy of *payload* with the context trimmed to fit.
-    
+
+    Args:
+        payload: The LLM API request payload containing a 'messages' list.
+        trim_fraction: Fraction of the longest message to DROP (default 0.25 = drop 25%).
+                       The test suite uses 0.25 and 0.50. The keep fraction is (1 - trim_fraction).
+
     Strategy:
     1. First, try to drop the oldest intermediate conversation history.
-    2. If there is no history to drop (e.g., initial prompt is too large), 
-       trim the longest message from the MIDDLE. This preserves the start 
-       (the main task) and the end (the tool definitions and formatting rules), 
+    2. If there is no history to drop (e.g., initial prompt is too large),
+       trim the longest message from the MIDDLE. This preserves the start
+       (the main task) and the end (the tool definitions and formatting rules),
        ensuring the agent doesn't hallucinate tool usage.
     """
     import copy
@@ -166,36 +171,37 @@ def _trim_payload_for_context(payload: dict) -> dict:
                 dropped = True
                 continue
             new_messages.append(msg)
-        
+
         if dropped:
-            new_payload = dict(payload)
+            new_payload = copy.deepcopy(payload)
             new_payload["messages"] = new_messages
             return new_payload
 
     # Strategy 2: Middle-trim the longest message (preserves tools at the end)
+    keep_fraction = 1.0 - trim_fraction
     best_idx = -1
     best_score = -1
-    
+
     for i, msg in enumerate(messages):
         content = msg.get("content", "")
         if not content: continue
         score = len(content)
         if msg.get("role") == "system":
             score = score * 0.3  # Penalize trimming system
-            
+
         if score > best_score:
             best_score = score
             best_idx = i
 
     if best_idx >= 0:
         original = messages[best_idx]["content"]
-        keep_chars = int(len(original) * 0.75)  # drop 25%
-        
+        keep_chars = int(len(original) * keep_fraction)
+
         if keep_chars > 100:
             half = keep_chars // 2
-            trimmed = original[:half] + "\n\n[... TRUNCATED TO FIT CONTEXT WINDOW ...]\n\n" + original[-half:]
-            
-            new_payload = dict(payload)
+            trimmed = original[:half] + "\n\n[... trimmed to fit context window ...]\n\n" + original[-half:]
+
+            new_payload = copy.deepcopy(payload)
             new_messages = []
             for i, msg in enumerate(messages):
                 if i == best_idx:
@@ -205,10 +211,10 @@ def _trim_payload_for_context(payload: dict) -> dict:
                 else:
                     new_messages.append(msg)
             new_payload["messages"] = new_messages
-            
+
             logger.warning(
-                "Context chunker: Middle-trimmed longest message (role=%s) %d → %d chars (25%% drop) to preserve tool schemas",
-                messages[best_idx].get("role"), len(original), len(trimmed)
+                "Context chunker: Middle-trimmed longest message (role=%s) %d \u2192 %d chars (%.0f%% drop) to preserve tool schemas",
+                messages[best_idx].get("role"), len(original), len(trimmed), trim_fraction * 100
             )
             return new_payload
 

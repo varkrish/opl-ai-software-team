@@ -375,16 +375,21 @@ def extract_named_components(*texts: str) -> List[str]:
     Extract named modules/components from design or solution specs.
 
     Technology-agnostic: uses numbered lists and component section headings,
-    not framework keywords. Path-like entries (e.g. ``/pages``, ``/api``) are
-    kept as folder contracts and matched as directories later.
+    not framework keywords.
+
+    Filesystem layout contracts (``/pages``, ``src/api``, …) are NOT named
+    components — folder layout is enforced by concrete file-tree depth checks,
+    not by component-coverage matching.
     """
     seen: set[str] = set()
     found: List[str] = []
 
-    def _add(name: str) -> None:
-        name = _normalize_component_label(name)
+    def _add(raw: str) -> None:
+        if _is_layout_path_contract(raw):
+            return
+        name = _normalize_component_label(raw)
         key = name.lower()
-        if name and key not in seen and len(name) >= 2:
+        if name and key not in seen and len(name) >= 3:
             seen.add(key)
             found.append(name)
 
@@ -392,7 +397,7 @@ def extract_named_components(*texts: str) -> List[str]:
         if not (text or "").strip():
             continue
 
-        # Numbered bold items: "1. **Gateway API (NestJS)**" or "1. **`/pages` (UI)**"
+        # Numbered bold items: "1. **Gateway API (NestJS)**"
         for match in re.finditer(r"^\s*\d+\.\s+\*\*([^*]+)\*\*", text, re.MULTILINE):
             _add(match.group(1))
 
@@ -411,52 +416,61 @@ def extract_named_components(*texts: str) -> List[str]:
     return found[:30]
 
 
+def _is_layout_path_contract(raw_name: str) -> bool:
+    """True when a label is a filesystem path/layout contract, not a named module.
+
+    Structural heuristic only (slashes / relative path shape) — no framework or
+    folder-name allowlists.
+    """
+    raw = re.sub(r"[`'\"]", "", raw_name or "").strip()
+    raw = re.sub(r"\([^)]*\)", "", raw).strip()
+    if not raw:
+        return True
+    # Absolute/relative path forms: /pages, ./lib, src/api
+    if raw.startswith(("/", "./", "../")):
+        return True
+    if "/" in raw and " " not in raw:
+        return True
+    return False
+
+
 def _normalize_component_label(name: str) -> str:
     """Strip markdown noise and parenthetical roles from a component label."""
     name = re.sub(r"[`'\"]", "", name or "")
     name = re.sub(r"\([^)]*\)", "", name).strip()
-    name = name.strip("/").strip().rstrip(":")
-    return name
+    return name.strip().rstrip(":")
 
 
 def _component_slug(name: str) -> str:
     base = _normalize_component_label(name)
-    base = base.replace("/", "-").replace("\\", "-")
     return re.sub(r"\s+", "-", base.lower())
 
 
 def _component_path_tokens(name: str) -> set[str]:
     """Significant tokens from a component name for path matching."""
-    cleaned = _normalize_component_label(name).lower().replace("\\", "/")
+    slug = _component_slug(name)
     tokens: set[str] = set()
-    if cleaned:
-        tokens.add(cleaned.replace(" ", "-"))
-        tokens.add(_component_slug(name))
-    for part in re.split(r"[/.\-\s_]+", cleaned):
-        part = part.strip()
-        if len(part) >= 2:
+    if slug:
+        tokens.add(slug)
+    for part in re.split(r"[-_\s]+", slug):
+        if len(part) >= 4:
             tokens.add(part)
-    return {t for t in tokens if t}
+    return tokens
 
 
 def component_reflected_in_paths(component: str, paths: List[str]) -> bool:
-    """True when a component slug, path segment, or directory prefix appears in file paths."""
+    """True when a component slug or significant token appears in file paths."""
+    slug = _component_slug(component)
     tokens = _component_path_tokens(component)
-    if not tokens:
+    if not slug and not tokens:
         return True
     for path in paths:
         normalized = path.lower().replace("\\", "/").replace("_", "-")
+        if slug and slug in normalized:
+            return True
         segments = set(re.split(r"[/.\-]+", normalized))
         if tokens & segments:
             return True
-        # Path-like contracts: `/pages` → require pages/… or …/pages/…
-        for token in tokens:
-            if (
-                normalized == token
-                or normalized.startswith(token + "/")
-                or f"/{token}/" in f"/{normalized}"
-            ):
-                return True
     return False
 
 
@@ -485,6 +499,45 @@ def component_reflected_in_artifact(
     return False
 
 
+_TIER_MARKER_WORD_BOUNDARY = frozenset({"database", "orm", "db", "sql"})
+
+_NEGATION_BEFORE_TIER = re.compile(
+    r"(?:without|no|not|avoid(?:ing)?|excluding|never|none|lack(?:ing|s)?)\s+"
+    r"(?:a\s+|an\s+|the\s+|any\s+|separate\s+|additional\s+|external\s+)*",
+    re.IGNORECASE,
+)
+
+
+def _tier_marker_positions(artifact_lower: str, marker: str) -> List[int]:
+    """Return start indices where *marker* appears as a tier signal (not substring noise)."""
+    marker = marker.lower()
+    if marker in _TIER_MARKER_WORD_BOUNDARY or len(marker) <= 3:
+        return [m.start() for m in re.finditer(rf"\b{re.escape(marker)}\b", artifact_lower)]
+    idx = 0
+    positions: List[int] = []
+    while True:
+        found = artifact_lower.find(marker, idx)
+        if found < 0:
+            break
+        positions.append(found)
+        idx = found + len(marker)
+    return positions
+
+
+def _is_negated_tier_mention(artifact_lower: str, marker_start: int) -> bool:
+    """True when the tier marker is explicitly excluded (e.g. 'without database tier')."""
+    window = artifact_lower[max(0, marker_start - 80):marker_start]
+    return bool(_NEGATION_BEFORE_TIER.search(window))
+
+
+def _artifact_introduces_tier_marker(artifact_lower: str, marker: str) -> bool:
+    """True when *marker* appears in a non-negated, tier-significant context."""
+    for pos in _tier_marker_positions(artifact_lower, marker):
+        if not _is_negated_tier_mention(artifact_lower, pos):
+            return True
+    return False
+
+
 def _manifest_forbidden_violation(
     artifact: str,
     stack_manifest: Dict[str, Any],
@@ -495,6 +548,8 @@ def _manifest_forbidden_violation(
     - If ``chosen_stack`` already selects something belonging to a tier, that
       tier is unlocked (approved contract selected it) — do not flag it.
     - Otherwise any marker hit for a remaining forbidden tier is a violation.
+    - Negated mentions (``without database``, ``no ORM``) and substring noise
+      (``orm`` inside ``formatting``) are ignored.
     """
     artifact_lower = _normalize(artifact)
     chosen = [t.lower() for t in (stack_manifest.get("chosen_stack") or [])]
@@ -504,7 +559,7 @@ def _manifest_forbidden_violation(
     )
     for tier in forbidden:
         markers = _tier_markers(tier)
-        if any(m in artifact_lower for m in markers):
+        if any(_artifact_introduces_tier_marker(artifact_lower, m) for m in markers):
             return (
                 f"Artifact violates locked stack_manifest: introduces forbidden "
                 f"tier {tier!r} (chosen_stack={chosen})."
