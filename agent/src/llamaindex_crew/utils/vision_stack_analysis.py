@@ -375,15 +375,16 @@ def extract_named_components(*texts: str) -> List[str]:
     Extract named modules/components from design or solution specs.
 
     Technology-agnostic: uses numbered lists and component section headings,
-    not framework keywords.
+    not framework keywords. Path-like entries (e.g. ``/pages``, ``/api``) are
+    kept as folder contracts and matched as directories later.
     """
     seen: set[str] = set()
     found: List[str] = []
 
     def _add(name: str) -> None:
-        name = name.strip().rstrip(":")
+        name = _normalize_component_label(name)
         key = name.lower()
-        if name and key not in seen and len(name) >= 3:
+        if name and key not in seen and len(name) >= 2:
             seen.add(key)
             found.append(name)
 
@@ -391,7 +392,7 @@ def extract_named_components(*texts: str) -> List[str]:
         if not (text or "").strip():
             continue
 
-        # Numbered bold items: "1. **Gateway API (NestJS)**"
+        # Numbered bold items: "1. **Gateway API (NestJS)**" or "1. **`/pages` (UI)**"
         for match in re.finditer(r"^\s*\d+\.\s+\*\*([^*]+)\*\*", text, re.MULTILINE):
             _add(match.group(1))
 
@@ -410,36 +411,52 @@ def extract_named_components(*texts: str) -> List[str]:
     return found[:30]
 
 
+def _normalize_component_label(name: str) -> str:
+    """Strip markdown noise and parenthetical roles from a component label."""
+    name = re.sub(r"[`'\"]", "", name or "")
+    name = re.sub(r"\([^)]*\)", "", name).strip()
+    name = name.strip("/").strip().rstrip(":")
+    return name
+
+
 def _component_slug(name: str) -> str:
-    base = re.sub(r"\([^)]*\)", "", name or "").strip()
+    base = _normalize_component_label(name)
+    base = base.replace("/", "-").replace("\\", "-")
     return re.sub(r"\s+", "-", base.lower())
 
 
 def _component_path_tokens(name: str) -> set[str]:
     """Significant tokens from a component name for path matching."""
-    slug = _component_slug(name)
+    cleaned = _normalize_component_label(name).lower().replace("\\", "/")
     tokens: set[str] = set()
-    if slug:
-        tokens.add(slug)
-    for part in re.split(r"[-_\s]+", slug):
-        if len(part) >= 4:
+    if cleaned:
+        tokens.add(cleaned.replace(" ", "-"))
+        tokens.add(_component_slug(name))
+    for part in re.split(r"[/.\-\s_]+", cleaned):
+        part = part.strip()
+        if len(part) >= 2:
             tokens.add(part)
-    return tokens
+    return {t for t in tokens if t}
 
 
 def component_reflected_in_paths(component: str, paths: List[str]) -> bool:
-    """True when a component slug or significant token appears in file paths."""
-    slug = _component_slug(component)
+    """True when a component slug, path segment, or directory prefix appears in file paths."""
     tokens = _component_path_tokens(component)
-    if not slug and not tokens:
+    if not tokens:
         return True
     for path in paths:
         normalized = path.lower().replace("\\", "/").replace("_", "-")
-        if slug and slug in normalized:
-            return True
         segments = set(re.split(r"[/.\-]+", normalized))
         if tokens & segments:
             return True
+        # Path-like contracts: `/pages` → require pages/… or …/pages/…
+        for token in tokens:
+            if (
+                normalized == token
+                or normalized.startswith(token + "/")
+                or f"/{token}/" in f"/{normalized}"
+            ):
+                return True
     return False
 
 
