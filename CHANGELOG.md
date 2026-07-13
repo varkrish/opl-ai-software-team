@@ -11,9 +11,10 @@ Version tags match container releases (`v2.x.y` → `quay.io/varkrish/crew-backe
 - **`workflow_resolver`** — single pipeline resolver for YAML `workflows`, persisted `selected_workflow_phases`, and `smart_router` (adaptive only on first run). Plan-approve resume walks the resolved pipeline (`qa` before dev on full/TDD paths).
 - **TDD QA phase** — QA materializes test `file_creation` tasks when pipeline places `qa` before build phases; dev skips those files after `qa_phase_completed`.
 - **Feature-by-feature development** — when pipeline includes `product_owner`, dev runs one BDD feature slice at a time (related files, then feature implementation) instead of batching all features at the end.
+- **Solutioning E2E** — `test_solutioning_e2e.py` runs the live research → architect → critique loop (`solution_approved=False`) and a second test that approves then resumes the full pipeline.
 
 ### Fixed
-- **Solution critique approval** — a critique with non-empty `must_fix` can no longer count as approved; the loop continues until blockers are cleared or `max_passes` is reached. Saved critique JSON normalizes `approved` to `false` when `must_fix` is present.
+- **Solution critique approval** — a critique with non-empty `must_fix` can no longer count as approved; the loop continues until blockers are cleared or `max_passes` is reached. Saved critique JSON normalizes `approved` to `false` when `must_fix` is present. Shared `run_architect_critique_passes()` drives both initial solutioning and user refinement; pass stats persisted in job metadata.
 - **TDD test task registration** — when `tech_stack.md` omits a `tests/` tree, derive test `file_creation` tasks from mirrored source paths and paths referenced in `test_plan.md`; QA materializes them per-file instead of a single chat fallback. `qa_phase_completed` is set only when no test file tasks remain pending.
 - **LLM rate-limit (HTTP 429) resilience** — exponential backoff with `Retry-After` and provider reset timestamps; up to 15 retries (15 min wait) on `chat`/`achat`/`complete`/`acomplete` instead of failing file-creation tasks immediately.
 - **Plan-approve resume** — no longer hardcodes `current_phase: development`; uses `resume_phase_after_plan_review()` from job metadata and config.

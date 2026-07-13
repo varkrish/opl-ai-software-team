@@ -662,15 +662,34 @@ class SoftwareDevWorkflow:
             pass
         return base
 
+    def _solutioning_max_passes(self) -> int:
+        max_passes = 3
+        sol_cfg = getattr(self.config, "solutioning", None) if self.config else None
+        if sol_cfg:
+            max_passes = int(getattr(sol_cfg, "max_passes", 3) or 3)
+        return max(1, max_passes)
+
+    def _persist_solutioning_pass_stats(
+        self,
+        *,
+        pass_count: int,
+        max_passes: int,
+        approved_by_critique: bool,
+    ) -> None:
+        metadata = self._load_job_metadata()
+        metadata["solution_pass_count"] = pass_count
+        metadata["solution_max_passes"] = max_passes
+        metadata["solution_approved_by_critique"] = approved_by_critique
+        self._update_job_metadata(metadata)
+
     def _run_solutioning_loop(self):
         """Run research → architect → critique loop and persist artifacts."""
         from .solutioning_loop import run_solutioning_loop
 
-        max_passes = 3
+        max_passes = self._solutioning_max_passes()
         max_github = 10
         sol_cfg = getattr(self.config, "solutioning", None) if self.config else None
         if sol_cfg:
-            max_passes = int(getattr(sol_cfg, "max_passes", 3) or 3)
             max_github = int(getattr(sol_cfg, "max_github_searches", 10) or 10)
 
         github_token = None
@@ -699,6 +718,11 @@ class SoftwareDevWorkflow:
                 self.solution_spec = result.spec_path.read_text(encoding="utf-8", errors="replace")
             except OSError:
                 pass
+        self._persist_solutioning_pass_stats(
+            pass_count=result.pass_count,
+            max_passes=max_passes,
+            approved_by_critique=result.approved,
+        )
         self._report_progress(
             "solutioning",
             28,
@@ -747,6 +771,7 @@ class SoftwareDevWorkflow:
             candidates_json = candidates_path.read_text(encoding="utf-8", errors="replace")
 
         from ..agents.solution_agents import SolutionArchitectAgent, SolutionCritiqueAgent
+        from .solutioning_loop import is_critique_approved, run_architect_critique_passes
 
         architect = SolutionArchitectAgent(
             budget_tracker=self.budget_tracker,
@@ -764,26 +789,30 @@ class SoftwareDevWorkflow:
             if prior.strip():
                 combined_feedback = f"{prior.strip()}\n\nLatest feedback:\n{feedback}"
 
-        architect.run(self.vision, self._enrich_project_context_for_solutioning(), candidates_json, feedback=combined_feedback)
+        existing_passes = len(list(self.workspace_path.glob("solution_critique_pass_*.json")))
+        max_passes = self._solutioning_max_passes()
+        approved, pass_count, _critiques = run_architect_critique_passes(
+            self.vision,
+            self._enrich_project_context_for_solutioning(),
+            self.workspace_path,
+            architect,
+            critique_agent,
+            candidates_json,
+            max_passes=max_passes,
+            initial_feedback=combined_feedback,
+            existing_passes=existing_passes,
+            progress_callback=self.progress_callback,
+        )
+
         spec_path = self.workspace_path / "solution_spec.md"
-        spec_content = spec_path.read_text(encoding="utf-8", errors="replace") if spec_path.exists() else ""
-        critique_raw = critique_agent.run(self.vision, spec_content, candidates_json)
-
-        pass_num = len(list(self.workspace_path.glob("solution_critique_pass_*.json"))) + 1
-        try:
-            import re as _re
-            match = _re.search(r"\{[\s\S]*\}", critique_raw or "")
-            critique = _json.loads(match.group(0)) if match else {"approved": False, "score": 0, "issues": [], "must_fix": []}
-        except Exception:
-            critique = {"approved": False, "score": 0, "issues": ["Invalid critique JSON"], "must_fix": []}
-        from .solutioning_loop import is_critique_approved, normalize_critique
-
-        critique = normalize_critique(critique)
-        critique_path = self.workspace_path / f"solution_critique_pass_{pass_num}.json"
-        critique_path.write_text(_json.dumps(critique, indent=2) + "\n", encoding="utf-8")
-
         if spec_path.exists():
             self.solution_spec = spec_path.read_text(encoding="utf-8", errors="replace")
+
+        self._persist_solutioning_pass_stats(
+            pass_count=pass_count,
+            max_passes=max_passes,
+            approved_by_critique=approved,
+        )
 
         metadata["solution_pending_review"] = True
         self._update_job_metadata(metadata)
@@ -796,12 +825,18 @@ class SoftwareDevWorkflow:
 
         artifacts = self._load_plan_artifacts()
         if spec_path.exists():
-            artifacts["solution_spec.md"] = self.solution_spec or spec_content
+            artifacts["solution_spec.md"] = self.solution_spec or spec_path.read_text(
+                encoding="utf-8", errors="replace",
+            )
         return {
             "status": "pending_solution_review",
             "artifacts": artifacts,
             "feedback_rounds": len(history),
-            "solution_approved_by_critique": is_critique_approved(critique),
+            "solution_pass_count": pass_count,
+            "solution_max_passes": max_passes,
+            "solution_approved_by_critique": is_critique_approved(
+                _critiques[-1] if _critiques else {"approved": False, "must_fix": []},
+            ),
         }
 
     def _load_plan_artifacts(self) -> dict[str, str]:

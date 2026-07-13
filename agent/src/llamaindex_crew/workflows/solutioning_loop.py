@@ -348,6 +348,114 @@ def _format_critique_feedback(critique: dict) -> str:
     return "\n\n".join(parts)
 
 
+def run_architect_critique_passes(
+    vision: str,
+    project_context: str,
+    workspace_path: Path,
+    architect_agent,
+    critique_agent,
+    candidates_json: str,
+    *,
+    max_passes: int,
+    initial_feedback: str = "",
+    existing_passes: int = 0,
+    progress_callback: Optional[Callable[[str, int, str], None]] = None,
+) -> tuple[bool, int, List[dict]]:
+    """Run architect → critique up to *max_passes* times.
+
+    *existing_passes* is the number of critique files already on disk (refine
+    continues pass numbering). Returns ``(approved, total_pass_count, critiques)``.
+    """
+    workspace_path = Path(workspace_path)
+    spec_path = workspace_path / "solution_spec.md"
+    max_passes = max(1, int(max_passes or 1))
+    feedback = initial_feedback
+    approved = False
+    passes_run = 0
+    critique_history: List[dict] = []
+
+    def _progress(step: str, pct: int, msg: str) -> None:
+        if progress_callback:
+            try:
+                progress_callback(step, pct, msg)
+            except Exception:
+                logger.warning("Solutioning progress callback failed", exc_info=True)
+
+    while passes_run < max_passes:
+        pass_num = existing_passes + passes_run + 1
+        passes_run += 1
+        _progress(
+            "solutioning",
+            15 + pass_num * 5,
+            f"Architect pass {pass_num} (iteration {passes_run}/{max_passes})…",
+        )
+        architect_agent.run(vision, project_context, candidates_json, feedback=feedback)
+
+        if not spec_path.exists():
+            spec_path.write_text(
+                f"# Solution Specification\n\nDraft for: {vision[:200]}\n",
+                encoding="utf-8",
+            )
+        spec_content = spec_path.read_text(encoding="utf-8", errors="replace")
+
+        spec_pass_file = workspace_path / f"solution_spec_pass_{pass_num}.md"
+        spec_pass_file.write_text(spec_content, encoding="utf-8")
+
+        _progress(
+            "solutioning",
+            18 + pass_num * 5,
+            f"Critique pass {pass_num} (iteration {passes_run}/{max_passes})…",
+        )
+        critique_raw = critique_agent.run(vision, spec_content, candidates_json, project_context)
+        critique = _extract_json(critique_raw, expect_list=False)
+        if not isinstance(critique, dict):
+            critique = {
+                "approved": False,
+                "score": 0,
+                "issues": ["Invalid critique JSON"],
+                "must_fix": [],
+            }
+        critique = normalize_critique(critique)
+
+        critique_file = workspace_path / f"solution_critique_pass_{pass_num}.json"
+        critique_file.write_text(json.dumps(critique, indent=2) + "\n", encoding="utf-8")
+        critique_history.append(critique)
+
+        if is_critique_approved(critique):
+            approved = True
+            logger.info(
+                "Solution critique approved on pass %d (iteration %d/%d)",
+                pass_num,
+                passes_run,
+                max_passes,
+            )
+            break
+
+        if passes_run >= max_passes:
+            approved = False
+            logger.warning(
+                "Solution critique not approved after %d pass(es) (max_passes=%d); "
+                "must_fix=%r",
+                existing_passes + passes_run,
+                max_passes,
+                _non_empty_must_fix(critique),
+            )
+            break
+
+        blockers = _non_empty_must_fix(critique)
+        logger.info(
+            "Solution pass %d blocked (%d must_fix) — continuing iteration %d/%d",
+            pass_num,
+            len(blockers),
+            passes_run + 1,
+            max_passes,
+        )
+        feedback = _format_critique_feedback(critique)
+
+    total_pass_count = existing_passes + passes_run
+    return approved, total_pass_count, critique_history
+
+
 def run_solutioning_loop(
     vision: str,
     project_context: str,
@@ -366,7 +474,6 @@ def run_solutioning_loop(
 
     candidates_path = workspace_path / "solution_candidates.json"
     spec_path = workspace_path / "solution_spec.md"
-    critique_history: List[dict] = []
 
     def _progress(step: str, pct: int, msg: str) -> None:
         if progress_callback:
@@ -401,52 +508,16 @@ def run_solutioning_loop(
     candidates_path.write_text(json.dumps(candidates, indent=2) + "\n", encoding="utf-8")
     candidates_json = candidates_path.read_text(encoding="utf-8")
 
-    feedback = ""
-    approved = False
-    pass_count = 0
-
-    while pass_count < max_passes:
-        pass_count += 1
-        _progress("solutioning", 15 + pass_count * 5, f"Architect pass {pass_count}…")
-        architect_agent.run(vision, project_context, candidates_json, feedback=feedback)
-
-        if not spec_path.exists():
-            spec_path.write_text(
-                f"# Solution Specification\n\nDraft for: {vision[:200]}\n",
-                encoding="utf-8",
-            )
-        spec_content = spec_path.read_text(encoding="utf-8", errors="replace")
-
-        # Archive this pass's spec so revisions can be diffed pass-over-pass —
-        # spec_path itself gets overwritten on the next pass.
-        spec_pass_file = workspace_path / f"solution_spec_pass_{pass_count}.md"
-        spec_pass_file.write_text(spec_content, encoding="utf-8")
-
-        _progress("solutioning", 18 + pass_count * 5, f"Critique pass {pass_count}…")
-        critique_raw = critique_agent.run(vision, spec_content, candidates_json, project_context)
-        critique = _extract_json(critique_raw, expect_list=False)
-        if not isinstance(critique, dict):
-            critique = {
-                "approved": False,
-                "score": 0,
-                "issues": ["Invalid critique JSON"],
-                "must_fix": [],
-            }
-        critique = normalize_critique(critique)
-
-        critique_file = workspace_path / f"solution_critique_pass_{pass_count}.json"
-        critique_file.write_text(json.dumps(critique, indent=2) + "\n", encoding="utf-8")
-        critique_history.append(critique)
-
-        if is_critique_approved(critique):
-            approved = True
-            break
-
-        if pass_count >= max_passes:
-            approved = False
-            break
-
-        feedback = _format_critique_feedback(critique)
+    approved, pass_count, critique_history = run_architect_critique_passes(
+        vision,
+        project_context,
+        workspace_path,
+        architect_agent,
+        critique_agent,
+        candidates_json,
+        max_passes=max_passes,
+        progress_callback=progress_callback,
+    )
 
     profile = infer_capability_profile(vision)
     write_stack_manifest_from_solution_spec(
