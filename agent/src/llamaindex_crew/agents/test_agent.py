@@ -13,6 +13,7 @@ from ..tools import (
     append_tldr_tools,
 )
 from ..tools.tool_loader import load_tools
+from ..utils.llm_config import get_supports_react
 from ..config import ConfigLoader
 from ..utils.prompt_loader import load_prompt
 
@@ -67,6 +68,7 @@ class TestAgent:
             budget_tracker=budget_tracker,
             verbose=True,
         )
+        self.supports_react = get_supports_react("worker")
 
     def run_tests(
         self,

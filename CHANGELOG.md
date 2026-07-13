@@ -7,8 +7,15 @@ Version tags match container releases (`v2.x.y` → `quay.io/varkrish/crew-backe
 
 ## [Unreleased]
 
+### Added
+- **`workflow_resolver`** — single pipeline resolver for YAML `workflows`, persisted `selected_workflow_phases`, and `smart_router` (adaptive only on first run). Plan-approve resume walks the resolved pipeline (`qa` before dev on full/TDD paths).
+- **TDD QA phase** — QA materializes test `file_creation` tasks when pipeline places `qa` before build phases; dev skips those files after `qa_phase_completed`.
+- **Feature-by-feature development** — when pipeline includes `product_owner`, dev runs one BDD feature slice at a time (related files, then feature implementation) instead of batching all features at the end.
+
 ### Fixed
 - **LLM rate-limit (HTTP 429) resilience** — exponential backoff with `Retry-After` and provider reset timestamps; up to 15 retries (15 min wait) on `chat`/`achat`/`complete`/`acomplete` instead of failing file-creation tasks immediately.
+- **Plan-approve resume** — no longer hardcodes `current_phase: development`; uses `resume_phase_after_plan_review()` from job metadata and config.
+- **Resume checkpoint** — artifact inference and job-DB `current_phase` sync route through QA when TDD pipeline has not completed QA yet.
 
 ## [2.4.5] - 2026-07-13
 

@@ -25,6 +25,14 @@ from ..utils.feature_parser import parse_features_from_files
 from ..utils.document_indexer import DocumentIndexer
 from ..utils.rag_context import get_phase_rag_context
 from ..utils.llm_config import get_embedding_model
+from ..utils.test_companion import is_test_file_path
+from .workflow_resolver import (
+    flatten_pipeline,
+    is_feature_by_feature_pipeline,
+    is_tdd_pipeline,
+    project_state_for_phase,
+    resolve_workflow_pipeline,
+)
 from ..utils.output_parser import (
     is_valid_gherkin_feature,
     product_owner_format_instruction,
@@ -2039,7 +2047,14 @@ class SoftwareDevWorkflow:
         try:
             ts = wp / "tech_stack.md"
             if ts.exists() and ts.read_text(encoding="utf-8", errors="replace").strip():
-                # Checkpoint: tech_stack.md (+ optional test_plan.md) → development
+                meta = self._load_job_metadata()
+                pipeline = self._resolved_pipeline(meta)
+                if (
+                    is_tdd_pipeline(pipeline)
+                    and "qa" in flatten_pipeline(pipeline)
+                    and not meta.get("qa_phase_completed")
+                ):
+                    return ProjectState.QA
                 return ProjectState.DEVELOPMENT
             if (wp / "design_spec.md").exists():
                 return ProjectState.TECH_ARCHITECT
@@ -2573,6 +2588,7 @@ class SoftwareDevWorkflow:
             self.task_manager.register_granular_tasks(
                 self.design_spec or "",
                 self.tech_stack,
+                tdd=self._is_tdd_enabled(),
             )
             self.task_manager.scaffold_directories_from_tech_stack(
                 self.tech_stack,
@@ -3344,11 +3360,148 @@ class SoftwareDevWorkflow:
         self.task_manager.register_granular_tasks(
             self.design_spec or "",
             self.tech_stack,
+            tdd=self._is_tdd_enabled(),
         )
         self.task_manager.scaffold_directories_from_tech_stack(
             self.tech_stack,
             self.workspace_path,
         )
+
+    def _skip_test_files_in_dev(self) -> bool:
+        """When QA already wrote tests, dev phase should not recreate them."""
+        meta = self._load_job_metadata()
+        return self._is_tdd_enabled(meta) and bool(meta.get("qa_phase_completed"))
+
+    def _dev_file_task_eligible(self, task) -> bool:
+        if task.task_type != "file_creation":
+            return True
+        if not self._skip_test_files_in_dev():
+            return True
+        fp = (task.metadata or {}).get("file_path", "")
+        return not is_test_file_path(fp)
+
+    def _feature_rel_path(self, feature: Dict[str, Any]) -> str:
+        raw = feature.get("file") or ""
+        if not raw:
+            return f"features/{feature.get('name', 'feature')}.feature"
+        p = Path(raw)
+        try:
+            return str(p.relative_to(self.workspace_path)).replace("\\", "/")
+        except ValueError:
+            return str(p).replace("\\", "/")
+
+    def _file_task_ids_for_feature(
+        self, feature: Dict[str, Any], tasks: List[Any],
+    ) -> set:
+        feat_path = self._feature_rel_path(feature)
+        feat_stem = Path(feat_path).stem.lower()
+        ids: set = set()
+        for t in tasks:
+            if t.task_type != "file_creation" or not self._dev_file_task_eligible(t):
+                continue
+            meta = t.metadata or {}
+            linked = meta.get("feature_files") or []
+            if feat_path in linked or any(
+                feat_stem in Path(p).stem.lower() for p in linked
+            ):
+                ids.add(t.task_id)
+                continue
+            fp = (meta.get("file_path") or "").lower()
+            if feat_stem in fp or feat_stem.replace("_", "-") in fp:
+                ids.add(t.task_id)
+        return ids
+
+    def _implement_feature_slice(
+        self,
+        feature: Dict[str, Any],
+        file_task_ids: set,
+        dev_agent: DevAgent,
+        completed_files: dict,
+        export_registry: dict,
+        lock: "threading.Lock",
+        *,
+        agent_factory=None,
+    ) -> int:
+        """Run file tasks then DevAgent for a single BDD feature."""
+        from ..tools.file_tools import set_allowed_file_paths
+
+        label = feature.get("name") or "feature"
+        count = 0
+        if file_task_ids:
+            count = self._process_file_tasks(
+                dev_agent, file_task_ids, f"feature-{label}",
+                completed_files, export_registry, lock,
+                agent_factory=agent_factory,
+            )
+
+        set_allowed_file_paths(None, workspace=str(self.workspace_path))
+        feat_label = feature.get("description") or feature.get("name") or label
+        try:
+            result = dev_agent.run([feat_label], self.tech_stack or "", self.user_stories)
+            self.task_manager.update_task_status_by_output(result)
+        except Exception as e:
+            logger.error("Feature %s implementation failed: %s", label, e)
+            feat_id = f"feature_{feature.get('name', label)}"
+            self.task_manager.mark_task_executed(feat_id, TaskStatus.FAILED, str(e)[:500])
+            return count
+
+        feat_id = f"feature_{feature.get('name', label)}"
+        self.task_manager.update_task_status(
+            feat_id, TaskStatus.COMPLETED.value,
+            f"Feature implemented: {feat_label}",
+        )
+        return count + 1
+
+    def _run_development_feature_by_feature(
+        self,
+        features: List[Dict[str, Any]],
+        dev_agent: DevAgent,
+        agent_factory,
+        completed_files: dict,
+        export_registry: dict,
+        lock: "threading.Lock",
+    ) -> int:
+        """Develop one BDD feature at a time: related files, then feature slice."""
+        all_registered = [
+            t for t in self.task_manager.get_pending_tasks()
+            if self._dev_file_task_eligible(t)
+        ]
+        assigned: set = set()
+        total = 0
+
+        for i, feature in enumerate(features, 1):
+            file_ids = self._file_task_ids_for_feature(feature, all_registered)
+            file_ids -= assigned
+            assigned |= file_ids
+            logger.info(
+                "Feature-by-feature [%d/%d] %s — %d file task(s)",
+                i, len(features), feature.get("name"), len(file_ids),
+            )
+            self._report_progress(
+                "development", 65 + int(20 * i / max(len(features), 1)),
+                f"Feature {i}/{len(features)}: {feature.get('description', feature.get('name'))}",
+            )
+            total += self._implement_feature_slice(
+                feature, file_ids, dev_agent,
+                completed_files, export_registry, lock,
+                agent_factory=agent_factory,
+            )
+
+        remaining_ids = {
+            t.task_id for t in all_registered
+            if t.task_type == "file_creation" and t.task_id not in assigned
+        }
+        if remaining_ids:
+            logger.info(
+                "Feature-by-feature: %d unassigned file task(s) after feature slices",
+                len(remaining_ids),
+            )
+            total += self._process_file_tasks(
+                dev_agent, remaining_ids, "dev-unassigned",
+                completed_files, export_registry, lock,
+                agent_factory=agent_factory,
+            )
+        return total
 
     def run_development_phase(self) -> str:
         """Run Development phase: iterate per-task, generating one file at a time.
@@ -3445,7 +3598,10 @@ class SoftwareDevWorkflow:
             )
 
         # Partition all registered tasks into backend and frontend
-        all_registered = self.task_manager.get_pending_tasks()
+        all_registered = [
+            t for t in self.task_manager.get_pending_tasks()
+            if self._dev_file_task_eligible(t)
+        ]
         backend_task_ids: set = set()
         frontend_task_ids: set = set()
         for t in all_registered:
@@ -3461,89 +3617,106 @@ class SoftwareDevWorkflow:
         completed_files: dict = {}
         export_registry: dict = {}
         lock = _threading.Lock()
-        is_fullstack = bool(backend_task_ids and frontend_task_ids)
+        feature_by_feature = self._is_feature_by_feature() and bool(features)
 
-        if is_fullstack:
-            fe_backstory = self.agent_backstories.get('frontend_developer')
-            self.frontend_agent = FrontendAgent(
-                custom_backstory=fe_backstory,
-                budget_tracker=self.budget_tracker,
-                workspace_path=self.workspace_path,
+        if feature_by_feature:
+            logger.info(
+                "Feature-by-feature development: %d feature(s), sequential slices",
+                len(features),
             )
+            task_count = self._run_development_feature_by_feature(
+                features,
+                self.dev_agent,
+                _make_dev_agent,
+                completed_files,
+                export_registry,
+                lock,
+            )
+        else:
+            is_fullstack = bool(backend_task_ids and frontend_task_ids)
 
-            def _make_fe_agent():
-                return FrontendAgent(
+            if is_fullstack:
+                fe_backstory = self.agent_backstories.get('frontend_developer')
+                self.frontend_agent = FrontendAgent(
                     custom_backstory=fe_backstory,
                     budget_tracker=self.budget_tracker,
                     workspace_path=self.workspace_path,
                 )
 
-            logger.info(
-                "⚡ Fullstack project: backend (%d) + frontend (%d) tasks, "
-                "each lane parallelised with PARALLEL_FILE_WORKERS workers",
-                len(backend_task_ids), len(frontend_task_ids),
-            )
-            self._report_progress(
-                'development', 65,
-                f"Parallel build: {len(backend_task_ids)} backend + "
-                f"{len(frontend_task_ids)} frontend tasks...",
-            )
+                def _make_fe_agent():
+                    return FrontendAgent(
+                        custom_backstory=fe_backstory,
+                        budget_tracker=self.budget_tracker,
+                        workspace_path=self.workspace_path,
+                    )
 
-            import concurrent.futures
-            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
-                be_future = pool.submit(
-                    self._process_file_tasks,
-                    self.dev_agent, backend_task_ids, "backend",
+                logger.info(
+                    "⚡ Fullstack project: backend (%d) + frontend (%d) tasks, "
+                    "each lane parallelised with PARALLEL_FILE_WORKERS workers",
+                    len(backend_task_ids), len(frontend_task_ids),
+                )
+                self._report_progress(
+                    'development', 65,
+                    f"Parallel build: {len(backend_task_ids)} backend + "
+                    f"{len(frontend_task_ids)} frontend tasks...",
+                )
+
+                import concurrent.futures
+                with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+                    be_future = pool.submit(
+                        self._process_file_tasks,
+                        self.dev_agent, backend_task_ids, "backend",
+                        completed_files, export_registry, lock,
+                        agent_factory=_make_dev_agent,
+                    )
+                    fe_future = pool.submit(
+                        self._process_file_tasks,
+                        self.frontend_agent, frontend_task_ids, "frontend",
+                        completed_files, export_registry, lock,
+                        agent_factory=_make_fe_agent,
+                    )
+                    be_count = be_future.result()
+                    fe_count = fe_future.result()
+
+                task_count = be_count + fe_count
+                logger.info("⚡ Parallel build complete: %d backend + %d frontend tasks", be_count, fe_count)
+            else:
+                all_task_ids = backend_task_ids | frontend_task_ids
+                task_count = self._process_file_tasks(
+                    self.dev_agent, all_task_ids, "dev",
                     completed_files, export_registry, lock,
                     agent_factory=_make_dev_agent,
                 )
-                fe_future = pool.submit(
-                    self._process_file_tasks,
-                    self.frontend_agent, frontend_task_ids, "frontend",
-                    completed_files, export_registry, lock,
-                    agent_factory=_make_fe_agent,
-                )
-                be_count = be_future.result()
-                fe_count = fe_future.result()
-
-            task_count = be_count + fe_count
-            logger.info("⚡ Parallel build complete: %d backend + %d frontend tasks", be_count, fe_count)
-        else:
-            all_task_ids = backend_task_ids | frontend_task_ids
-            task_count = self._process_file_tasks(
-                self.dev_agent, all_task_ids, "dev",
-                completed_files, export_registry, lock,
-                agent_factory=_make_dev_agent,
-            )
 
         self._export_registry = export_registry
 
         # Feature test bed — opt-in via SMOKE_TEST_BACKEND != syntax_only
         self._run_feature_test_bed_loop()
 
-        # Handle any remaining feature tasks
-        feature_tasks = [t for t in self.task_manager.get_incomplete_tasks() if t.task_type == "feature"]
-        if feature_tasks:
-            from ..tools.file_tools import set_allowed_file_paths
-            set_allowed_file_paths(None, workspace=str(self.workspace_path))
-            feature_names = [t.description for t in feature_tasks]
-            try:
-                result = self.dev_agent.run(feature_names, self.tech_stack or "", self.user_stories)
-                self.task_manager.update_task_status_by_output(result)
-                for t in feature_tasks:
-                    if t.status not in (TaskStatus.COMPLETED.value, TaskStatus.SKIPPED.value):
-                        self.task_manager.update_task_status(
-                            t.task_id,
-                            "completed",
-                            f"Feature batch implemented: {t.description or t.task_id}",
-                        )
-            except Exception as e:
-                logger.error("Feature implementation failed: %s", e)
-                for t in feature_tasks:
-                    if t.status not in (TaskStatus.COMPLETED.value, TaskStatus.SKIPPED.value):
-                        self.task_manager.mark_task_executed(
-                            t.task_id, TaskStatus.FAILED, str(e)[:500],
-                        )
+        # Batch feature tasks only when not using feature-by-feature slices
+        if not feature_by_feature:
+            feature_tasks = [t for t in self.task_manager.get_incomplete_tasks() if t.task_type == "feature"]
+            if feature_tasks:
+                from ..tools.file_tools import set_allowed_file_paths
+                set_allowed_file_paths(None, workspace=str(self.workspace_path))
+                feature_names = [t.description for t in feature_tasks]
+                try:
+                    result = self.dev_agent.run(feature_names, self.tech_stack or "", self.user_stories)
+                    self.task_manager.update_task_status_by_output(result)
+                    for t in feature_tasks:
+                        if t.status not in (TaskStatus.COMPLETED.value, TaskStatus.SKIPPED.value):
+                            self.task_manager.update_task_status(
+                                t.task_id,
+                                "completed",
+                                f"Feature batch implemented: {t.description or t.task_id}",
+                            )
+                except Exception as e:
+                    logger.error("Feature implementation failed: %s", e)
+                    for t in feature_tasks:
+                        if t.status not in (TaskStatus.COMPLETED.value, TaskStatus.SKIPPED.value):
+                            self.task_manager.mark_task_executed(
+                                t.task_id, TaskStatus.FAILED, str(e)[:500],
+                            )
         
         # ── Post-development completeness check ──
         try:
@@ -3906,24 +4079,68 @@ class SoftwareDevWorkflow:
         return "Refinement phase completed"
 
     def run_qa_phase(self) -> str:
-        """Run QA phase (TDD)."""
+        """Run QA phase — writes test files first when pipeline is TDD-ordered."""
+        import threading as _threading
         from ..agents.test_agent import TestAgent
-        logger.info("🚀 Starting QA phase...")
-        self._report_progress('qa', 65, "Writing/fixing tests...")
+
+        pipeline = self._resolved_pipeline()
+        tdd = is_tdd_pipeline(pipeline)
+        logger.info("🚀 Starting QA phase (TDD=%s)...", tdd)
+        self._report_progress('qa', 62, "Writing tests from test plan...")
         if self.state_machine.get_current_state() != ProjectState.QA:
-            self.state_machine.force_transition(ProjectState.QA, TransitionContext(phase="qa", data={}))
-        
-        agent = TestAgent(
-            workspace_path=self.workspace_path,
-            budget_tracker=self.budget_tracker,
-        )
-        context = self._enrich_project_context_for_solutioning()
-        prompt = f"Vision:\n{self.vision}\n\nTech Stack/Context:\n{self.tech_stack}\n{context}"
-        try:
-            agent.run([prompt])
-        except Exception as e:
-            logger.error("TestAgent failed: %s", e)
-            raise
+            self.state_machine.force_transition(
+                ProjectState.QA, TransitionContext(phase="qa", data={}),
+            )
+
+        self._generate_test_plan()
+        self._ensure_granular_file_tasks_registered()
+
+        test_ids: set = set()
+        if tdd:
+            for t in self.task_manager.get_pending_tasks():
+                if t.task_type != "file_creation":
+                    continue
+                fp = (t.metadata or {}).get("file_path", "")
+                if is_test_file_path(fp):
+                    test_ids.add(t.task_id)
+
+        if tdd and test_ids:
+            agent = TestAgent(
+                workspace_path=self.workspace_path,
+                budget_tracker=self.budget_tracker,
+            )
+            lock = _threading.Lock()
+            completed_files: dict = {}
+            export_registry: dict = {}
+            count = self._process_file_tasks(
+                agent, test_ids, "qa",
+                completed_files, export_registry, lock,
+            )
+            logger.info("QA phase: materialized %d test file(s)", count)
+        else:
+            agent = TestAgent(
+                workspace_path=self.workspace_path,
+                budget_tracker=self.budget_tracker,
+            )
+            context = self._enrich_project_context_for_solutioning()
+            plan_path = self.workspace_path / "test_plan.md"
+            plan_excerpt = ""
+            if plan_path.is_file():
+                plan_excerpt = plan_path.read_text(encoding="utf-8", errors="replace")[:8000]
+            prompt = (
+                f"Vision:\n{self.vision}\n\n"
+                f"Tech Stack/Context:\n{self.tech_stack}\n{context}\n\n"
+                f"Test plan:\n{plan_excerpt or '(none)'}"
+            )
+            try:
+                agent.run([prompt])
+            except Exception as e:
+                logger.error("TestAgent failed: %s", e)
+                raise
+
+        meta = self._load_job_metadata()
+        meta["qa_phase_completed"] = True
+        self._update_job_metadata(meta)
         return "QA phase completed"
 
     def _seed_prompt(self, active_str: str, *, strict: bool = False) -> str:
@@ -4052,6 +4269,7 @@ markdown content here
         self.task_manager.register_granular_tasks(
             self.design_spec or "",
             self.tech_stack,
+            tdd=self._is_tdd_enabled(),
         )
         self.task_manager.scaffold_directories_from_tech_stack(
             self.tech_stack,
@@ -4083,43 +4301,39 @@ markdown content here
         if last_error is not None:
             raise last_error
 
+    def _resolved_pipeline(self, metadata: Optional[Dict[str, Any]] = None) -> List[Any]:
+        """Pipeline for this job (persisted, YAML, or smart_router)."""
+        meta = metadata if metadata is not None else self._load_job_metadata()
+        return resolve_workflow_pipeline(
+            meta,
+            self.vision,
+            self.config,
+            self.budget_tracker,
+            force_refresh=False,
+        )
+
     def _get_active_phases(self, metadata: Dict[str, Any]) -> List[Any]:
-        """Get the active phases list from YAML config or adaptive router."""
-        path = self._resolve_effective_solutioning_path()
-        if not path:
-            path = "full"
-            
-        workflows = {}
-        if self.config and hasattr(self.config, 'workflows') and isinstance(self.config.workflows, dict):
-            workflows = self.config.workflows
-            
-        if not workflows:
-            workflows = {
-                "full": [
-                    "meta", "stack_contract", "product_owner", "designer", "tech_architect", "qa",
-                    {"parallel": ["development", "frontend", "devops"]}
-                ],
-                "fast": [
-                    "meta", "stack_contract", "seed_minimal_artifacts",
-                    {"parallel": ["development", "frontend"]}
-                ],
-                "edit": [
-                    "meta", "qa", "refinement"
-                ],
-                "refactor": [
-                    "meta", "stack_contract", "tech_architect", "qa", "refinement"
-                ]
-            }
-            
-        if path == "adaptive":
-            from .smart_router import decide_workflow_phases
-            pipeline = decide_workflow_phases(self.vision, self.budget_tracker)
-        else:
-            pipeline = workflows.get(path, workflows.get("full"))
-            
+        """Get the active phases list from persisted pipeline, YAML, or smart_router."""
+        pipeline = resolve_workflow_pipeline(
+            metadata,
+            self.vision,
+            self.config,
+            self.budget_tracker,
+            force_refresh=not metadata.get("selected_workflow_phases"),
+        )
         metadata["selected_workflow_phases"] = pipeline
         self._update_job_metadata(metadata)
         return pipeline
+
+    def _is_tdd_enabled(self, metadata: Optional[Dict[str, Any]] = None) -> bool:
+        """True when the resolved pipeline places qa before build phases."""
+        meta = metadata if metadata is not None else self._load_job_metadata()
+        return is_tdd_pipeline(self._resolved_pipeline(meta))
+
+    def _is_feature_by_feature(self, metadata: Optional[Dict[str, Any]] = None) -> bool:
+        """True when BDD features should drive sequential dev slices."""
+        meta = metadata if metadata is not None else self._load_job_metadata()
+        return is_feature_by_feature_pipeline(self._resolved_pipeline(meta))
 
     def run(self, resume: bool = False) -> Dict[str, Any]:
         """
@@ -4144,22 +4358,53 @@ markdown content here
                 return self._run_epic_workflow(job_metadata, resume=resume)
 
             resume_from_checkpoint = False
+            current = self.state_machine.get_current_state()
             if resume:
                 self._load_phase_artifacts()
                 current = self.state_machine.get_current_state()
-                if current == ProjectState.COMPLETED:
-                    logger.info("Resume: state already completed; running full workflow")
-                elif current == ProjectState.FAILED:
-                    inferred = self._infer_resume_state_from_artifacts()
-                    if inferred:
-                        logger.info("Resume: failed state — inferring checkpoint %s", inferred.value)
-                        self.state_machine.force_transition(inferred)
-                        current = inferred
-                        resume_from_checkpoint = True
+
+                _NON_RUNNABLE_PHASES = frozenset({
+                    "pending_review",
+                    "pending_approval",
+                    "pending_solution_review",
+                    "queued",
+                    "running",
+                    "completed",
+                    "failed",
+                })
+                if self.job_db:
+                    job_row = self.job_db.get_job(self.project_id) or {}
+                    db_phase = (job_row.get("current_phase") or "").strip()
+                    if db_phase and db_phase not in _NON_RUNNABLE_PHASES:
+                        try:
+                            db_state = ProjectState(db_phase)
+                            logger.info(
+                                "Resume: syncing state machine from job DB phase %s",
+                                db_phase,
+                            )
+                            self.state_machine.force_transition(db_state)
+                            current = db_state
+                            resume_from_checkpoint = True
+                        except ValueError:
+                            logger.warning(
+                                "Resume: unknown job DB phase %r — using state machine",
+                                db_phase,
+                            )
+
+                if not resume_from_checkpoint:
+                    if current == ProjectState.COMPLETED:
+                        logger.info("Resume: state already completed; running full workflow")
+                    elif current == ProjectState.FAILED:
+                        inferred = self._infer_resume_state_from_artifacts()
+                        if inferred:
+                            logger.info("Resume: failed state — inferring checkpoint %s", inferred.value)
+                            self.state_machine.force_transition(inferred)
+                            current = inferred
+                            resume_from_checkpoint = True
+                        else:
+                            logger.info("Resume: failed with no checkpoint artifacts; running full workflow")
                     else:
-                        logger.info("Resume: failed with no checkpoint artifacts; running full workflow")
-                else:
-                    resume_from_checkpoint = True
+                        resume_from_checkpoint = True
 
             pipeline = self._get_active_phases(job_metadata)
             
@@ -4179,16 +4424,7 @@ markdown content here
             
             # Map enum to string name
             current_phase_name = current.value if resume_from_checkpoint else None
-            
-            def flatten_pipeline(p):
-                res = []
-                for item in p:
-                    if isinstance(item, str):
-                        res.append(item)
-                    elif isinstance(item, dict) and "parallel" in item:
-                        res.extend(item["parallel"])
-                return res
-            
+
             flat_pipeline = flatten_pipeline(pipeline)
             start_idx = 0
             if resume_from_checkpoint and current_phase_name in flat_pipeline:

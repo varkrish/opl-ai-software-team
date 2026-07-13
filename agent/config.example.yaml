@@ -117,6 +117,27 @@ tools:
 plan_review:
   enabled: false
 
+# ── Workflow Pipelines ───────────────────────────────────────────────────────────
+# Phase lists keyed by solutioning_path (full, fast, edit, refactor).
+# Adaptive path uses smart_router.decide_workflow_phases() on first run; the
+# resolved pipeline is stored on the job as selected_workflow_phases for resume.
+# Omit this section to use built-in defaults (see workflow_resolver.FALLBACK_PIPELINES).
+#
+# workflows:
+#   full:
+#     - meta
+#     - stack_contract
+#     - product_owner
+#     - designer
+#     - tech_architect
+#     - qa
+#     - parallel: [development, frontend, devops]
+#   fast:
+#     - meta
+#     - stack_contract
+#     - seed_minimal_artifacts
+#     - parallel: [development, frontend]
+
 # ── Solutioning Loop ────────────────────────────────────────────────────────────
 # Research + architect + critique loop between Meta and PO phases.
 solutioning:

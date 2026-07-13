@@ -70,9 +70,5 @@ Example output for a simple vision:
         return phases
     except Exception as e:
         logger.error(f"Smart Workflow Router failed: {e}. Falling back to default 'fast' pipeline.")
-        return [
-            "meta",
-            "stack_contract",
-            "seed_minimal_artifacts",
-            {"parallel": ["development", "frontend"]}
-        ]
+        from .workflow_resolver import FALLBACK_PIPELINES
+        return list(FALLBACK_PIPELINES["fast"])

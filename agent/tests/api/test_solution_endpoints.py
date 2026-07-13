@@ -120,16 +120,40 @@ class TestApproveSolutionGate:
         assert job["status"] == "queued"
         assert job["current_phase"] == "product_owner"
 
-    def test_approve_plan_gate_unchanged(self, api_client):
+    def test_approve_plan_resumes_at_next_pipeline_phase(self, api_client):
         from crew_studio import asgi_app as asgi_mod
+        from llamaindex_crew.workflows.workflow_resolver import FALLBACK_PIPELINES
 
-        job_id, _ = _seed_job(asgi_mod.job_db, status="pending_review")
+        metadata = {
+            "capability_profile": {"solutioning_path": "full", "source": "user"},
+            "selected_workflow_phases": FALLBACK_PIPELINES["full"],
+        }
+        job_id, _ = _seed_job(
+            asgi_mod.job_db, status="pending_review", metadata=metadata,
+        )
         with patch("crew_studio.asgi_app._dispatch_job"):
             resp = api_client.post(f"/api/jobs/{job_id}/approve")
         assert resp.status_code == 200
         job = asgi_mod.job_db.get_job(job_id)
         meta = _parse_meta(job)
         assert meta.get("pending_review_approved") is True
+        assert job["current_phase"] == "qa"
+
+    def test_approve_plan_fast_path_skips_qa(self, api_client):
+        from crew_studio import asgi_app as asgi_mod
+        from llamaindex_crew.workflows.workflow_resolver import FALLBACK_PIPELINES
+
+        metadata = {
+            "capability_profile": {"solutioning_path": "fast", "source": "user"},
+            "selected_workflow_phases": FALLBACK_PIPELINES["fast"],
+        }
+        job_id, _ = _seed_job(
+            asgi_mod.job_db, status="pending_review", metadata=metadata,
+        )
+        with patch("crew_studio.asgi_app._dispatch_job"):
+            resp = api_client.post(f"/api/jobs/{job_id}/approve")
+        assert resp.status_code == 200
+        job = asgi_mod.job_db.get_job(job_id)
         assert job["current_phase"] == "development"
 
     def test_approve_rejects_wrong_status(self, api_client):

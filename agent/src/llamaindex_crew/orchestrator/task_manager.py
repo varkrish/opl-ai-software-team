@@ -507,6 +507,7 @@ class TaskManager:
         re.IGNORECASE,
     )
     _TEST_FILE_TIER = 95  # after all source tiers (max 80 + mock 90), registered last
+    _TEST_FILE_TIER_TDD = 5  # before models (10) — test-first in full-path TDD
 
     _STRUCTURE_LAYER_TIERS: Dict[int, str] = {
         10: "data/model/persistence",
@@ -1107,6 +1108,8 @@ class TaskManager:
         self,
         design_spec: str,
         tech_stack_content: str,
+        *,
+        tdd: bool = False,
     ) -> List[TaskDefinition]:
         """Decompose design spec + tech stack into per-file tasks with domain context.
 
@@ -1122,6 +1125,8 @@ class TaskManager:
         )
         conn.commit()
         conn.close()
+
+        self._tdd_mode = bool(tdd)
 
         file_entries = self._extract_files_with_descriptions(tech_stack_content)
         contexts = self._extract_bounded_contexts(design_spec)
@@ -1162,7 +1167,8 @@ class TaskManager:
 
         # Sort tasks by tier so lower-tier files are registered first
         raw_tasks.sort(key=lambda t: self._classify_file_tier(
-            (t.metadata or {}).get("file_path", "")
+            (t.metadata or {}).get("file_path", ""),
+            tdd=tdd,
         ))
 
         registered: List[TaskDefinition] = []
@@ -1796,10 +1802,12 @@ class TaskManager:
     }
 
     @staticmethod
-    def _classify_file_tier(file_path: str) -> int:
+    def _classify_file_tier(file_path: str, *, tdd: bool = False) -> int:
         """Assign a generation-order tier to a file based on its path components."""
         fp_lower = file_path.lower()
         if is_test_file_path(fp_lower):
+            if tdd:
+                return TaskManager._TEST_FILE_TIER_TDD
             return TaskManager._TEST_FILE_TIER
         stem = Path(file_path).stem.lower()
         parent = Path(file_path).parent.name.lower() if "/" in file_path else ""
@@ -1881,7 +1889,8 @@ class TaskManager:
         """
         fp = (task.metadata or {}).get("file_path", "")
         fp_lower = fp.lower()
-        task_tier = self._classify_file_tier(fp_lower)
+        tdd = getattr(self, "_tdd_mode", False)
+        task_tier = self._classify_file_tier(fp_lower, tdd=tdd)
 
         if is_test_file_path(fp_lower):
             registered = [
@@ -1899,7 +1908,7 @@ class TaskManager:
         deps: List[str] = []
         for et in earlier_tasks:
             et_fp = (et.metadata or {}).get("file_path", "").lower()
-            et_tier = self._classify_file_tier(et_fp)
+            et_tier = self._classify_file_tier(et_fp, tdd=tdd)
             if et_tier >= task_tier:
                 continue
             et_stem = Path(et_fp).stem.replace("_", "")

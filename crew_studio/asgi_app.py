@@ -627,9 +627,23 @@ async def approve_job(job_id: str, user: CurrentUser = Depends(get_current_user)
         }
     else:
         meta["pending_review_approved"] = True
+        try:
+            from src.llamaindex_crew.workflows.workflow_resolver import (
+                resume_phase_after_plan_review,
+            )
+        except ImportError:
+            from llamaindex_crew.workflows.workflow_resolver import (
+                resume_phase_after_plan_review,
+            )
+        cfg = _config_for_job(job_id)
+        next_phase = resume_phase_after_plan_review(
+            meta,
+            vision=job.get("vision", ""),
+            config=cfg,
+        )
         updates = {
             "status": "queued",
-            "current_phase": "development",
+            "current_phase": next_phase,
             "metadata": json.dumps(meta),
         }
 
