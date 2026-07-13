@@ -1462,8 +1462,8 @@ class SoftwareDevWorkflow:
             f"Fix strategy: {fix_strategy}\n\n"
             f"Tech stack:\n{(self.tech_stack or '')[:2000]}\n\n"
             f"{content_section}"
-            f"Please fix ONLY the specific issue described above and rewrite "
-            f"the file using file_writer.\n"
+            f"Please fix ONLY the specific issue described above using replace_file_content "
+            f"to patch the modified line range. Prefer replace_file_content over file_writer.\n"
             f"Do NOT create or modify any other files."
         )
         try:
@@ -3827,6 +3827,9 @@ class SoftwareDevWorkflow:
             auto_fixed = self._auto_fix_issues(validator_issues)
             auto_fixed_files = {i.get("file") for i in auto_fixed}
 
+            attempted_fixes = []
+
+            issues_to_resolve = []
             for vi in validator_issues:
                 if vi.get("file") in auto_fixed_files:
                     continue
@@ -3838,18 +3841,109 @@ class SoftwareDevWorkflow:
                             and p["check_name"] == vi.get("check")]
                 if not matching:
                     continue
-                db_issue = matching[0]
+                issues_to_resolve.append((matching[0], vi))
 
-                self.job_db.update_validation_issue_status(db_issue["id"], "running")
+            if issues_to_resolve:
+                import concurrent.futures as _cf
+                from ..tools.file_tools import set_thread_workspace, set_allowed_file_paths
+                from ..utils.llm_config import set_thread_config
 
-                fix_strategy = self._get_fix_strategy(vi)
-                if fix_strategy:
-                    self.job_db.update_validation_issue_status(
-                        db_issue["id"], "running", fix_strategy=fix_strategy
+                backstory = self.agent_backstories.get('developer')
+                fixes_lock = _threading.Lock()
+
+                def remediate_single_issue(item):
+                    db_issue, vi = item
+
+                    set_thread_workspace(str(self.workspace_path))
+                    set_allowed_file_paths(None, workspace=str(self.workspace_path))
+                    if self.config is not None:
+                        set_thread_config(self.config)
+
+                    self.job_db.update_validation_issue_status(db_issue["id"], "running")
+
+                    local_arch = TechArchitectAgent(
+                        custom_backstory="You are a principal software architect who provides single-paragraph fix strategies.",
+                        workspace_path=self.workspace_path,
                     )
-                    self._apply_fix(vi.get("file", ""), fix_strategy)
+                    local_dev = DevAgent(
+                        custom_backstory=backstory,
+                        workspace_path=self.workspace_path,
+                        config=self.config,
+                    )
 
-                    re_issues = self._call_validator()
+                    local_arch.agent.reset_chat()
+                    prompt_arch = (
+                        f"File `{vi['file']}` has a {vi['check']} error: {vi['description']}.\n\n"
+                        f"Tech stack context:\n{(self.tech_stack or '')[:2000]}\n\n"
+                        f"Review this SINGLE file issue and produce a one-paragraph fix strategy.\n"
+                        f"Do NOT redefine the tech stack or list all project files."
+                    )
+
+                    try:
+                        strategy_response = local_arch.agent.chat(prompt_arch)
+                        fix_strategy = str(strategy_response)
+                    except Exception as e:
+                        logger.warning("Tech architect review failed for %s: %s", vi.get("file"), e)
+                        fix_strategy = None
+
+                    if fix_strategy:
+                        self.job_db.update_validation_issue_status(
+                            db_issue["id"], "running", fix_strategy=fix_strategy
+                        )
+
+                        local_dev.agent.reset_chat()
+                        current_content = ""
+                        target = self.workspace_path / vi.get("file", "")
+                        if target.exists():
+                            try:
+                                current_content = target.read_text(encoding="utf-8", errors="replace")
+                            except Exception:
+                                pass
+
+                        content_section = ""
+                        if current_content:
+                            content_section = (
+                                f"Current file content (preserve ALL existing code, "
+                                f"tests, and logic — only change what is needed to fix the issue):\n"
+                                f"```\n{current_content[:6000]}\n```\n\n"
+                            )
+
+                        prompt_dev = (
+                            f"The file `{vi.get('file')}` has a validation issue.\n\n"
+                            f"Fix strategy: {fix_strategy}\n\n"
+                            f"Tech stack:\n{(self.tech_stack or '')[:2000]}\n\n"
+                            f"{content_section}"
+                            f"Please fix ONLY the specific issue described above using replace_file_content "
+                            f"to patch the modified line range. Prefer replace_file_content over file_writer.\n"
+                            f"Do NOT create or modify any other files."
+                        )
+
+                        try:
+                            local_dev.agent.chat(prompt_dev)
+                            with fixes_lock:
+                                attempted_fixes.append((db_issue, vi))
+                        except Exception as e:
+                            logger.warning("Dev agent fix failed for %s: %s", vi.get("file"), e)
+                            self.job_db.update_validation_issue_status(
+                                db_issue["id"], "failed", error=f"Dev agent fix failed: {e}"
+                            )
+                    else:
+                        self.job_db.update_validation_issue_status(
+                            db_issue["id"], "failed", error="No fix strategy produced"
+                        )
+
+                num_remediation_workers = min(5, len(issues_to_resolve))
+                logger.info(
+                    "⚡ Spawning %d parallel workers to resolve %d validation issues...",
+                    num_remediation_workers,
+                    len(issues_to_resolve),
+                )
+                with _cf.ThreadPoolExecutor(max_workers=num_remediation_workers) as pool:
+                    pool.map(remediate_single_issue, issues_to_resolve)
+
+            if attempted_fixes:
+                re_issues = self._call_validator()
+                for db_issue, vi in attempted_fixes:
                     still_broken = any(
                         r.get("file") == vi.get("file") and r.get("check") == vi.get("check")
                         for r in re_issues
@@ -3861,10 +3955,6 @@ class SoftwareDevWorkflow:
                         )
                     else:
                         self.job_db.update_validation_issue_status(db_issue["id"], "completed")
-                else:
-                    self.job_db.update_validation_issue_status(
-                        db_issue["id"], "failed", error="No fix strategy produced"
-                    )
 
             for vi in auto_fixed:
                 matching = self.job_db.get_pending_validation_issues(self.project_id)
