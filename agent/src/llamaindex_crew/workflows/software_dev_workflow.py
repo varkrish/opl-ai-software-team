@@ -2597,6 +2597,19 @@ class SoftwareDevWorkflow:
 
             # Skills-first test plan (2nd pass — non-fatal, reuses existing test_plan.md)
             self._generate_test_plan()
+
+            if self._is_tdd_enabled():
+                plan_path = self.workspace_path / "test_plan.md"
+                plan_content = ""
+                if plan_path.is_file():
+                    try:
+                        plan_content = plan_path.read_text(encoding="utf-8", errors="replace")
+                    except OSError:
+                        pass
+                self.task_manager.register_tdd_test_tasks(
+                    self.tech_stack or "",
+                    plan_content,
+                )
             
             # Index tech stack for RAG
             self.document_indexer.index_artifacts(["tech_stack.md"])
@@ -4078,6 +4091,37 @@ class SoftwareDevWorkflow:
             raise
         return "Refinement phase completed"
 
+    def _collect_pending_test_file_task_ids(self) -> set:
+        """Pending file_creation tasks whose path is a test module."""
+        test_ids: set = set()
+        for t in self.task_manager.get_pending_tasks():
+            if t.task_type != "file_creation":
+                continue
+            fp = (t.metadata or {}).get("file_path", "")
+            if is_test_file_path(fp):
+                test_ids.add(t.task_id)
+        return test_ids
+
+    def _register_tdd_test_tasks_for_qa(self) -> None:
+        """Ensure test file_creation tasks exist before QA materializes them."""
+        if not self._is_tdd_enabled():
+            return
+        plan_path = self.workspace_path / "test_plan.md"
+        plan_content = ""
+        if plan_path.is_file():
+            try:
+                plan_content = plan_path.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                pass
+        ts = self.tech_stack or ""
+        ts_path = self.workspace_path / "tech_stack.md"
+        if ts_path.is_file():
+            try:
+                ts = ts_path.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                pass
+        self.task_manager.register_tdd_test_tasks(ts, plan_content)
+
     def run_qa_phase(self) -> str:
         """Run QA phase — writes test files first when pipeline is TDD-ordered."""
         import threading as _threading
@@ -4094,15 +4138,11 @@ class SoftwareDevWorkflow:
 
         self._generate_test_plan()
         self._ensure_granular_file_tasks_registered()
+        self._register_tdd_test_tasks_for_qa()
 
-        test_ids: set = set()
+        test_ids = self._collect_pending_test_file_task_ids()
         if tdd:
-            for t in self.task_manager.get_pending_tasks():
-                if t.task_type != "file_creation":
-                    continue
-                fp = (t.metadata or {}).get("file_path", "")
-                if is_test_file_path(fp):
-                    test_ids.add(t.task_id)
+            logger.info("QA phase: %d pending test file task(s)", len(test_ids))
 
         if tdd and test_ids:
             agent = TestAgent(
@@ -4118,6 +4158,10 @@ class SoftwareDevWorkflow:
             )
             logger.info("QA phase: materialized %d test file(s)", count)
         else:
+            if tdd:
+                logger.warning(
+                    "TDD QA: no registered test file tasks — falling back to TestAgent chat"
+                )
             agent = TestAgent(
                 workspace_path=self.workspace_path,
                 budget_tracker=self.budget_tracker,
@@ -4139,12 +4183,30 @@ class SoftwareDevWorkflow:
                 raise
 
         meta = self._load_job_metadata()
-        meta["qa_phase_completed"] = True
+        if tdd:
+            pending = self._collect_pending_test_file_task_ids()
+            if pending:
+                logger.warning(
+                    "QA phase: %d test file task(s) still pending — not marking qa_phase_completed",
+                    len(pending),
+                )
+            else:
+                meta["qa_phase_completed"] = True
+        else:
+            meta["qa_phase_completed"] = True
         self._update_job_metadata(meta)
         return "QA phase completed"
 
-    def _seed_prompt(self, active_str: str, *, strict: bool = False) -> str:
+    def _seed_prompt(self, active_str: str, *, strict: bool = False, tdd: bool = False) -> str:
         """Build the seed prompt. *strict* adds an explicit tree example and forbids bullet lists."""
+        tdd_rules = ""
+        if tdd:
+            tdd_rules = """
+TDD PIPELINE — include a mirrored tests/ tree in the file structure:
+- Add tests/conftest.py and test modules under tests/ mirroring source packages
+  (e.g. agents/place_search/agent.py → tests/agents/test_place_search.py).
+- List every test file in the unicode tree with a real extension (.py, .ts, etc.).
+"""
         tree_rules = """
 CRITICAL — PROJECT FILE TREE (required, machine-parsed):
 - Inside <tech_stack>, include a markdown fenced code block with a unicode directory tree.
@@ -4152,7 +4214,7 @@ CRITICAL — PROJECT FILE TREE (required, machine-parsed):
 - Every deliverable MUST be a real file with an extension (e.g. index.html, main.css, hello.py).
 - Do NOT use bullet lists (`- \`file\``), plain prose, or directory-only entries without files.
 - Keep the tree minimal — only files needed for the vision.
-
+""" + tdd_rules + """
 Required shape (adapt names to the vision):
 ```
 project/
@@ -4201,6 +4263,7 @@ markdown content here
 
         active = self._get_active_phases(self._load_job_metadata())
         active_str = json.dumps(active)
+        tdd_seed = is_tdd_pipeline(active)
 
         agent = BaseLlamaIndexAgent(
             role='Seeder',
@@ -4226,7 +4289,7 @@ markdown content here
 
         ts, us = "", ""
         try:
-            res = agent.chat(self._seed_prompt(active_str, strict=False))
+            res = agent.chat(self._seed_prompt(active_str, strict=False, tdd=tdd_seed))
             ts, us = _parse_seed(res)
             if not ts:
                 ts = "No tech stack generated."
@@ -4248,7 +4311,7 @@ markdown content here
         if not extracted:
             logger.warning("Seed: tech_stack has 0 extractable files — retrying with strict tree prompt")
             try:
-                res = agent.chat(self._seed_prompt(active_str, strict=True))
+                res = agent.chat(self._seed_prompt(active_str, strict=True, tdd=tdd_seed))
                 ts2, us2 = _parse_seed(res)
                 if ts2:
                     ts = ts2

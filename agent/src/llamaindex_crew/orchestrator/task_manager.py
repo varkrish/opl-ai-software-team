@@ -19,6 +19,7 @@ from ..utils.test_companion import (
     is_test_file_path,
     resolve_companion_source,
 )
+from ..utils.test_task_paths import derive_tdd_test_paths
 from ..utils.vision_stack_analysis import (
     component_reflected_in_artifact,
     extract_named_components,
@@ -1184,9 +1185,87 @@ class TaskManager:
                          self._classify_file_tier((t.metadata or {}).get("file_path", ""))
                          for t in all_tasks
                      )))
-        
+
+        if tdd:
+            plan_path = self.db_path.parent / "test_plan.md"
+            plan_content = ""
+            if plan_path.is_file():
+                try:
+                    plan_content = plan_path.read_text(encoding="utf-8", errors="replace")
+                except OSError:
+                    pass
+            test_tasks = self.register_tdd_test_tasks(
+                tech_stack_content,
+                plan_content,
+            )
+            all_tasks = registered + test_tasks
+
         self.generate_implementation_plan_file(all_tasks)
         return all_tasks
+
+    def register_tdd_test_tasks(
+        self,
+        tech_stack_content: str = "",
+        test_plan_content: str = "",
+    ) -> List[TaskDefinition]:
+        """Register missing test file_creation tasks derived from source tree + test plan."""
+        self._tdd_mode = True
+
+        source_paths: List[str] = []
+        for t in self.get_all_tasks():
+            if t.task_type != "file_creation":
+                continue
+            fp = (t.metadata or {}).get("file_path", "")
+            if fp and not is_test_file_path(fp):
+                source_paths.append(fp)
+
+        if not source_paths and tech_stack_content:
+            source_paths = [
+                e["path"]
+                for e in self._extract_files_with_descriptions(tech_stack_content)
+            ]
+
+        existing_paths = {
+            (t.metadata or {}).get("file_path", "")
+            for t in self.get_all_tasks()
+            if t.task_type == "file_creation"
+        }
+
+        test_paths = derive_tdd_test_paths(source_paths, test_plan_content)
+        registered: List[TaskDefinition] = []
+        prior_tasks = list(self.get_all_tasks())
+
+        for fp in test_paths:
+            if fp in existing_paths:
+                continue
+            basename = Path(fp).name
+            if not _is_valid_file_path(basename):
+                continue
+            task_id = f"file_{self.normalize_file_path_for_task_id(fp)}"
+            task = TaskDefinition(
+                task_id=task_id,
+                phase="development",
+                task_type="file_creation",
+                description=f"Create test file: {fp}",
+                source="test_plan",
+                metadata={
+                    "file_path": fp,
+                    "domain_context": "",
+                    "file_description": "TDD test module (derived from source tree or test plan)",
+                },
+            )
+            deps = self._infer_dependencies(task, prior_tasks + registered)
+            task.dependencies = deps
+            self.register_task(task)
+            registered.append(task)
+            existing_paths.add(fp)
+
+        if registered:
+            logger.info(
+                "Registered %d TDD test file task(s) from source tree / test plan",
+                len(registered),
+            )
+        return registered
 
     def generate_implementation_plan_file(self, tasks: List[TaskDefinition]) -> None:
         """Generate implementation_plan.md in the project workspace."""

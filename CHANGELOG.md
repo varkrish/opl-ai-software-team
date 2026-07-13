@@ -13,6 +13,7 @@ Version tags match container releases (`v2.x.y` → `quay.io/varkrish/crew-backe
 - **Feature-by-feature development** — when pipeline includes `product_owner`, dev runs one BDD feature slice at a time (related files, then feature implementation) instead of batching all features at the end.
 
 ### Fixed
+- **TDD test task registration** — when `tech_stack.md` omits a `tests/` tree, derive test `file_creation` tasks from mirrored source paths and paths referenced in `test_plan.md`; QA materializes them per-file instead of a single chat fallback. `qa_phase_completed` is set only when no test file tasks remain pending.
 - **LLM rate-limit (HTTP 429) resilience** — exponential backoff with `Retry-After` and provider reset timestamps; up to 15 retries (15 min wait) on `chat`/`achat`/`complete`/`acomplete` instead of failing file-creation tasks immediately.
 - **Plan-approve resume** — no longer hardcodes `current_phase: development`; uses `resume_phase_after_plan_review()` from job metadata and config.
 - **Resume checkpoint** — artifact inference and job-DB `current_phase` sync route through QA when TDD pipeline has not completed QA yet.
