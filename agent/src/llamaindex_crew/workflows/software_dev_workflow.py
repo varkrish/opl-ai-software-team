@@ -776,6 +776,9 @@ class SoftwareDevWorkflow:
             critique = _json.loads(match.group(0)) if match else {"approved": False, "score": 0, "issues": [], "must_fix": []}
         except Exception:
             critique = {"approved": False, "score": 0, "issues": ["Invalid critique JSON"], "must_fix": []}
+        from .solutioning_loop import is_critique_approved, normalize_critique
+
+        critique = normalize_critique(critique)
         critique_path = self.workspace_path / f"solution_critique_pass_{pass_num}.json"
         critique_path.write_text(_json.dumps(critique, indent=2) + "\n", encoding="utf-8")
 
@@ -798,7 +801,7 @@ class SoftwareDevWorkflow:
             "status": "pending_solution_review",
             "artifacts": artifacts,
             "feedback_rounds": len(history),
-            "solution_approved_by_critique": bool(critique.get("approved")),
+            "solution_approved_by_critique": is_critique_approved(critique),
         }
 
     def _load_plan_artifacts(self) -> dict[str, str]:

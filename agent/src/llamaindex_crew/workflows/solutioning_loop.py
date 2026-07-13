@@ -313,12 +313,36 @@ def _extract_json(text: str, expect_list: bool = False) -> Any:
     return [] if expect_list else {}
 
 
+def _non_empty_must_fix(critique: dict) -> List[str]:
+    """Return trimmed must_fix entries; empty strings are ignored."""
+    raw = critique.get("must_fix") or []
+    if not isinstance(raw, list):
+        text = str(raw).strip()
+        return [text] if text else []
+    return [str(x).strip() for x in raw if str(x).strip()]
+
+
+def is_critique_approved(critique: dict) -> bool:
+    """True only when critique approves and there are no blocking must_fix items."""
+    if not critique.get("approved"):
+        return False
+    return not _non_empty_must_fix(critique)
+
+
+def normalize_critique(critique: dict) -> dict:
+    """Force approved=false when must_fix is non-empty (LLM may contradict itself)."""
+    out = dict(critique)
+    if _non_empty_must_fix(out) and out.get("approved"):
+        out["approved"] = False
+    return out
+
+
 def _format_critique_feedback(critique: dict) -> str:
     parts = []
-    must_fix = critique.get("must_fix") or []
+    must_fix = _non_empty_must_fix(critique)
     issues = critique.get("issues") or []
     if must_fix:
-        parts.append("Must fix:\n- " + "\n- ".join(str(x) for x in must_fix))
+        parts.append("Must fix:\n- " + "\n- ".join(must_fix))
     if issues:
         parts.append("Issues:\n- " + "\n- ".join(str(x) for x in issues))
     return "\n\n".join(parts)
@@ -408,12 +432,13 @@ def run_solutioning_loop(
                 "issues": ["Invalid critique JSON"],
                 "must_fix": [],
             }
+        critique = normalize_critique(critique)
 
         critique_file = workspace_path / f"solution_critique_pass_{pass_count}.json"
         critique_file.write_text(json.dumps(critique, indent=2) + "\n", encoding="utf-8")
         critique_history.append(critique)
 
-        if critique.get("approved"):
+        if is_critique_approved(critique):
             approved = True
             break
 

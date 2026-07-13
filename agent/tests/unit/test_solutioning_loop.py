@@ -142,6 +142,54 @@ class TestSolutioningLoop:
         "__init__",
         lambda self, **kw: None,
     )
+    def test_approved_with_must_fix_triggers_rerun(self, tmp_path, mock_config):
+        """LLM may return approved=true with must_fix — loop must not stop on pass 1."""
+        critique_side_effect = [
+            _critique(True, must_fix=["Add Podman --label flag"]),
+            _critique(True),
+        ]
+        with patch(
+            "llamaindex_crew.workflows.solutioning_loop.SolutionResearchAgent.run",
+            return_value=_candidates(),
+        ), patch(
+            "llamaindex_crew.workflows.solutioning_loop.SolutionArchitectAgent.run",
+            side_effect=lambda *a, **k: (tmp_path / "solution_spec.md").write_text(
+                _spec_content(), encoding="utf-8"
+            ) or _spec_content(),
+        ) as architect_run, patch(
+            "llamaindex_crew.workflows.solutioning_loop.SolutionCritiqueAgent.run",
+            side_effect=critique_side_effect,
+        ):
+            result = run_solutioning_loop(
+                vision="Build sandbox API",
+                project_context="ctx",
+                workspace_path=tmp_path,
+                config=mock_config,
+                budget_tracker=MagicMock(),
+                document_indexer=None,
+            )
+
+        assert result.approved is True
+        assert result.pass_count == 2
+        assert architect_run.call_count == 2
+        pass1 = json.loads((tmp_path / "solution_critique_pass_1.json").read_text())
+        assert pass1["approved"] is False
+
+    @patch.object(
+        __import__("llamaindex_crew.agents.solution_agents", fromlist=["SolutionCritiqueAgent"]).SolutionCritiqueAgent,
+        "__init__",
+        lambda self, **kw: None,
+    )
+    @patch.object(
+        __import__("llamaindex_crew.agents.solution_agents", fromlist=["SolutionArchitectAgent"]).SolutionArchitectAgent,
+        "__init__",
+        lambda self, **kw: None,
+    )
+    @patch.object(
+        __import__("llamaindex_crew.agents.solution_agents", fromlist=["SolutionResearchAgent"]).SolutionResearchAgent,
+        "__init__",
+        lambda self, **kw: None,
+    )
     def test_max_passes_hard_cap(self, tmp_path, mock_config):
         with patch(
             "llamaindex_crew.workflows.solutioning_loop.SolutionResearchAgent.run",
