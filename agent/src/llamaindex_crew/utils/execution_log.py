@@ -111,3 +111,27 @@ def log_pipeline_event(
         line += f"\n{detail}"
     line += "\n====================\n"
     append_execution_log(line, workspace_path=workspace_path)
+
+
+def log_llm_error(
+    status_code: int,
+    error_body: str,
+    *,
+    model: str = "",
+    attempt: int = 0,
+    workspace_path: Optional[str | Path] = None,
+) -> None:
+    """Record an LLM API error (4xx/5xx/timeout) into execution.log.
+
+    Surfaces errors like the Vertex AI Harmony tokens 400 without requiring
+    users to dig through raw container logs.
+    """
+    import datetime
+    ts = datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+    preview = truncate_for_log(error_body, limit=600, label="error_body")
+    block = (
+        f"=== [LLM Error] ts={ts} status={status_code} model={model} attempt={attempt} ===\n"
+        f"{preview}\n"
+        f"====================\n"
+    )
+    append_execution_log(block, workspace_path=workspace_path)

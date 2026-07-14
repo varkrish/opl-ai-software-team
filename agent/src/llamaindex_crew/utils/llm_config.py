@@ -627,6 +627,8 @@ class GenericLlamaLLM(LLM):
                                     )
                                     continue
                         logger.error(f"LLM API Error: {response.status_code} - {response.text[:500]}")
+                        from .execution_log import log_llm_error
+                        log_llm_error(response.status_code, response.text, model=self.model, attempt=attempt)
                         raise ValueError(f"HTTP {response.status_code}: {response.text[:200]}")
                     
                     response.raise_for_status()
@@ -663,6 +665,8 @@ class GenericLlamaLLM(LLM):
                     time.sleep(delay)
                 else:
                     logger.error(f"❌ LLM API failed after {_LLM_MAX_RETRIES} attempts: {e}")
+                    from .execution_log import log_llm_error
+                    log_llm_error(-1, str(e), model=self.model, attempt=attempt)
                     raise
             except Exception as e:
                 # Catch-all for transient transport errors not covered by retryable_exceptions
