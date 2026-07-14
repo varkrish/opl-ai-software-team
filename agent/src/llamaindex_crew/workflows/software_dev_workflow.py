@@ -1476,15 +1476,82 @@ class SoftwareDevWorkflow:
         except Exception as e:
             logger.warning("Dev agent fix failed for %s: %s", file_path, e)
 
+    # ── Stale file pruning (cancel-restart recovery) ───────────────────────
+
+    def _prune_stale_duplicate_files(self) -> None:
+        """Remove orphan source files left over from a cancelled-and-restarted job.
+
+        When a job is cancelled mid-development and restarted, the new run may
+        generate files at a canonical path (e.g. ``test/integration/``) while the
+        old, partial copies remain in a shallow path (e.g. ``integration/``).
+        This causes spurious ``duplicate_files`` and ``integration`` (syntax) failures
+        in the validation report.
+
+        Strategy:
+        - Detect files with the same basename under different directories.
+        - Among duplicates, prefer the path registered in the task manifest.
+        - Fall back to preferring the *deeper* (more specific) path.
+        - Delete the non-preferred copy.
+        """
+        from ..orchestrator.code_validator import CodeCompletenessValidator
+
+        dup_result = CodeCompletenessValidator.validate_duplicate_files(self.workspace_path)
+        if dup_result["valid"]:
+            return  # nothing to prune
+
+        registered_paths: set[str] = set()
+        try:
+            registered_paths = set(self.task_manager.get_registered_file_paths())
+        except Exception:
+            pass
+
+        pruned: list[str] = []
+        for entry in dup_result.get("duplicates", []):
+            paths: list[str] = entry.get("paths", [])
+            if len(paths) < 2:
+                continue
+
+            # Prefer the path that exists in the manifest; else prefer deeper path.
+            def _rank(p: str) -> tuple[int, int]:
+                in_manifest = 1 if p in registered_paths else 0
+                depth = p.count("/")
+                return (in_manifest, depth)
+
+            sorted_paths = sorted(paths, key=_rank, reverse=True)
+            keeper = sorted_paths[0]
+            to_delete = sorted_paths[1:]
+
+            for rel_path in to_delete:
+                abs_path = self.workspace_path / rel_path
+                try:
+                    abs_path.unlink()
+                    pruned.append(rel_path)
+                    logger.info("Pruned stale duplicate file (cancel-restart): %s (kept %s)", rel_path, keeper)
+                except OSError as exc:
+                    logger.warning("Could not prune stale file %s: %s", rel_path, exc)
+
+        if pruned:
+            from ..utils.execution_log import log_pipeline_event
+            log_pipeline_event(
+                "prune_stale_duplicates",
+                f"Removed {len(pruned)} stale file(s) from cancelled run: {pruned}",
+                workspace_path=self.workspace_path,
+            )
+
     # ── Reusable validation suite ─────────────────────────────────────────
 
     def _run_validation_suite(self) -> Dict[str, Any]:
         """Run the full validation suite and return the report dict.
 
         Extracted so it can be called both at end-of-development and as a
+
         post-build re-check.
         """
         from ..orchestrator.code_validator import CodeCompletenessValidator
+
+        # Prune orphan files left over from cancelled-and-restarted jobs before
+        # running any checks, so stale duplicates don't cause false failures.
+        self._prune_stale_duplicate_files()
 
         report: Dict[str, Any] = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
