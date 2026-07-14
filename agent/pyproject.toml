@@ -23,6 +23,8 @@ dependencies = [
     "jsonschema[format]>=4.0.0",
     "litellm>=1.0.0",  # For OpenRouter support
     "cryptography>=41.0.0",  # For encryption support
+    "PyJWT>=2.8.0",
+    "fastapi>=0.100.0",
 ]
 
 [project.optional-dependencies]

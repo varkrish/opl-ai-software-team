@@ -199,7 +199,9 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  # Docker build (optional)
+  # Docker build (optional) — only backend; validator image requires the external
+  # crew-code-validator repo which is not available in CI.
+  # The canonical backend push to GHCR is handled by build-push-ghcr.yml.
   docker:
     name: Build Docker Image
     runs-on: ubuntu-latest
@@ -212,5 +214,5 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
       
-      - name: Build Docker images
-        run: make container-build-backend container-build-validator
+      - name: Build backend image
+        run: make container-build-backend
