@@ -185,6 +185,10 @@ def detect_tldr_lang(workspace_path: Path) -> Optional[str]:
 
 def run_tldr(args: list[str]) -> str:
     """Run tldr with the given argument list and return truncated stdout or an error string."""
+    # Fix 3: validate no empty/whitespace args before hitting the subprocess
+    for a in args:
+        if isinstance(a, str) and not a.strip():
+            return "Error: empty argument passed to tldr — check tool inputs"
     tldr_bin = _resolve_tldr_bin()
     if not tldr_bin:
         return "tldr is not installed or not in PATH. Install with: pip install llm-tldr"
@@ -213,6 +217,55 @@ def run_tldr(args: list[str]) -> str:
 
 # Backward-compatibility alias — existing callers that reference _run_tldr keep working.
 _run_tldr = run_tldr
+
+def run_tldr_extract(workspace: Path, file_path: str) -> dict:
+    """Run `tldr extract <file>` to get AST (functions, classes, imports)."""
+    import json
+    import subprocess
+    tldr_bin = _resolve_tldr_bin()
+    if not tldr_bin:
+        return {}
+    try:
+        result = subprocess.run(
+            [tldr_bin, "extract", file_path],
+            capture_output=True, text=True, timeout=_TLDR_TIMEOUT,
+            cwd=str(workspace),
+        )
+        out = result.stdout.strip()
+        if result.returncode != 0 or not out:
+            return {}
+        return json.loads(out)
+    except Exception:
+        return {}
+
+def run_tldr_imports(workspace: Path, file_path: str) -> list[str]:
+    """Run `tldr imports <file>` to get imported module strings."""
+    import json
+    import subprocess
+    tldr_bin = _resolve_tldr_bin()
+    if not tldr_bin:
+        return []
+    try:
+        result = subprocess.run(
+            [tldr_bin, "imports", file_path],
+            capture_output=True, text=True, timeout=_TLDR_TIMEOUT,
+            cwd=str(workspace),
+        )
+        out = result.stdout.strip()
+        if result.returncode != 0 or not out:
+            return []
+        parsed = json.loads(out)
+        if isinstance(parsed, list):
+            return [
+                s for s in (
+                    x.get("module") if isinstance(x, dict) else str(x)
+                    for x in parsed
+                )
+                if s  # drop None and empty strings
+            ]
+        return []
+    except Exception:
+        return []
 
 
 # ── Source extensions considered "indexable" by tldr ─────────────────────────
@@ -445,7 +498,7 @@ def _code_search(pattern: str = "", context_lines: int = 3, *, workspace: str, *
     return result
 
 
-def _code_structure(*, workspace: str, lang: Optional[str]) -> str:
+def _code_structure(*, workspace: str, lang: Optional[str] = None, **kwargs) -> str:
     """Show classes, functions, and exports across the project.
 
     Use at the start of a refactor or cross-cutting change to understand project layout
@@ -457,7 +510,7 @@ def _code_structure(*, workspace: str, lang: Optional[str]) -> str:
     return _run_tldr(args)
 
 
-def _code_context(entry: str, depth: int = 2, *, workspace: str, lang: Optional[str]) -> str:
+def _code_context(entry: str, depth: int = 2, *, workspace: str, lang: Optional[str] = None, **kwargs) -> str:
     """Get the call-chain context for a function or Class.method.
 
     entry: function name or Class.method (e.g. "run_refinement" or "RefinementAgent.run")
@@ -577,7 +630,7 @@ _TLDR_AGENT_BACKSTORY = (
 )
 
 
-def _code_impact(func: str, depth: int = 3, *, workspace: str, lang: Optional[str]) -> str:
+def _code_impact(func: str, depth: int = 3, *, workspace: str, lang: Optional[str] = None, **kwargs) -> str:
     """Find all callers of a function (reverse call graph).
 
     func: the function name to trace callers of (e.g. "run_refinement")
@@ -730,9 +783,38 @@ def create_tldr_tools(workspace_path: Path, lang: Optional[str] = None) -> List[
     """
     ws = str(workspace_path)
 
+    # Fix 1: Wrap each tool in a clean closure so that internal parameters
+    # (workspace, lang, kwargs) are invisible to LlamaIndex's schema introspection.
+    # Using partial() exposes those params in the JSON schema sent to the LLM, causing
+    # models to pass workspace="" on every call and wasting tokens.
+
+    def search_fn(pattern: str = "", context_lines: int = 3, **kwargs) -> str:
+        """Search the codebase for a regex pattern. Returns matching lines with context."""
+        return _code_search(pattern=pattern, context_lines=context_lines, workspace=ws, **kwargs)
+
+    def structure_fn(**kwargs) -> str:
+        """Show classes, functions, and exports across the entire project."""
+        return _code_structure(workspace=ws, lang=lang, **kwargs)
+
+    def context_fn(entry: str = "", depth: int = 2, **kwargs) -> str:
+        """Get the call-chain context for a function or Class.method.
+
+        entry: function name or Class.method (e.g. 'run_refinement' or 'MyClass.my_method')
+        depth: how many call levels to show (default 2)
+        """
+        return _code_context(entry=entry, depth=depth, workspace=ws, lang=lang, **kwargs)
+
+    def impact_fn(func: str = "", depth: int = 3, **kwargs) -> str:
+        """Find all callers of a function (reverse call graph).
+
+        func: function name to trace
+        depth: how many caller levels to show (default 3)
+        """
+        return _code_impact(func=func, depth=depth, workspace=ws, lang=lang, **kwargs)
+
     return [
         FunctionTool.from_defaults(
-            fn=partial(_code_search, workspace=ws),
+            fn=search_fn,
             name="code_search",
             description=(
                 "Search the codebase for a regex pattern. Returns matching lines with context. "
@@ -741,7 +823,7 @@ def create_tldr_tools(workspace_path: Path, lang: Optional[str] = None) -> List[
             ),
         ),
         FunctionTool.from_defaults(
-            fn=partial(_code_structure, workspace=ws, lang=lang),
+            fn=structure_fn,
             name="code_structure",
             description=(
                 "Show classes, functions, and exports across the entire project. "
@@ -750,7 +832,7 @@ def create_tldr_tools(workspace_path: Path, lang: Optional[str] = None) -> List[
             ),
         ),
         FunctionTool.from_defaults(
-            fn=partial(_code_context, workspace=ws, lang=lang),
+            fn=context_fn,
             name="code_context",
             description=(
                 "Get the call-chain context for a function or method. "
@@ -759,7 +841,7 @@ def create_tldr_tools(workspace_path: Path, lang: Optional[str] = None) -> List[
             ),
         ),
         FunctionTool.from_defaults(
-            fn=partial(_code_impact, workspace=ws, lang=lang),
+            fn=impact_fn,
             name="code_impact",
             description=(
                 "Find all callers of a function (reverse call graph). "

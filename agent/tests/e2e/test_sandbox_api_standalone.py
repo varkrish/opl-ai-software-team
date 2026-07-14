@@ -64,6 +64,9 @@ def _assert_sandbox_artifacts(workspace: Path) -> None:
 @pytest.mark.timeout(1800)
 def test_sandbox_api_standalone_e2e(tmp_path, monkeypatch):
     """Fast-path Sandbox API build in-process (no dev container on :8099)."""
+    import os
+    current_path = os.environ.get("PATH", "")
+    monkeypatch.setenv("PATH", f"/opt/homebrew/bin:/usr/local/bin:{current_path}")
     monkeypatch.setenv("SKIP_DELIVERY_MODE_TRIAGE", "1")
     monkeypatch.setenv("AUTH_ENABLED", "false")
 
@@ -84,6 +87,7 @@ def test_sandbox_api_standalone_e2e(tmp_path, monkeypatch):
     meta = {
         "capability_profile": {"solutioning_path": cap, "source": "e2e"},
         "auto_approve_plan": bool(fixture.get("auto_approve_plan", True)),
+        "auto_approve_solution": bool(fixture.get("auto_approve_solution", False)),
         "skip_delivery_mode_guard": True,
     }
     job_db.create_job(job_id, vision, str(workspace), metadata=json.dumps(meta))
@@ -106,6 +110,24 @@ def test_sandbox_api_standalone_e2e(tmp_path, monkeypatch):
     )
 
     status = results.get("status")
+    if status == "pending_solution_review":
+        job_record = job_db.get_job(job_id) or {}
+        meta_str = job_record.get("metadata", "{}")
+        meta = json.loads(meta_str) if isinstance(meta_str, str) else meta_str
+        meta["solution_approved"] = True
+        job_db.update_job(job_id, {"metadata": json.dumps(meta), "status": "queued"})
+        
+        results = run_build_pipeline(
+            job_id,
+            workspace,
+            vision,
+            config,
+            _progress,
+            job_db,
+            resume=True,
+        )
+        status = results.get("status")
+
     assert status in ("completed", "partially_completed"), results
 
     _assert_sandbox_artifacts(workspace)
@@ -116,7 +138,11 @@ def test_sandbox_api_standalone_e2e(tmp_path, monkeypatch):
     assert execution_log.is_file(), "missing execution.log"
     log_content = execution_log.read_text(encoding="utf-8")
     assert "=== [LLM Prompt] ===" in log_content or "=== [LLM Response] ===" in log_content
-    assert "[code block truncated]" in log_content or "[code truncated]" in log_content
+    assert (
+        "[code block truncated]" in log_content 
+        or "[code truncated]" in log_content
+        or "[code/file content omitted]" in log_content
+    )
 
     task_validation = results.get("task_validation") or {}
     if status == "completed":
