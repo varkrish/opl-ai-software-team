@@ -2462,6 +2462,44 @@ def cancel_job(job_id):
     return jsonify({'status': 'cancelled'})
 
 
+@app.route('/api/jobs/<job_id>/push', methods=['POST'])
+@require_auth_if_enabled
+def push_job_to_git(job_id):
+    """Push the job workspace to GitHub on demand.
+
+    Accepts an optional JSON body: ``{"repo_name": "my-repo"}`` to set or
+    override the GitHub repository name. Works for any job status so the user
+    can push even if a job failed or was cancelled mid-run.
+    """
+    job = job_db.get_job(job_id)
+    if not job:
+        return jsonify({'error': 'Job not found'}), 404
+
+    body = request.get_json(silent=True) or {}
+    repo_name_override = (body.get('repo_name') or '').strip()
+
+    # Inject the user-supplied repo name into metadata so _push_build_to_github picks it up.
+    if repo_name_override:
+        raw_meta = job.get('metadata') or '{}'
+        try:
+            meta = json.loads(raw_meta) if isinstance(raw_meta, str) else dict(raw_meta)
+        except (json.JSONDecodeError, TypeError):
+            meta = {}
+        meta['target_repo_name'] = repo_name_override
+        job_db.update_job(job_id, {'metadata': json.dumps(meta)})
+
+    job_workspace = Path(job['workspace_path'])
+    try:
+        repo_url = _push_build_to_github(job_id, job_workspace, job_db)
+        if repo_url:
+            return jsonify({'status': 'pushed', 'repo_url': repo_url})
+        else:
+            return jsonify({'error': 'Push failed or no GitHub token configured. Check Settings → API Configuration.'}), 400
+    except Exception as e:
+        logger.warning("On-demand push failed for job %s: %s", job_id, e)
+        return jsonify({'error': str(e)}), 500
+
+
 @app.route('/api/jobs/<job_id>/logs', methods=['GET'])
 def get_job_logs(job_id):
     """Retrieve job execution logs"""
