@@ -2463,7 +2463,6 @@ def cancel_job(job_id):
 
 
 @app.route('/api/jobs/<job_id>/push', methods=['POST'])
-@require_auth_if_enabled
 def push_job_to_git(job_id):
     """Push the job workspace to GitHub on demand.
 
