@@ -82,9 +82,199 @@ def is_valid_file_path(path: str) -> bool:
     return True
 
 
-def _has_file_content(content: str) -> bool:
+_DEEPSEEK_CHANNEL_MARKERS_RE = re.compile(
+    r"<\|(?:channel|start|message|end|call|constrain)\|>",
+    re.IGNORECASE,
+)
+_LLM_META_STUB_RE = re.compile(
+    r"^(?:we|i)\s+will\s+(?:output|use|call|write|invoke|create|generate)\b",
+    re.IGNORECASE,
+)
+# Meta phrases only count as stubs on short single-line text — not prose in real docs.
+_META_STUB_MAX_CHARS = 120
+
+
+def _is_short_meta_phrase(text: str) -> bool:
+    """True for lone LLM meta-commentary (not an opening line in a real artifact)."""
+    if len(text) >= _META_STUB_MAX_CHARS or "\n" in text:
+        return False
+    if _LLM_META_STUB_RE.match(text):
+        return True
+    if re.fullmatch(
+        r"(?:we|i)\s+will\s+(?:output|use|call)\s+(?:an?\s+)?action\.?",
+        text,
+        re.IGNORECASE,
+    ):
+        return True
+    if re.search(
+        r"\b(?:file_writer|code_browser|Action|Thought|Observation)\b",
+        text,
+        re.IGNORECASE,
+    ):
+        return True
+    return False
+
+
+# Prose docs can mention tools and planning language legitimately.
+_PLANNING_EXEMPT_EXTENSIONS = {
+    ".md", ".txt", ".rst", ".feature", ".gherkin",
+}
+_PLANNING_TOOL_RE = re.compile(
+    r"\b(?:code_search|file_reader|file_writer|code_browser|code_structure|code_context|code_impact)\b",
+    re.IGNORECASE,
+)
+_PLANNING_PHRASE_RE = re.compile(
+    r"(?:"
+    r"let'?s\s+(?:search|inspect|call|read|use|look)|"
+    r"we(?:'ll|\s+will)\s+call|"
+    r"we\s+need\s+to\s+use\s+tool|"
+    r"cannot\s+run\s+.+?\s+tool\s+yet|"
+    r"use\s+tool\s+code_|"
+    r"probably\s+the\s+\w+\s+(?:handler|module|file|component)\s+should"
+    r")",
+    re.IGNORECASE,
+)
+_CODE_LINE_START_RE = re.compile(
+    r"^\s*(?:"
+    r"package\s+\w|"
+    r"import\s+|"
+    r"from\s+\w|"
+    r"export\s+(?:default\s+)?|"
+    r"const\s+|"
+    r"let\s+(?!'s\b)|"
+    r"var\s+|"
+    r"func\s+|"
+    r"def\s+|"
+    r"class\s+|"
+    r"interface\s+|"
+    r"type\s+\w|"
+    r"#include\s+|"
+    r"public\s+(?:class|static|void|interface)|"
+    r"private\s+|"
+    r"protected\s+|"
+    r"fn\s+|"
+    r"async\s+function\s+|"
+    r"<\?php|"
+    r"module\s+exports|"
+    r"using\s+|"
+    r"namespace\s+|"
+    r"Feature:|Scenario:|Given\s|When\s|Then\s"
+    r")",
+    re.IGNORECASE,
+)
+_CODE_STRUCTURE_RE = re.compile(r"[{}();]|:=|=>")
+
+
+def _planning_exempt(file_path: Optional[str]) -> bool:
+    if not file_path:
+        return False
+    ext = Path(file_path).suffix.lower()
+    return ext in _PLANNING_EXEMPT_EXTENSIONS
+
+
+def _content_starts_like_source(text: str) -> bool:
+    """True when the first meaningful lines resemble source code, not English."""
+    meaningful = [ln for ln in text.splitlines() if ln.strip()][:12]
+    if not meaningful:
+        return False
+    if _CODE_LINE_START_RE.match(meaningful[0]):
+        return True
+    codeish = sum(1 for ln in meaningful if _CODE_LINE_START_RE.match(ln))
+    if codeish >= 1 and bool(_CODE_STRUCTURE_RE.search(text)):
+        return True
+    return False
+
+
+def is_agent_planning_monologue(content: str, *, file_path: Optional[str] = None) -> bool:
+    """True when *content* is ReAct/tool planning prose, not a real source artifact."""
+    if not content or not content.strip():
+        return False
+    if _planning_exempt(file_path):
+        return False
+    text = content.strip()
+
+    score = 0
+    if _PLANNING_TOOL_RE.search(text):
+        score += 1
+    if _PLANNING_PHRASE_RE.search(text):
+        score += 2
+    if re.search(r"^\s*Thought\s*:", text, re.MULTILINE | re.IGNORECASE):
+        score += 2
+
+    if score == 0:
+        return False
+    if _content_starts_like_source(text):
+        return False
+    return score >= 1
+
+
+def is_llm_stub_content(content: str, *, file_path: Optional[str] = None) -> bool:
+    """True when *content* is LLM meta-commentary, not a real artifact."""
+    if not content:
+        return True
+    text = content.strip()
+    if not text:
+        return True
+    if _DEEPSEEK_CHANNEL_MARKERS_RE.search(text):
+        return True
+    if is_agent_planning_monologue(text, file_path=file_path):
+        return True
+    return _is_short_meta_phrase(text)
+
+
+def response_needs_simple_retry(
+    response: str,
+    *,
+    target_file_path: Optional[str] = None,
+) -> bool:
+    """True when a ReAct response failed to produce usable file content."""
+    if not response or not response.strip():
+        return True
+    cleaned = clean_llm_response_text(response)
+    if is_llm_stub_content(cleaned, file_path=target_file_path) or looks_like_raw_agent_dump(response):
+        return True
+    entries, _strategy = extract_files_from_response(
+        response, target_file_path=target_file_path,
+    )
+    if not entries:
+        return True
+    for entry in entries:
+        content = entry.get("content", "")
+        path = entry.get("file_path") or target_file_path
+        if is_agent_planning_monologue(content, file_path=path):
+            return True
+        if is_llm_stub_content(content, file_path=path):
+            return True
+    return False
+
+
+def issues_indicate_unparsed_output(issues: List[str]) -> bool:
+    """True when validation issues suggest the on-disk file is LLM garbage."""
+    if not issues:
+        return False
+    blob = " ".join(issues).lower()
+    return any(
+        token in blob
+        for token in ("channel", "stub", "unparsed", "meta-commentary", "planning")
+    )
+
+
+def clean_llm_response_text(text: str) -> str:
+    """Strip role prefixes and DeepSeek channel tokens before parsing."""
+    return _clean_response(text)
+
+
+def _has_file_content(content: str, *, file_path: Optional[str] = None) -> bool:
     """True when *content* is non-empty source text (not a tool-call stub)."""
-    return bool(content and content.strip())
+    if not content or not content.strip():
+        return False
+    if is_llm_stub_content(content, file_path=file_path):
+        return False
+    if is_agent_planning_monologue(content, file_path=file_path):
+        return False
+    if looks_like_raw_agent_dump(content):
+        return False
+    return True
 
 
 def _filter_valid_entries(entries: List[Dict[str, str]]) -> List[Dict[str, str]]:
@@ -92,7 +282,7 @@ def _filter_valid_entries(entries: List[Dict[str, str]]) -> List[Dict[str, str]]
     for entry in entries:
         raw_path = entry.get("file_path", "")
         content = entry.get("content", "")
-        if not _has_file_content(content):
+        if not _has_file_content(content, file_path=raw_path):
             logger.debug(
                 "output_parser: rejecting entry with empty content: %r",
                 raw_path,
@@ -263,19 +453,22 @@ def is_valid_gherkin_feature(content: str, *, min_chars: int = 40) -> bool:
     return has_scenario and has_steps
 
 
-def looks_like_raw_agent_dump(content: str) -> bool:
+def looks_like_raw_agent_dump(content: str, *, file_path: Optional[str] = None) -> bool:
     """True when text is an unparsed LLM/tool transcript, not a real artifact."""
     if not content:
         return False
+    if is_llm_stub_content(content, file_path=file_path):
+        return True
+    if is_agent_planning_monologue(content, file_path=file_path):
+        return True
+    if _DEEPSEEK_CHANNEL_MARKERS_RE.search(content):
+        return True
     head = content.lstrip()[:500]
     if re.match(r"^(?:assistant|user|system)\s*:", head, re.IGNORECASE):
         return True
     if re.search(r"file_writer\s*\(", head, re.IGNORECASE):
         return True
     if re.search(r"Thought\s*:", head, re.IGNORECASE) and "Action" in head:
-        return True
-    # DeepSeek R1 channel tokens — internal multi-turn dispatch leaked into response
-    if re.match(r"<\|(?:channel|start)\|>", head):
         return True
     return False
 
@@ -353,7 +546,7 @@ def _strip_deepseek_tokens(text: str) -> str:
         msg = _MSG_CONTENT_RE.search(block)
         if msg:
             inner = msg.group(1).strip()
-            if inner:
+            if inner and not is_llm_stub_content(inner):
                 return inner
         return ""
 
@@ -587,7 +780,9 @@ def _try_raw_source_for_target(text: str, target_path: str) -> List[Dict[str, st
     stripped = text.strip()
     if not stripped or stripped.startswith(("[", "{")):
         return []
-    if looks_like_raw_agent_dump(stripped):
+    if looks_like_raw_agent_dump(stripped, file_path=target_path):
+        return []
+    if is_agent_planning_monologue(stripped, file_path=target_path):
         return []
 
     content = stripped
@@ -601,11 +796,7 @@ def _try_raw_source_for_target(text: str, target_path: str) -> List[Dict[str, st
     if len(content) < 10:
         return []
 
-    if not re.search(
-        r"(?m)^\s*(import|export|const|let|var|function|class|interface|type|#|Feature:|\<\?|<!DOCTYPE)",
-        content,
-        re.IGNORECASE,
-    ):
+    if not _content_starts_like_source(content):
         return []
 
     logger.info(
@@ -686,7 +877,12 @@ def _try_file_writer_calls(text: str) -> List[Dict[str, str]]:
         if not content_result:
             continue
         content, _ = content_result
-        if is_valid_file_path(file_path) and content.strip():
+        if (
+            is_valid_file_path(file_path)
+            and content.strip()
+            and not is_llm_stub_content(content, file_path=file_path.strip())
+            and not is_agent_planning_monologue(content, file_path=file_path.strip())
+        ):
             entries.append({"file_path": file_path.strip(), "content": content})
     if entries:
         logger.info("output_parser: extracted %d file(s) from file_writer pseudo-calls", len(entries))
@@ -802,6 +998,16 @@ def write_files_from_response(
             if file_path.endswith(".feature") and not is_valid_gherkin_feature(content):
                 logger.warning(
                     "%sskipping invalid Gherkin for %r (%d chars)",
+                    prefix, file_path, len(content),
+                )
+                continue
+            if (
+                is_llm_stub_content(content, file_path=file_path)
+                or is_agent_planning_monologue(content, file_path=file_path)
+                or looks_like_raw_agent_dump(content, file_path=file_path)
+            ):
+                logger.warning(
+                    "%sskipping stub/unparsed LLM output for %r (%d chars)",
                     prefix, file_path, len(content),
                 )
                 continue
@@ -926,7 +1132,7 @@ def _normalise_json(data: object) -> List[Dict[str, str]]:
             continue
         if not isinstance(content, str):
             content = str(content)
-        if not _has_file_content(content):
+        if not _has_file_content(content, file_path=str(file_path).strip()):
             logger.debug(
                 "output_parser JSON: entry missing content, skipping: %r",
                 file_path,

@@ -35,7 +35,10 @@ from .workflow_resolver import (
 )
 from ..utils.output_parser import (
     is_valid_gherkin_feature,
+    issues_indicate_unparsed_output,
+    is_llm_stub_content,
     product_owner_format_instruction,
+    response_needs_simple_retry,
     simple_mode_format_instruction,
     write_files_from_response,
 )
@@ -1135,6 +1138,7 @@ class SoftwareDevWorkflow:
                 "message": f"Story {story_key} committed",
             })
 
+        self._run_incomplete_file_task_pass()
         self._run_post_build_fix_iteration()
         self.state_machine.transition(
             ProjectState.COMPLETED,
@@ -1835,21 +1839,6 @@ class SoftwareDevWorkflow:
             return
         self.dev_agent.agent.reset_chat()
         issue_list = "\n".join(f"- {d}" for d in descriptions[:10])
-        related = self._collect_related_files(file_path, all_files)
-        related_section = ""
-        if related:
-            parts = ["Related files (for import/reference context):"]
-            for fp, content in related.items():
-                parts.append(f"--- {fp} ---")
-                parts.append(content[:3000])
-            related_section = "\n".join(parts) + "\n\n"
-
-        file_tree_section = ""
-        if all_files:
-            tree_lines = ["PROJECT FILE TREE (use these exact paths for imports):"]
-            for fp in sorted(all_files.keys()):
-                tree_lines.append(f"  {fp}")
-            file_tree_section = "\n".join(tree_lines) + "\n\n"
 
         current_content = ""
         target = self.workspace_path / file_path
@@ -1859,6 +1848,26 @@ class SoftwareDevWorkflow:
             except Exception:
                 pass
 
+        files_for_related = {**all_files, file_path: current_content}
+        related = self._collect_related_files(file_path, files_for_related)
+        related_section = ""
+        if related:
+            parts = ["Related files (call file_reader only if you need import context):"]
+            for fp, content in related.items():
+                if content:
+                    parts.append(f"--- {fp} (snippet) ---")
+                    parts.append(content[:1500])
+                else:
+                    parts.append(f"  {fp}")
+            related_section = "\n".join(parts) + "\n\n"
+
+        file_tree_section = ""
+        if all_files:
+            tree_lines = ["PROJECT FILE TREE (use these exact paths for imports):"]
+            for fp in sorted(all_files.keys()):
+                tree_lines.append(f"  {fp}")
+            file_tree_section = "\n".join(tree_lines) + "\n\n"
+
         content_section = ""
         has_framework_issue = any(
             "@nestjs" in d or "@Injectable" in d or "@InjectRepository" in d
@@ -1867,37 +1876,60 @@ class SoftwareDevWorkflow:
         )
         has_duplicate_issue = any("duplicated code block" in d.lower() for d in descriptions)
 
+        has_truncated_issue = any(
+            "non-comment lines" in d.lower()
+            or "chars of content" in d.lower()
+            or "file is empty" in d.lower()
+            or "incomplete or corrupt" in d.lower()
+            for d in descriptions
+        )
+
         if current_content:
-            if has_framework_issue or has_duplicate_issue:
+            if has_truncated_issue or has_framework_issue or has_duplicate_issue:
                 content_section = (
-                    f"Current file content (this file has MAJOR issues — "
-                    f"you may REWRITE it entirely using the correct framework from the tech stack):\n"
+                    f"Current file content (this file needs a full rewrite — "
+                    f"the on-disk copy is corrupt, truncated, or uses the wrong framework):\n"
                     f"```\n{current_content[:6000]}\n```\n\n"
+                )
+            elif len(current_content) <= 4000:
+                content_section = (
+                    f"Current file content (preserve existing code — "
+                    f"surgical patch only):\n"
+                    f"```\n{current_content}\n```\n\n"
                 )
             else:
                 content_section = (
-                    f"Current file content (preserve existing code and logic "
-                    f"— only change what is needed to fix the issues):\n"
-                    f"```\n{current_content[:6000]}\n```\n\n"
+                    f"The file `{file_path}` is large ({len(current_content)} chars). "
+                    f"Call file_reader(file_path=\"{file_path}\") to load the COMPLETE "
+                    f"content before editing. Do NOT guess from a truncated preview.\n\n"
                 )
 
-        fix_rules = (
-            "Please fix the issues listed above and rewrite the file using file_writer.\n"
-            "Use only the frameworks/libraries specified in the tech stack.\n"
-        )
-        if has_framework_issue:
-            fix_rules += (
-                "IMPORTANT: If the file uses decorators or APIs from a wrong framework "
-                "(e.g., @InjectRepository from @nestjs/common in an Express project), "
-                "you MUST rewrite the file using the CORRECT framework's APIs. "
-                "Do NOT preserve code that uses the wrong framework.\n"
+        if has_truncated_issue or has_framework_issue or has_duplicate_issue:
+            fix_rules = (
+                "Rewrite the file using file_writer with a COMPLETE, valid implementation.\n"
+                "Use only the frameworks/libraries specified in the tech stack.\n"
             )
-        if has_duplicate_issue:
-            fix_rules += (
-                "IMPORTANT: This file contains duplicated code blocks. "
-                "Remove ALL duplicate blocks — keep only ONE copy of each logical section. "
-                "Do NOT append new code; replace the entire file content.\n"
+            if has_framework_issue:
+                fix_rules += (
+                    "IMPORTANT: If the file uses decorators or APIs from a wrong framework "
+                    "(e.g., @InjectRepository from @nestjs/common in an Express project), "
+                    "you MUST rewrite the file using the CORRECT framework's APIs. "
+                    "Do NOT preserve code that uses the wrong framework.\n"
+                )
+            if has_duplicate_issue:
+                fix_rules += (
+                    "IMPORTANT: This file contains duplicated code blocks. "
+                    "Remove ALL duplicate blocks — keep only ONE copy of each logical section.\n"
+                )
+        else:
+            fix_rules = (
+                "Fix the issues with SURGICAL edits only:\n"
+                f"1. Call file_reader(file_path=\"{file_path}\") to load the full current file.\n"
+                "2. Use replace_file_content to patch ONLY the affected line range(s).\n"
+                "Prefer replace_file_content over file_writer. Do NOT rewrite unrelated code or tests.\n"
+                "Use only the frameworks/libraries specified in the tech stack.\n"
             )
+
         fix_rules += (
             "Do NOT hallucinate APIs. Use only real, documented methods.\n"
             "Express: use `express()`, NOT `express.createServer()`.\n"
@@ -2001,18 +2033,13 @@ class SoftwareDevWorkflow:
                 if fp and fp.lower() != "unknown":
                     by_file.setdefault(fp, []).append(issue["description"])
 
-            # Collect workspace source files for sibling context
+            # File tree for import paths only — avoid embedding every file body in the prompt.
             _SRC_EXT = {".py", ".java", ".kt", ".js", ".jsx", ".ts", ".tsx", ".go"}
             all_files: Dict[str, str] = {}
             for src in sorted(self.workspace_path.rglob("*")):
                 if src.is_file() and src.suffix in _SRC_EXT:
-                    try:
-                        rel = str(src.relative_to(self.workspace_path))
-                        all_files[rel] = src.read_text(
-                            encoding="utf-8", errors="replace"
-                        )[:3000]
-                    except Exception:
-                        pass
+                    rel = str(src.relative_to(self.workspace_path))
+                    all_files[rel] = ""
 
             for file_path, descs in by_file.items():
                 if not file_path or file_path.strip().lower() == "unknown":
@@ -2911,18 +2938,11 @@ class SoftwareDevWorkflow:
     # ── File materialization from LLM response ───────────────────────────────
 
     def _resolve_task_file_on_disk(self, file_path: str) -> Path:
-        """Return the workspace path for *file_path*, with basename fallback."""
-        full_path = self.workspace_path / file_path
-        if full_path.exists():
-            return full_path
-        by_name = {
-            p.name: p
-            for p in self.workspace_path.rglob("*")
-            if p.is_file()
-        }
-        if Path(file_path).name in by_name:
-            return by_name[Path(file_path).name]
-        return full_path
+        """Return the workspace path for *file_path*, with safe suffix resolution."""
+        found = TaskManager.resolve_planned_file_on_disk(self.workspace_path, file_path)
+        if found is not None:
+            return found
+        return self.workspace_path / file_path
 
     def _materialize_file_from_response(
         self,
@@ -2944,7 +2964,14 @@ class SoftwareDevWorkflow:
 
         exists_before = self._resolve_task_file_on_disk(file_path).exists()
         if not agent_simple and exists_before:
-            return True
+            from ..orchestrator.code_validator import CodeCompletenessValidator
+            on_disk = self._resolve_task_file_on_disk(file_path)
+            if CodeCompletenessValidator.validate_file(on_disk).get("complete", True):
+                return True
+            logger.info(
+                "[%s] safety net: %s exists but incomplete — parsing response",
+                label, file_path,
+            )
 
         write_label = label if agent_simple else f"{label}-safetynet"
         if not agent_simple:
@@ -2965,6 +2992,48 @@ class SoftwareDevWorkflow:
                 label, file_path, result.parse_strategy, write_label,
             )
         return self._resolve_task_file_on_disk(file_path).exists()
+
+    def _react_simple_fallback_enabled(self) -> bool:
+        """Whether ReAct file tasks may fall back to one-shot simple mode on stub output."""
+        gen = self._generation_settings()
+        if gen is None:
+            return True
+        return bool(getattr(gen, "react_simple_fallback", True))
+
+    def _try_react_simple_fallback(
+        self,
+        agent,
+        prompt: str,
+        file_path: str,
+        label: str,
+        *,
+        extra_suffix: str = "",
+    ) -> Optional[str]:
+        """One-shot simple-mode retry using the same LLM; does not alter supports_react."""
+        if not file_path or not self._react_simple_fallback_enabled():
+            return None
+        if not getattr(agent, "supports_react", True):
+            return None
+        base_agent = getattr(agent, "agent", None)
+        if base_agent is None or not hasattr(base_agent, "chat_simple"):
+            return None
+
+        logger.warning(
+            "[%s] ReAct produced unparsed output for %s — one-shot simple-mode fallback",
+            label, file_path,
+        )
+        base_agent.reset_chat()
+        simple_prompt = prompt + extra_suffix + simple_mode_format_instruction(file_path)
+        return str(base_agent.chat_simple(simple_prompt))
+
+    def _file_has_unparsed_output(self, path: Path) -> bool:
+        if not path.exists():
+            return False
+        try:
+            content = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return False
+        return is_llm_stub_content(content)
 
     # ── Parallel-worker count resolution ─────────────────────────────────────
 
@@ -3208,7 +3277,7 @@ class SoftwareDevWorkflow:
         agent_simple = not getattr(agent, "supports_react", True)
         gen = self._generation_settings()
         skip_rag = False
-        retry_critical_only = False
+        retry_critical_only = not agent_simple  # ReAct: retry syntax/truncation only, not TODO noise
         if agent_simple:
             skip_rag = getattr(gen, "simple_mode_skip_rag", True) if gen else True
             MAX_FILE_RETRIES = int(getattr(gen, "simple_mode_max_retries", 2) if gen else 2)
@@ -3221,6 +3290,7 @@ class SoftwareDevWorkflow:
 
         attempt = 0
         transient_retries = 0
+        simple_fallback_used = False
         while attempt <= MAX_FILE_RETRIES:
             agent.agent.reset_chat()
 
@@ -3295,6 +3365,32 @@ class SoftwareDevWorkflow:
                     )
                     if agent_simple:
                         result_str += f"\n✅ Successfully wrote to {file_path}"
+
+                    if (
+                        not agent_simple
+                        and not simple_fallback_used
+                        and file_path
+                    ):
+                        probe = self._resolve_task_file_on_disk(file_path)
+                        needs_fallback = (
+                            not probe.exists()
+                            or self._file_has_unparsed_output(probe)
+                        ) and response_needs_simple_retry(
+                            result_str, target_file_path=file_path,
+                        )
+                        if needs_fallback:
+                            fallback_str = self._try_react_simple_fallback(
+                                agent, prompt, file_path, label,
+                            )
+                            if fallback_str:
+                                simple_fallback_used = True
+                                result_str = fallback_str
+                                self._materialize_file_from_response(
+                                    result_str,
+                                    file_path,
+                                    label,
+                                    agent_simple=True,
+                                )
             except Exception as e:
                 if _is_transient_llm_error(e) and transient_retries < MAX_TRANSIENT_RETRIES:
                     transient_retries += 1
@@ -3323,7 +3419,7 @@ class SoftwareDevWorkflow:
             if not full_path.exists():
                 if attempt == MAX_FILE_RETRIES:
                     self.task_manager.update_task_status(
-                        task.task_id, "skipped",
+                        task.task_id, "failed",
                         f"File {file_path} was not created by the agent",
                     )
                 attempt += 1
@@ -3336,7 +3432,7 @@ class SoftwareDevWorkflow:
             all_issues = integration.get("issues", []) + completeness.get("issues", [])
             retry_issues = filter_retry_issues(all_issues, critical_only=retry_critical_only)
 
-            if not retry_issues or attempt == MAX_FILE_RETRIES:
+            if not all_issues:
                 self.task_manager.update_task_status(task.task_id, "completed", f"File created: {file_path}")
                 try:
                     content = full_path.read_text(encoding="utf-8", errors="replace")
@@ -3356,37 +3452,82 @@ class SoftwareDevWorkflow:
                         export_registry[file_path] = summary.get("exports", [])
                 except Exception:
                     pass
-                if all_issues and not retry_issues:
-                    logger.info(
-                        "[%s] File %s has non-critical issues (accepted): %s",
-                        label, file_path, all_issues,
-                    )
-                elif all_issues:
-                    logger.warning(
-                        "[%s] ⚠️ File %s still has issues after retry: %s",
-                        label, file_path, all_issues,
-                    )
                 return
 
+            if not retry_issues:
+                self.task_manager.update_task_status(task.task_id, "completed", f"File created: {file_path}")
+                logger.info(
+                    "[%s] File %s accepted with non-critical issues: %s",
+                    label, file_path, all_issues,
+                )
+                try:
+                    content = full_path.read_text(encoding="utf-8", errors="replace")
+                    with lock:
+                        completed_files[file_path] = content[:8192]
+                except Exception:
+                    pass
+                return
+
+            if attempt < MAX_FILE_RETRIES and retry_issues:
+                logger.warning(
+                    "[%s] ⚠️ File %s has critical issues (attempt %d), retrying: %s",
+                    label, file_path, attempt + 1, retry_issues,
+                )
+                if (
+                    not agent_simple
+                    and not simple_fallback_used
+                    and issues_indicate_unparsed_output(all_issues)
+                ):
+                    fallback_str = self._try_react_simple_fallback(
+                        agent,
+                        prompt,
+                        file_path,
+                        label,
+                        extra_suffix=(
+                            "\n\nThe previous attempt wrote unparsed LLM output. "
+                            "Output the COMPLETE real source file.\n"
+                        ),
+                    )
+                    if fallback_str:
+                        simple_fallback_used = True
+                        self._materialize_file_from_response(
+                            fallback_str,
+                            file_path,
+                            label,
+                            agent_simple=True,
+                        )
+                        continue
+                if agent_simple:
+                    retry_prompt = (
+                        f"The file `{file_path}` you just created has these CRITICAL issues:\n"
+                        + "\n".join(f"- {i}" for i in retry_issues)
+                        + f"\n\nPlease fix and output the COMPLETE corrected `{file_path}` as a JSON array. "
+                        + "Do NOT truncate the file — include every line of the full implementation:\n"
+                        + '[{"file_path": "' + file_path + '", "content": "...complete fixed content..."}]'
+                    )
+                else:
+                    retry_prompt = (
+                        f"The file `{file_path}` you just created has these issues:\n"
+                        + "\n".join(f"- {i}" for i in all_issues)
+                        + f"\n\nYou MUST call the file_writer tool (not code_browser or other names) "
+                        f"to write the COMPLETE corrected `{file_path}`.\n"
+                        f"Optionally call file_reader first to inspect the current file.\n"
+                        f"Do NOT output tool-call markup in plain text — invoke the real tools."
+                    )
+                attempt += 1
+                continue
+
+            issue_summary = "; ".join(all_issues[:5])
             logger.warning(
-                "[%s] ⚠️ File %s has critical issues (attempt %d), retrying: %s",
-                label, file_path, attempt + 1, retry_issues,
+                "[%s] File %s failed validation after %d attempt(s): %s",
+                label, file_path, attempt + 1, all_issues,
             )
-            if agent_simple:
-                retry_prompt = (
-                    f"The file `{file_path}` you just created has these CRITICAL issues:\n"
-                    + "\n".join(f"- {i}" for i in retry_issues)
-                    + f"\n\nPlease fix and output the COMPLETE corrected `{file_path}` as a JSON array. "
-                    + "Do NOT truncate the file — include every line of the full implementation:\n"
-                    + '[{"file_path": "' + file_path + '", "content": "...complete fixed content..."}]'
-                )
-            else:
-                retry_prompt = (
-                    f"The file `{file_path}` you just created has these issues:\n"
-                    + "\n".join(f"- {i}" for i in all_issues)
-                    + f"\n\nPlease fix and rewrite `{file_path}` using file_writer."
-                )
-            attempt += 1
+            self.task_manager.update_task_status(
+                task.task_id,
+                "failed",
+                f"File {file_path} failed validation: {issue_summary}",
+            )
+            return
 
     def _ensure_granular_file_tasks_registered(self) -> None:
         """Register per-file dev tasks when missing (resume after tech_architect failure)."""
@@ -3430,6 +3571,179 @@ class SoftwareDevWorkflow:
             return True
         fp = (task.metadata or {}).get("file_path", "")
         return not is_test_file_path(fp)
+
+    def _collect_incomplete_file_task_ids(self) -> set:
+        """Collect file_creation tasks that are skipped, failed, or still-missing registered."""
+        self.task_manager.reconcile_corrupt_completed_files(self.workspace_path)
+        ids: set = set()
+        for t in self.task_manager.get_all_tasks():
+            if t.task_type != "file_creation":
+                continue
+            if not self._dev_file_task_eligible(t):
+                continue
+            status = (t.status or "").lower()
+            if status in (
+                TaskStatus.SKIPPED.value,
+                TaskStatus.FAILED.value,
+            ):
+                ids.add(t.task_id)
+                continue
+            if status == TaskStatus.REGISTERED.value:
+                fp = (t.metadata or {}).get("file_path", "")
+                if not fp:
+                    ids.add(t.task_id)
+                    continue
+                if not self._resolve_task_file_on_disk(fp).exists():
+                    ids.add(t.task_id)
+        return ids
+
+    def _ensure_dev_agent(self) -> "DevAgent":
+        if self.dev_agent is None:
+            backstory = self.agent_backstories.get("developer")
+            self.dev_agent = DevAgent(
+                custom_backstory=backstory,
+                budget_tracker=self.budget_tracker,
+                workspace_path=self.workspace_path,
+                config=self.config,
+            )
+        return self.dev_agent
+
+    def _run_incomplete_file_task_pass(self) -> int:
+        """Reset and re-run skipped/failed/missing file_creation tasks (capped by env).
+
+        ``MAX_INCOMPLETE_FILE_PASSES`` (default 1) limits how many reset+re-run
+        cycles a single call performs, so we do not loop forever.
+        """
+        try:
+            max_passes = int(os.getenv("MAX_INCOMPLETE_FILE_PASSES", "1"))
+        except (TypeError, ValueError):
+            max_passes = 1
+        if max_passes <= 0:
+            return 0
+
+        import threading as _threading
+
+        total = 0
+        for pass_num in range(1, max_passes + 1):
+            task_ids = self._collect_incomplete_file_task_ids()
+            if not task_ids:
+                break
+
+            logger.info(
+                "Incomplete file pass %d/%d: resetting %d task(s)",
+                pass_num, max_passes, len(task_ids),
+            )
+            self.task_manager.reset_tasks_for_retry(list(task_ids))
+            self._report_progress(
+                "development", 88,
+                f"Retrying {len(task_ids)} incomplete file task(s) (pass {pass_num})...",
+            )
+
+            agent = self._ensure_dev_agent()
+            backstory = self.agent_backstories.get("developer")
+
+            def _make_dev_agent():
+                return DevAgent(
+                    custom_backstory=backstory,
+                    budget_tracker=self.budget_tracker,
+                    workspace_path=self.workspace_path,
+                    config=self.config,
+                )
+
+            completed_files: dict = {}
+            export_registry: dict = getattr(self, "_export_registry", None) or {}
+            lock = _threading.Lock()
+            count = self._process_file_tasks(
+                agent, task_ids, "incomplete-retry",
+                completed_files, export_registry, lock,
+                agent_factory=_make_dev_agent,
+            )
+            total += count
+            self._export_registry = export_registry
+            logger.info(
+                "Incomplete file pass %d complete: processed %d task(s)",
+                pass_num, count,
+            )
+
+        return total
+
+    def retry_incomplete_tasks(self) -> Dict[str, Any]:
+        """Thin entrypoint: retry failed/skipped file (+ failed feature) tasks only.
+
+        Used by ``POST /api/jobs/<id>/restart`` with ``mode=retry_failed``.
+        Does not re-run meta / PO / architect phases.
+        """
+        logger.info("🔄 retry_incomplete_tasks: loading artifacts and retrying incomplete work")
+        self._load_phase_artifacts()
+        self._report_progress("development", 70, "Retrying failed/skipped tasks...")
+
+        # Reset failed features so they can be re-attempted after the file pass
+        feature_ids = []
+        for t in self.task_manager.get_all_tasks():
+            if t.task_type != "feature":
+                continue
+            if (t.status or "").lower() == TaskStatus.FAILED.value:
+                feature_ids.append(t.task_id)
+        if feature_ids:
+            self.task_manager.reset_tasks_for_retry(feature_ids)
+
+        self._run_incomplete_file_task_pass()
+
+        # Best-effort feature batch for any still-incomplete features
+        feature_tasks = [
+            t for t in self.task_manager.get_incomplete_tasks()
+            if t.task_type == "feature"
+        ]
+        if feature_tasks:
+            agent = self._ensure_dev_agent()
+            from ..tools.file_tools import set_allowed_file_paths
+            set_allowed_file_paths(None, workspace=str(self.workspace_path))
+            feature_names = [t.description for t in feature_tasks]
+            try:
+                result = agent.run(feature_names, self.tech_stack or "", self.user_stories)
+                self.task_manager.update_task_status_by_output(result)
+                for t in feature_tasks:
+                    if t.status not in (TaskStatus.COMPLETED.value, TaskStatus.SKIPPED.value):
+                        self.task_manager.update_task_status(
+                            t.task_id,
+                            "completed",
+                            f"Feature batch implemented: {t.description or t.task_id}",
+                        )
+            except Exception as e:
+                logger.error("Feature retry failed: %s", e)
+                for t in feature_tasks:
+                    if t.status not in (TaskStatus.COMPLETED.value, TaskStatus.SKIPPED.value):
+                        self.task_manager.mark_task_executed(
+                            t.task_id, TaskStatus.FAILED, str(e)[:500],
+                        )
+
+        self._run_post_build_fix_iteration()
+
+        if self.state_machine.get_current_state() != ProjectState.COMPLETED:
+            if self.state_machine.can_transition(ProjectState.COMPLETED):
+                self.state_machine.transition(
+                    ProjectState.COMPLETED,
+                    TransitionContext(phase="completed", data={"retry_failed": True}),
+                )
+            else:
+                self.state_machine.force_transition(
+                    ProjectState.COMPLETED,
+                    TransitionContext(phase="completed", data={"retry_failed": True}),
+                )
+
+        self.task_manager.finalize_incomplete_tasks(self.workspace_path)
+        completed_check = self.task_manager.validate_all_tasks_completed(
+            workspace_path=self.workspace_path
+        )
+        return {
+            "status": "completed",
+            "project_id": self.project_id,
+            "budget_report": self.budget_tracker.get_report(self.project_id),
+            "task_validation": completed_check,
+            "validation_report": getattr(self, "_validation_report", {}),
+            "state": self.state_machine.get_current_state().value,
+            "mode": "retry_failed",
+        }
 
     def _feature_rel_path(self, feature: Dict[str, Any]) -> str:
         raw = feature.get("file") or ""
@@ -3985,6 +4299,12 @@ class SoftwareDevWorkflow:
         # Disable the file-writer allowlist for subsequent phases
         from ..tools.file_tools import set_allowed_file_paths
         set_allowed_file_paths(None, workspace=str(self.workspace_path))
+
+        # Second pass: retry file tasks that were skipped/failed or never created
+        retry_count = self._run_incomplete_file_task_pass()
+        if retry_count:
+            task_count += retry_count
+            report["tasks_processed"] = task_count
 
         self._validation_report = report
         logger.info("✅ Development phase completed (%d tasks processed)", task_count)
@@ -4665,6 +4985,8 @@ markdown content here
             # Post-build validation + fix iteration loop.
             # Re-validates after dev+frontend phases and gives the dev agent a
             # chance to fix remaining issues before marking the job complete.
+            # Cover frontend leftovers that may have been skipped/failed.
+            self._run_incomplete_file_task_pass()
             self._run_post_build_fix_iteration()
 
             # Transition to completed
@@ -4673,44 +4995,8 @@ markdown content here
                 TransitionContext(phase="completed", data={})
             )
 
-            # Final sweep: agents may reorganize files into subdirectories
-            # (e.g. src/server.py → backend/src/server.py).  Check by basename.
-            # Tasks still in REGISTERED status were never started by agents —
-            # they represent the architect's plan that agents chose to satisfy
-            # differently; skip them rather than failing the whole job.
-            remaining = self.task_manager.get_incomplete_tasks()
-            if remaining:
-                all_files = {p.name: p for p in self.workspace_path.rglob("*") if p.is_file()}
-                for task in remaining:
-                    if task.task_type == "file_creation":
-                        file_path = (task.metadata or {}).get("file_path", "")
-                        if not file_path:
-                            continue
-                        basename = Path(file_path).name
-                        if basename in all_files:
-                            logger.info("Fallback (basename): task %s matched %s", task.task_id, all_files[basename])
-                            self.task_manager.update_task_status(task.task_id, "completed", f"File found at {all_files[basename]}")
-                        elif task.status == TaskStatus.REGISTERED.value:
-                            logger.info(
-                                "Fallback: skipping registered file task %s (%s) — agents reorganized the project",
-                                task.task_id, file_path,
-                            )
-                            self.task_manager.update_task_status(
-                                task.task_id, "skipped",
-                                f"File planned as {file_path} but agents reorganized; project completed successfully",
-                            )
-                    elif task.task_type == "feature":
-                        logger.info("Fallback: marking feature task %s as completed (project built)", task.task_id)
-                        self.task_manager.update_task_status(task.task_id, "completed", "Project built successfully")
-                    elif task.status == TaskStatus.REGISTERED.value:
-                        logger.info(
-                            "Fallback: skipping registered task %s (type=%s) — never started, project completed",
-                            task.task_id, task.task_type,
-                        )
-                        self.task_manager.update_task_status(
-                            task.task_id, "skipped",
-                            "Task was planned but never started; project completed successfully",
-                        )
+            # Final sweep: reconcile moved files and mark genuinely missing work as failed.
+            self.task_manager.finalize_incomplete_tasks(self.workspace_path)
 
             # Final task validation (with filesystem reconciliation)
             completed_check = self.task_manager.validate_all_tasks_completed(

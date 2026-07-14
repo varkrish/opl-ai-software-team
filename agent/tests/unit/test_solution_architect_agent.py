@@ -9,6 +9,13 @@ from unittest.mock import MagicMock
 
 from llamaindex_crew.agents.solution_agents import SolutionArchitectAgent
 
+_VALID_SPEC = (
+    "# Solution Specification\n\n"
+    "## Stack\n\n"
+    "Use Go for the API and Podman for sandbox isolation on the Linux host.\n"
+    "Include create, execute (SSE), and terminate endpoints with a background janitor.\n"
+)
+
 
 def _make_agent(tmp_path: Path, chat_return: str) -> SolutionArchitectAgent:
     agent = SolutionArchitectAgent.__new__(SolutionArchitectAgent)
@@ -21,24 +28,27 @@ def _make_agent(tmp_path: Path, chat_return: str) -> SolutionArchitectAgent:
 
 class TestSolutionArchitectAgentSpecPersistence:
     def test_first_pass_writes_spec_when_no_tool_write_occurs(self, tmp_path):
-        agent = _make_agent(tmp_path, "# Solution Specification\n\nFirst draft.")
+        agent = _make_agent(tmp_path, _VALID_SPEC.replace("Use Go", "First draft: use Go"))
 
         agent.run("Build app", "ctx", "[]")
 
         spec_path = tmp_path / "solution_spec.md"
         assert spec_path.exists()
-        assert "First draft." in spec_path.read_text(encoding="utf-8")
+        assert "First draft" in spec_path.read_text(encoding="utf-8")
 
     def test_revision_pass_overwrites_stale_spec_with_new_response(self, tmp_path):
         spec_path = tmp_path / "solution_spec.md"
-        spec_path.write_text("# Solution Specification\n\nStale draft.", encoding="utf-8")
+        spec_path.write_text(_VALID_SPEC.replace("Use Go", "Stale draft: use Go"), encoding="utf-8")
 
-        agent = _make_agent(tmp_path, "# Solution Specification\n\nRevised draft addressing feedback.")
+        agent = _make_agent(
+            tmp_path,
+            _VALID_SPEC.replace("Use Go", "Revised draft addressing feedback: use Go"),
+        )
         agent.run("Build app", "ctx", "[]", feedback="Add persistence details")
 
         content = spec_path.read_text(encoding="utf-8")
-        assert "Revised draft addressing feedback." in content
-        assert "Stale draft." not in content
+        assert "Revised draft addressing feedback" in content
+        assert "Stale draft" not in content
 
     def test_does_not_clobber_content_written_via_tool_call_during_chat(self, tmp_path):
         spec_path = tmp_path / "solution_spec.md"

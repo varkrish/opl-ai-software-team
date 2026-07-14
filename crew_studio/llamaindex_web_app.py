@@ -269,7 +269,13 @@ def _is_import_mode_recommended_error(exc: BaseException) -> bool:
     return isinstance(getattr(exc, "triage", None), dict)
 
 
-def run_job_async(job_id: str, vision: str, job_config: SecretConfig = None, resume: bool = False):
+def run_job_async(
+    job_id: str,
+    vision: str,
+    job_config: SecretConfig = None,
+    resume: bool = False,
+    retry_failed: bool = False,
+):
     """Run workflow in a separate thread with job-specific workspace"""
     if job_config is None:
         job_config = config
@@ -280,10 +286,18 @@ def run_job_async(job_id: str, vision: str, job_config: SecretConfig = None, res
         except Exception as e:
             job_db.mark_failed(job_id, str(e))
             return
-        return _run_job_async_impl(job_id, vision, active_config, resume)
+        return _run_job_async_impl(
+            job_id, vision, active_config, resume, retry_failed=retry_failed,
+        )
 
 
-def _run_job_async_impl(job_id: str, vision: str, job_config: SecretConfig = None, resume: bool = False):
+def _run_job_async_impl(
+    job_id: str,
+    vision: str,
+    job_config: SecretConfig = None,
+    resume: bool = False,
+    retry_failed: bool = False,
+):
     """Implementation of run_job_async"""
     import traceback
     import logging
@@ -370,6 +384,7 @@ def _run_job_async_impl(job_id: str, vision: str, job_config: SecretConfig = Non
             progress_callback=progress_callback,
             job_db=job_db,
             resume=resume,
+            retry_failed=retry_failed,
         )
 
         if results.get("status") in ("pending_approval", "pending_review", "pending_solution_review"):
@@ -2246,15 +2261,22 @@ _REFACTOR_JOB_PHASES = frozenset({
     'refactoring', 'analysis', 'design', 'planning', 'execution',
     'devops', 'refactor_failed', 'awaiting_refactor',
 })
-_RESTARTABLE_STATUSES = frozenset({'failed', 'cancelled', 'quota_exhausted', 'completed'})
+_RESTARTABLE_STATUSES = frozenset({
+    'failed', 'cancelled', 'quota_exhausted', 'completed', 'partially_completed',
+})
 
 
 @app.route('/api/jobs/<job_id>/restart', methods=['POST'])
 def restart_job(job_id):
-    """Restart a failed / cancelled / quota-exhausted job.
+    """Restart a failed / cancelled / quota-exhausted / partially_completed job.
 
     Classifies the job as build, migration, or refactor and takes the
     appropriate action to start it again.
+
+    Build jobs accept:
+      - ``{"resume": true}`` — resume from last checkpoint phase
+      - ``{"mode": "retry_failed"}`` — retry only failed/skipped file (+ failed feature) tasks
+      - For ``partially_completed``, ``retry_failed`` is the default when mode/resume omitted
     """
     job = job_db.get_job(job_id)
     if not job:
@@ -2263,13 +2285,24 @@ def restart_job(job_id):
     if job['status'] not in _RESTARTABLE_STATUSES:
         return jsonify({
             'error': f"Job is not restartable (status={job['status']}). "
-                     "Only completed, failed, cancelled, or quota_exhausted jobs can be restarted."
+                     "Only completed, partially_completed, failed, cancelled, "
+                     "or quota_exhausted jobs can be restarted."
         }), 400
 
     phase = job.get('current_phase', '')
     vision = job.get('vision', '')
     body = request.get_json(silent=True) or {}
     resume = body.get('resume', False) is True
+    mode = (body.get('mode') or '').strip().lower()
+    retry_failed = mode == 'retry_failed'
+    if (
+        not resume
+        and not retry_failed
+        and job['status'] == 'partially_completed'
+        and mode in ('', 'retry_failed')
+    ):
+        # Default for partial build jobs: retry incomplete tasks only
+        retry_failed = True
 
     # ── Migration job ─────────────────────────────────────────────────────
     if phase in _MIGRATION_JOB_PHASES or vision.startswith('[MTA]'):
@@ -2395,11 +2428,20 @@ def restart_job(job_id):
     thread = threading.Thread(
         target=run_job_async,
         args=(job_id, vision, config),
-        kwargs={'resume': resume},
+        kwargs={'resume': resume, 'retry_failed': retry_failed},
         daemon=True,
     )
     thread.start()
-    return jsonify({'status': 'restarted', 'job_type': 'build', 'job_id': job_id}), 202
+    build_mode = (
+        'retry_failed' if retry_failed
+        else ('resume' if resume else 'full')
+    )
+    return jsonify({
+        'status': 'restarted',
+        'job_type': 'build',
+        'job_id': job_id,
+        'mode': build_mode,
+    }), 202
 
 
 @app.route('/api/jobs/<job_id>/cancel', methods=['POST'])

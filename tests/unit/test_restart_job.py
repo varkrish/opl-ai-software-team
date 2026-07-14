@@ -231,6 +231,69 @@ class TestRestartEndpoint:
         call_kw = MockThread.call_args[1]
         assert call_kw.get("kwargs", {}).get("resume") is not True
 
+    def test_restart_partially_completed_defaults_to_retry_failed(self, tmp_path):
+        """partially_completed build jobs default to mode=retry_failed."""
+        job_db = _make_db(tmp_path)
+        job_id = _create_job(job_db, "partially_completed", "completed", "Build a REST API")
+
+        from crew_studio.llamaindex_web_app import app
+        with app.test_client() as client:
+            with patch("crew_studio.llamaindex_web_app.job_db", job_db), \
+                 patch("crew_studio.llamaindex_web_app.threading.Thread") as MockThread:
+                MockThread.return_value.start = MagicMock()
+                resp = client.post(f"/api/jobs/{job_id}/restart")
+
+        assert resp.status_code == 202
+        data = resp.get_json()
+        assert data["job_type"] == "build"
+        assert data["mode"] == "retry_failed"
+        call_kw = MockThread.call_args[1]
+        assert call_kw.get("kwargs", {}).get("retry_failed") is True
+
+    def test_restart_build_with_explicit_retry_failed_mode(self, tmp_path):
+        """POST /restart with mode=retry_failed passes retry_failed=True."""
+        job_db = _make_db(tmp_path)
+        job_id = _create_job(job_db, "failed", "error", "Build a REST API")
+
+        from crew_studio.llamaindex_web_app import app
+        with app.test_client() as client:
+            with patch("crew_studio.llamaindex_web_app.job_db", job_db), \
+                 patch("crew_studio.llamaindex_web_app.threading.Thread") as MockThread:
+                MockThread.return_value.start = MagicMock()
+                resp = client.post(
+                    f"/api/jobs/{job_id}/restart",
+                    json={"mode": "retry_failed"},
+                    content_type="application/json",
+                )
+
+        assert resp.status_code == 202
+        assert resp.get_json()["mode"] == "retry_failed"
+        call_kw = MockThread.call_args[1]
+        assert call_kw.get("kwargs", {}).get("retry_failed") is True
+        assert call_kw.get("kwargs", {}).get("resume") is not True
+
+    def test_restart_build_resume_not_retry_failed(self, tmp_path):
+        """Explicit resume=true keeps mode=resume (not retry_failed)."""
+        job_db = _make_db(tmp_path)
+        job_id = _create_job(job_db, "failed", "error", "Build a REST API")
+
+        from crew_studio.llamaindex_web_app import app
+        with app.test_client() as client:
+            with patch("crew_studio.llamaindex_web_app.job_db", job_db), \
+                 patch("crew_studio.llamaindex_web_app.threading.Thread") as MockThread:
+                MockThread.return_value.start = MagicMock()
+                resp = client.post(
+                    f"/api/jobs/{job_id}/restart",
+                    json={"resume": True},
+                    content_type="application/json",
+                )
+
+        assert resp.status_code == 202
+        assert resp.get_json()["mode"] == "resume"
+        call_kw = MockThread.call_args[1]
+        assert call_kw.get("kwargs", {}).get("resume") is True
+        assert call_kw.get("kwargs", {}).get("retry_failed") is not True
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # resume_pending_jobs clears stale migration_issues

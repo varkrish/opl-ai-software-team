@@ -11,6 +11,12 @@ from ..tools import FileWriterTool, FileReaderTool, create_workspace_file_tools,
 from ..tools.tool_loader import load_tools
 from ..config import ConfigLoader
 from ..utils.prompt_loader import load_prompt
+from ..utils.output_parser import (
+    is_llm_stub_content,
+    is_valid_markdown_artifact,
+    looks_like_raw_agent_dump,
+    clean_llm_response_text,
+)
 from ..utils.prompt_budget import PromptBudget
 from ..utils.vision_stack_analysis import (
     build_stack_selection_brief,
@@ -197,10 +203,27 @@ You consider the project vision and constraints when making decisions."""
         import re
         match = re.search(rf'<{xml_tag}>\s*(.*?)\s*</{xml_tag}>', response_text, re.DOTALL)
         if match:
-            path.write_text(match.group(1).strip(), encoding="utf-8")
+            content = match.group(1).strip()
+            if not is_llm_stub_content(content) and not looks_like_raw_agent_dump(content):
+                path.write_text(content, encoding="utf-8")
+                return
+            logger.warning(
+                "%s <%s> content is stub/unparsed — skipping write",
+                path.name, xml_tag,
+            )
         elif not path.exists():
-            logger.warning("%s not found and <%s> tag missing. Writing full response.", path.name, xml_tag)
-            path.write_text(response_text, encoding="utf-8")
+            candidate = clean_llm_response_text(response_text)
+            if (
+                not is_llm_stub_content(candidate)
+                and not looks_like_raw_agent_dump(response_text)
+                and is_valid_markdown_artifact(candidate, min_chars=80, min_lines=3)
+            ):
+                path.write_text(candidate, encoding="utf-8")
+            else:
+                logger.warning(
+                    "%s not found and <%s> tag missing; response is stub/unparsed — skipping write",
+                    path.name, xml_tag,
+                )
 
     # ------------------------------------------------------------------
     # Pass 1 — Stack selection (technologies + justification, ~short)

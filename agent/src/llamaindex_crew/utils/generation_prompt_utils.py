@@ -33,6 +33,11 @@ _CRITICAL_ISSUE_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"import.*could not be resolved", re.I),
     re.compile(r"undefined name", re.I),
     re.compile(r"was not created", re.I),
+    re.compile(r"File is empty", re.I),
+    re.compile(r"Only \d+ non-comment lines", re.I),
+    re.compile(r"Only \d+ chars of content", re.I),
+    re.compile(r"Placeholder/stub", re.I),
+    re.compile(r"pass-only method", re.I),
 )
 
 

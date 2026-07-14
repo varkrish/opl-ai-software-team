@@ -76,6 +76,26 @@ class CodeCompletenessValidator:
                 return {"complete": True, "issues": [], "file": str(path)}
             return {"complete": False, "issues": ["File is empty"], "file": str(path)}
 
+        from ..utils.output_parser import is_agent_planning_monologue
+        if path.suffix.lower() in _SOURCE_EXTENSIONS and is_agent_planning_monologue(
+            content, file_path=path.name,
+        ):
+            return {
+                "complete": False,
+                "issues": ["File contains unparsed agent planning monologue"],
+                "file": str(path),
+            }
+
+        from ..utils.output_parser import is_llm_stub_content, looks_like_raw_agent_dump
+        if is_llm_stub_content(content, file_path=path.name) or looks_like_raw_agent_dump(
+            content, file_path=path.name,
+        ):
+            return {
+                "complete": False,
+                "issues": ["File contains unparsed LLM channel/stub output"],
+                "file": str(path),
+            }
+
         is_init = path.name == "__init__.py"
         lines = [l for l in content.splitlines() if l.strip() and not l.strip().startswith(("#", "//", "/*", "*"))]
 
@@ -85,10 +105,19 @@ class CodeCompletenessValidator:
         if not is_init and len(content.strip()) < _MIN_MEANINGFUL_CHARS:
             issues.append(f"Only {len(content.strip())} chars of content (minimum {_MIN_MEANINGFUL_CHARS})")
 
+        structural_ok = (
+            is_init
+            or (len(lines) >= _MIN_MEANINGFUL_LINES and len(content.strip()) >= _MIN_MEANINGFUL_CHARS)
+        )
+
         for pattern, label in _STUB_PATTERNS:
             matches = pattern.findall(content)
-            if matches:
-                issues.append(f"Found {len(matches)} {label}(s)")
+            if not matches:
+                continue
+            # TODOs in otherwise complete files are acceptable during iterative dev.
+            if label == "TODO comment" and structural_ok:
+                continue
+            issues.append(f"Found {len(matches)} {label}(s)")
 
         if cls._is_placeholder_component(content, path.suffix):
             issues.append("Placeholder/stub component with no real logic")

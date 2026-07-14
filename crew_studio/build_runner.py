@@ -23,11 +23,15 @@ def run_build_pipeline(
     progress_callback: Callable[[str, int, Optional[str]], None],
     job_db: Any,
     resume: bool = False,
+    retry_failed: bool = False,
 ) -> Dict[str, Any]:
     """
     Run the SoftwareDevWorkflow on the given workspace with the given vision.
     Sets thread-local WORKSPACE_PATH for file tools (thread-safe for concurrent jobs).
     Caller is responsible for mark_completed/mark_failed based on return value or exception.
+
+    When *retry_failed* is True, only incomplete file/feature tasks are retried
+    (no meta/PO/architect). *resume* is ignored in that mode.
     """
     from src.llamaindex_crew.workflows.software_dev_workflow import SoftwareDevWorkflow
     from src.llamaindex_crew.tools.file_tools import set_thread_workspace, clear_thread_workspace
@@ -84,8 +88,12 @@ def run_build_pipeline(
             progress_callback=progress_callback,
             job_db=job_db,
         )
-        progress_callback("meta", 10, "Starting Meta phase...")
-        results = workflow.run(resume=resume)
+        if retry_failed:
+            progress_callback("development", 70, "Retrying failed/skipped tasks...")
+            results = workflow.retry_incomplete_tasks()
+        else:
+            progress_callback("meta", 10, "Starting Meta phase...")
+            results = workflow.run(resume=resume)
 
         _append_log(
             f"\n{'='*80}",

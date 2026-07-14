@@ -233,6 +233,52 @@ IMPORTANT INSTRUCTIONS:
         elif hasattr(self.agent, 'memory') and hasattr(self.agent.memory, 'reset'):
             self.agent.memory.reset()
 
+    def chat_simple(self, message: str) -> str:
+        """One-shot LLM call without tools — runtime fallback when ReAct fails.
+
+        Does NOT change agent construction or ``supports_react`` config; use only
+        when a tool-enabled agent produced unparsed channel/stub output.
+        """
+        from llama_index.core.llms import ChatMessage
+
+        budget_status = self.budget_tracker.check_budget_safe(self.budget_tracker.project_id)
+        if not budget_status["allowed"]:
+            raise ValueError(f"Budget exceeded: {budget_status['message']}")
+
+        start_prompt_tokens = self.token_counter.prompt_llm_token_count
+        start_completion_tokens = self.token_counter.completion_llm_token_count
+
+        system = (
+            "You are an AI assistant. You have NO tools available.\n"
+            "Provide your response directly. Do NOT use Thought/Action/Observation formats.\n"
+            "Do NOT use channel tokens or tool-call markup. "
+            "Output ONLY the structured format requested in the user message."
+        )
+        messages = [
+            ChatMessage(role="system", content=system),
+            ChatMessage(role="user", content=message),
+        ]
+        logger.info("Starting simple-mode one-shot (%s)", self.role)
+        resp = self.llm.chat(messages)
+        response = str(resp)
+        logger.info("Simple-mode one-shot completed (%s)", self.role)
+
+        try:
+            end_prompt_tokens = self.token_counter.prompt_llm_token_count
+            end_completion_tokens = self.token_counter.completion_llm_token_count
+            prompt_delta = end_prompt_tokens - start_prompt_tokens
+            completion_delta = end_completion_tokens - start_completion_tokens
+            if prompt_delta > 0 or completion_delta > 0:
+                self.budget_tracker.record_usage(
+                    self.budget_tracker.project_id,
+                    prompt_tokens=prompt_delta,
+                    completion_tokens=completion_delta,
+                )
+        except Exception:
+            logger.debug("Budget tracking failed for chat_simple", exc_info=True)
+
+        return response
+
     def chat(self, message: str, **kwargs) -> str:
         """
         Chat with the agent

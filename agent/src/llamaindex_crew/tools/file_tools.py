@@ -242,6 +242,26 @@ def file_writer(file_path: str, content: str, workspace_path: Optional[str] = No
         # Normalize LLM serialization artifacts (literal \n etc.)
         content = _normalize_content(content, file_path)
 
+        from ..utils.output_parser import (
+            is_agent_planning_monologue,
+            is_llm_stub_content,
+            looks_like_raw_agent_dump,
+        )
+        if (
+            is_llm_stub_content(content, file_path=file_path)
+            or is_agent_planning_monologue(content, file_path=file_path)
+            or looks_like_raw_agent_dump(content, file_path=file_path)
+        ):
+            logger.warning(
+                "file_writer REJECTED %s — content is unparsed LLM output (%d chars)",
+                file_path, len(content),
+            )
+            return (
+                "❌ Rejected: content looks like unparsed LLM output "
+                "(channel tokens or meta-commentary), not real file content. "
+                "Output the complete file via file_writer or a code block."
+            )
+
         # Create full path
         full_path = workspace / file_path
         full_path.parent.mkdir(parents=True, exist_ok=True)

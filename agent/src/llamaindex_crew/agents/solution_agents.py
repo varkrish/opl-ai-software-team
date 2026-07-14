@@ -14,6 +14,12 @@ from ..tools.tldr_tools import _TLDR_AGENT_BACKSTORY, append_tldr_tools
 from ..tools.tool_loader import load_tools
 from ..utils.llm_config import get_supports_react
 from ..utils.prompt_loader import load_prompt
+from ..utils.output_parser import (
+    clean_llm_response_text,
+    is_llm_stub_content,
+    is_valid_markdown_artifact,
+    looks_like_raw_agent_dump,
+)
 from .base_agent import BaseLlamaIndexAgent
 
 logger = logging.getLogger(__name__)
@@ -152,11 +158,45 @@ class SolutionArchitectAgent:
             if content_after == content_before:
                 # The agent didn't write solution_spec.md via its file tool this
                 # pass (no tools available, or it just replied in chat) — persist
-                # the raw response so revision feedback isn't silently discarded
-                # on subsequent passes. Always overwrite here: on revision passes
-                # the file already exists from a prior pass and must be replaced,
-                # not skipped.
-                spec_path.write_text(result.strip() + "\n", encoding="utf-8")
+                # cleaned markdown when it looks like a real spec, not channel stubs.
+                candidate = clean_llm_response_text(result)
+                if (
+                    not is_llm_stub_content(candidate)
+                    and not looks_like_raw_agent_dump(result)
+                    and is_valid_markdown_artifact(candidate, min_chars=80, min_lines=3)
+                ):
+                    spec_path.write_text(candidate.strip() + "\n", encoding="utf-8")
+                elif get_supports_react("manager") and hasattr(self.agent, "chat_simple"):
+                    logger.warning(
+                        "Solution architect ReAct stub (%d chars) — trying chat_simple fallback",
+                        len(result),
+                    )
+                    self.agent.reset_chat()
+                    simple_result = str(self.agent.chat_simple(
+                        prompt
+                        + "\n\nOutput ONLY the complete solution_spec.md markdown "
+                        "(start with `# Solution Specification`). "
+                        "No tools, no commentary, no channel tokens."
+                    ))
+                    simple_candidate = clean_llm_response_text(simple_result)
+                    if (
+                        not is_llm_stub_content(simple_candidate)
+                        and not looks_like_raw_agent_dump(simple_result)
+                        and is_valid_markdown_artifact(simple_candidate, min_chars=80, min_lines=3)
+                    ):
+                        spec_path.write_text(simple_candidate.strip() + "\n", encoding="utf-8")
+                    else:
+                        logger.warning(
+                            "Solution architect chat_simple fallback also unparsed (%d chars) "
+                            "— skipping fallback write",
+                            len(simple_result),
+                        )
+                else:
+                    logger.warning(
+                        "Solution architect pass did not write solution_spec.md via tool; "
+                        "response is stub/unparsed output (%d chars) — skipping fallback write",
+                        len(result),
+                    )
         return result
 
 

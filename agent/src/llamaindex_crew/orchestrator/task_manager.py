@@ -27,25 +27,26 @@ from ..utils.vision_stack_analysis import (
 
 logger = logging.getLogger(__name__)
 
-VALID_FILE_EXTENSIONS = frozenset({
-    'js', 'jsx', 'ts', 'tsx', 'mjs', 'cjs',
-    'py', 'pyw', 'pyi',
-    'java', 'kt', 'scala', 'groovy', 'gradle',
-    'go', 'rs', 'rb', 'php', 'swift', 'dart',
-    'cpp', 'c', 'h', 'hpp', 'cc', 'cxx',
-    'cs', 'vb', 'fs',
-    'json', 'yaml', 'yml', 'toml', 'ini', 'cfg',
-    'xml', 'xsd', 'xsl', 'wsdl', 'html', 'htm', 'css', 'scss', 'less', 'sass',
-    'md', 'txt', 'rst', 'adoc',
-    'sql', 'graphql', 'gql', 'proto',
-    'sh', 'bash', 'zsh', 'bat', 'ps1', 'cmd',
-    'config', 'conf', 'env', 'properties', 'lock',
-    'gitignore', 'dockerignore', 'editorconfig',
-    'dockerfile', 'containerfile',
-    'podfile', 'xcworkspace',
-    'vue', 'svelte', 'astro',
-    'tf', 'hcl',
-    'crt', 'pem', 'key', 'cer',
+# Blacklist for registration: reject dangerous binaries and image assets only.
+# Any other extension (go.mod, Cargo.lock, .svg, …) is accepted.
+REJECTED_FILE_EXTENSIONS = frozenset({
+    # Dangerous / executable / native binaries
+    'exe', 'dll', 'so', 'dylib', 'o', 'a', 'bin', 'com',
+    'bat', 'cmd', 'msi', 'scr',
+    'class', 'pyc', 'pyo', 'wasm',
+    # Pictures / media images
+    'png', 'jpg', 'jpeg', 'gif', 'webp', 'ico', 'bmp',
+    'tif', 'tiff', 'heic', 'avif',
+})
+
+# Extensionless basenames that are still real project artifacts.
+EXTENSIONLESS_FILENAMES = frozenset({
+    'dockerfile', 'containerfile', 'makefile', 'gnumakefile',
+    'gemfile', 'procfile', 'rakefile', 'brewfile',
+    'license', 'licence', 'notice', 'authors', 'contributors',
+    'copying', 'changelog', 'changes', 'history',
+    'cargo.lock',  # defensive; normally matched via .lock extension
+    'pipfile', 'vagrantfile', 'jenkinsfile',
 })
 
 
@@ -95,18 +96,33 @@ def _trim_existing_files(
 
 
 def _is_valid_file_path(name: str) -> bool:
-    """Return True if *name* looks like a real file path, not a numbered list item or garbage."""
+    """Return True if *name* looks like a real file path, not numbered-list junk or a blacklisted type.
+
+    Registration gate is a blacklist (dangerous binaries + images). Unknown
+    extensions are accepted so stacks like go.mod / go.sum register as tasks.
+    Extensionless names are accepted only when the basename is in
+    EXTENSIONLESS_FILENAMES (Dockerfile, Makefile, …).
+    """
     if not name or len(name) < 2:
         return False
     # Reject purely numeric prefixes like "1.", "2.", "23."
     stem = name.rsplit('.', 1)[0] if '.' in name else name
     if stem.isdigit():
         return False
-    # Must have a recognised extension (the part after the last dot)
-    if '.' not in name:
+    basename = name.rsplit('/', 1)[-1]
+    # Dotfiles / multi-dot names: treat last segment after '.' as extension
+    # unless the name is a known extensionless artifact (e.g. CMakeLists.txt is listed).
+    if '.' not in basename:
+        return basename.lower() in EXTENSIONLESS_FILENAMES
+    # Names like "CMakeLists.txt" may be listed extensionless-style; also allow via ext
+    if basename.lower() in EXTENSIONLESS_FILENAMES:
+        return True
+    ext = basename.rsplit('.', 1)[1].lower()
+    if not ext:
         return False
-    ext = name.rsplit('.', 1)[1].lower()
-    return ext in VALID_FILE_EXTENSIONS
+    if ext in REJECTED_FILE_EXTENSIONS:
+        return False
+    return True
 
 
 class TaskStatus(Enum):
@@ -427,6 +443,7 @@ class TaskManager:
     def validate_all_tasks_completed(self, workspace_path: Path = None) -> Dict[str, Any]:
         """Validate that all required tasks were completed, with optional physical verification"""
         if workspace_path:
+            self.reconcile_corrupt_completed_files(workspace_path)
             self.reconcile_with_filesystem(workspace_path)
             
         conn = sqlite3.connect(self.db_path)
@@ -454,37 +471,211 @@ class TaskManager:
             'failed_tasks': failed
         }
 
+    @staticmethod
+    def resolve_planned_file_on_disk(workspace_path: Path, planned_path: str) -> Optional[Path]:
+        """Resolve a planned relative file path on disk without ambiguous basename matches.
+
+        Resolution order:
+        1. Exact relative path under the workspace
+        2. Unique suffix match (e.g. ``src/main.py`` → ``backend/src/main.py``)
+        3. Basename match only when the planned path has no directory component and
+           exactly one file in the workspace shares that basename
+        """
+        if not planned_path or not workspace_path.exists():
+            return None
+
+        planned = Path(planned_path.strip().lstrip("/"))
+        exact = workspace_path / planned
+        if exact.is_file():
+            return exact
+
+        planned_posix = planned.as_posix()
+        suffix_matches: List[Path] = []
+        for candidate in workspace_path.rglob("*"):
+            if not candidate.is_file():
+                continue
+            rel = candidate.relative_to(workspace_path).as_posix()
+            if rel == planned_posix or rel.endswith("/" + planned_posix):
+                suffix_matches.append(candidate)
+
+        if len(suffix_matches) == 1:
+            return suffix_matches[0]
+        if len(suffix_matches) > 1:
+            return min(
+                suffix_matches,
+                key=lambda p: len(p.relative_to(workspace_path).parts),
+            )
+
+        # Basename-only fallback is unsafe for nested paths (e.g. multiple handler.go).
+        if len(planned.parts) > 1:
+            return None
+
+        basename = planned.name
+        basename_matches = [
+            p for p in workspace_path.rglob("*")
+            if p.is_file() and p.name == basename
+        ]
+        if len(basename_matches) == 1:
+            return basename_matches[0]
+        return None
+
     def reconcile_with_filesystem(self, workspace_path: Path):
         """Cross-check incomplete file creation tasks with the actual filesystem"""
         if not workspace_path.exists():
             return
-            
+
         incomplete_tasks = self.get_incomplete_tasks()
         if not incomplete_tasks:
             return
-            
-        # Get all files in workspace for quick lookup
-        all_files = {p.name: p for p in workspace_path.rglob("*") if p.is_file()}
-        
+
         for task in incomplete_tasks:
+            if task.task_type != "file_creation":
+                continue
+            file_path = (task.metadata or {}).get("file_path", "")
+            if not file_path:
+                continue
+
+            found = self.resolve_planned_file_on_disk(workspace_path, file_path)
+            if found is None:
+                continue
+
+            if not self._planned_file_is_complete(found):
+                continue
+
+            rel = found.relative_to(workspace_path)
+            logger.info(
+                "Self-healing: Found file %s for task %s at %s",
+                file_path, task.task_id, rel,
+            )
+            self.update_task_status(
+                task.task_id, "completed", f"File found on disk at {rel.as_posix()}"
+            )
+
+    def _planned_file_is_complete(self, file_path: Path) -> bool:
+        """Return True when an on-disk file passes completeness validation."""
+        from .code_validator import CodeCompletenessValidator
+
+        result = CodeCompletenessValidator.validate_file(file_path)
+        return bool(result.get("complete", True))
+
+    def reconcile_corrupt_completed_files(self, workspace_path: Path) -> int:
+        """Mark completed file tasks as failed when on-disk content is truncated or corrupt."""
+        if not workspace_path.exists():
+            return 0
+
+        from .code_validator import CodeCompletenessValidator
+
+        failed = 0
+        for task in self.get_all_tasks():
+            if task.task_type != "file_creation":
+                continue
+            if (task.status or "").lower() != TaskStatus.COMPLETED.value:
+                continue
+            file_path = (task.metadata or {}).get("file_path", "")
+            if not file_path:
+                continue
+
+            found = self.resolve_planned_file_on_disk(workspace_path, file_path)
+            if found is None:
+                continue
+
+            result = CodeCompletenessValidator.validate_file(found)
+            if result.get("complete", True):
+                continue
+
+            issues = "; ".join(result.get("issues", []))
+            logger.warning(
+                "Corrupt file task %s (%s): %s",
+                task.task_id, file_path, issues,
+            )
+            self.update_task_status(
+                task.task_id,
+                "failed",
+                f"File {file_path} is incomplete or corrupt: {issues}",
+            )
+            failed += 1
+        return failed
+
+    def finalize_incomplete_tasks(self, workspace_path: Path) -> None:
+        """Close out remaining tasks at workflow end with accurate bookkeeping."""
+        remaining = self.get_incomplete_tasks()
+        if not remaining:
+            return
+
+        for task in remaining:
             if task.task_type == "file_creation":
                 file_path = (task.metadata or {}).get("file_path", "")
                 if not file_path:
                     continue
-                
-                # Check exact path
-                full_path = workspace_path / file_path
-                if full_path.exists():
-                    logger.info(f"🛡️ Self-healing: Found file {file_path} for task {task.task_id} via physical check")
-                    self.update_task_status(task.task_id, "completed", f"File found on disk at {file_path}")
+
+                found = self.resolve_planned_file_on_disk(workspace_path, file_path)
+                if found is not None:
+                    if not self._planned_file_is_complete(found):
+                        issues = ""
+                        from .code_validator import CodeCompletenessValidator
+                        check = CodeCompletenessValidator.validate_file(found)
+                        issues = "; ".join(check.get("issues", []))
+                        logger.info(
+                            "Finalize: task %s file at %s failed completeness: %s",
+                            task.task_id, file_path, issues,
+                        )
+                        self.update_task_status(
+                            task.task_id,
+                            "failed",
+                            f"File {file_path} is incomplete or corrupt: {issues}",
+                        )
+                        continue
+
+                    rel = found.relative_to(workspace_path)
+                    logger.info(
+                        "Finalize: task %s matched planned file at %s",
+                        task.task_id, rel,
+                    )
+                    self.update_task_status(
+                        task.task_id,
+                        "completed",
+                        f"File found at {rel.as_posix()}",
+                    )
                     continue
-                
-                # Check basename fallback (if agent moved it)
-                basename = Path(file_path).name
-                if basename in all_files:
-                    found_path = all_files[basename].relative_to(workspace_path)
-                    logger.info(f"🛡️ Self-healing: Found file {basename} at {found_path} for task {task.task_id} via basename check")
-                    self.update_task_status(task.task_id, "completed", f"File found on disk at {found_path}")
+
+                if task.status == TaskStatus.FAILED.value:
+                    continue
+
+                logger.info(
+                    "Finalize: planned file missing for task %s (%s)",
+                    task.task_id, file_path,
+                )
+                self.update_task_status(
+                    task.task_id,
+                    "failed",
+                    f"Planned file {file_path} was not created",
+                )
+            elif task.task_type == "feature":
+                if task.status == TaskStatus.FAILED.value:
+                    logger.info(
+                        "Finalize: feature task %s remains failed",
+                        task.task_id,
+                    )
+                    continue
+                logger.info(
+                    "Finalize: feature task %s was not implemented",
+                    task.task_id,
+                )
+                self.update_task_status(
+                    task.task_id,
+                    "failed",
+                    "Feature was planned but not implemented",
+                )
+            elif task.status == TaskStatus.REGISTERED.value:
+                logger.info(
+                    "Finalize: task %s (type=%s) never started",
+                    task.task_id, task.task_type,
+                )
+                self.update_task_status(
+                    task.task_id,
+                    "failed",
+                    "Task was planned but never started",
+                )
     
     _SOURCE_FILE_EXTENSIONS = frozenset({
         '.java', '.py', '.pyw', '.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs',
@@ -1067,17 +1258,25 @@ class TaskManager:
                     found_any = True
                     continue
 
-                # 2. Robust fallback: Search by metadata file_path or basename
-                target_basename = Path(file_path).name
+                # 2. Match pending tasks by exact planned path or suffix (reorganization)
+                output_posix = Path(file_path).as_posix()
                 for task in pending_tasks:
                     task_file_path = (task.metadata or {}).get("file_path", "")
                     if not task_file_path:
                         continue
-                        
-                    # Match by full path or just basename if it's a file creation task
-                    if task_file_path == file_path or Path(task_file_path).name == target_basename:
-                        logger.info(f"🎯 Found fallback completion marker for task: {task.task_id} (matched {file_path} to {task_file_path})")
-                        self.update_task_status(task.task_id, "completed", f"File created: {file_path} (matched via {task_file_path})")
+
+                    task_posix = Path(task_file_path).as_posix()
+                    if output_posix == task_posix or output_posix.endswith("/" + task_posix):
+                        logger.info(
+                            "Found completion marker for task: %s "
+                            "(output %s matches planned %s)",
+                            task.task_id, file_path, task_file_path,
+                        )
+                        self.update_task_status(
+                            task.task_id,
+                            "completed",
+                            f"File created: {file_path} (matched via {task_file_path})",
+                        )
                         found_any = True
                         break
         
@@ -1091,6 +1290,39 @@ class TaskManager:
             self.mark_task_executed(task_id, task_status, error_message)
         except ValueError:
             logger.error(f"Invalid task status: {status}")
+
+    def reset_tasks_for_retry(self, task_ids: List[str]) -> int:
+        """Reset tasks to registered so they can be claimed again by get_next_actionable_task."""
+        if not task_ids:
+            return 0
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        reset = 0
+        reset_ids: List[str] = []
+        for task_id in task_ids:
+            cursor.execute(
+                """
+                UPDATE tasks
+                SET status = ?, error_message = ?, updated_at = CURRENT_TIMESTAMP,
+                    started_at = NULL, completed_at = NULL
+                WHERE task_id = ? AND project_id = ?
+                """,
+                (
+                    TaskStatus.REGISTERED.value,
+                    "Reset for retry",
+                    task_id,
+                    self.project_id,
+                ),
+            )
+            if cursor.rowcount:
+                reset += 1
+                reset_ids.append(task_id)
+        conn.commit()
+        conn.close()
+        for task_id in reset_ids:
+            self._log_event(task_id, "reset_for_retry", {})
+        logger.info("Reset %d task(s) for retry", reset)
+        return reset
 
     def normalize_file_path_for_task_id(self, file_path: str) -> str:
         """Normalize file path for use in task ID"""
