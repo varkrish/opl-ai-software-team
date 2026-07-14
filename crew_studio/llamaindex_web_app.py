@@ -19,7 +19,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, Optional
 from urllib.parse import unquote
-from flask import Flask, render_template, request, jsonify, send_from_directory, send_file
+from flask import Flask, render_template, request, jsonify, send_from_directory, send_file, Response
 from flask_cors import CORS
 from dotenv import load_dotenv
 
@@ -1987,6 +1987,8 @@ def _resolve_job_workspace(job_id: str, stored_path: str) -> Optional[Path]:
 
 def _should_exclude_from_download(rel_path_str: str, name: str) -> bool:
     """Return True if this path should be omitted from the download ZIP."""
+    if name in ("execution.log", "crew_errors.log"):
+        return True
     from crew_studio.workspace_publish import should_exclude_from_publish
     return should_exclude_from_publish(rel_path_str, name)
 
@@ -2458,6 +2460,73 @@ def cancel_job(job_id):
     job_db.mark_cancelled(job_id)
     
     return jsonify({'status': 'cancelled'})
+
+
+@app.route('/api/jobs/<job_id>/logs', methods=['GET'])
+def get_job_logs(job_id):
+    """Retrieve job execution logs"""
+    job = job_db.get_job(job_id)
+    if not job:
+        return jsonify({'error': 'Job not found'}), 404
+        
+    workspace_path = Path(job['workspace_path'])
+    log_path = workspace_path / "execution.log"
+    if not log_path.exists():
+        return jsonify({'error': 'Log file not found'}), 404
+        
+    try:
+        content = log_path.read_text(encoding="utf-8", errors="replace")
+        return content, 200, {'Content-Type': 'text/plain; charset=utf-8'}
+    except Exception as e:
+        logger.error("Failed to read log file: %s", e)
+        return jsonify({'error': f'Failed to read logs: {str(e)}'}), 500
+
+
+@app.route('/api/jobs/<job_id>/logs/stream', methods=['GET'])
+def stream_job_logs(job_id):
+    """Stream job execution logs in real-time via Server-Sent Events (SSE)"""
+    import time
+    job = job_db.get_job(job_id)
+    if not job:
+        return jsonify({'error': 'Job not found'}), 404
+        
+    workspace_path = Path(job['workspace_path'])
+    log_path = workspace_path / "execution.log"
+    
+    def generate_log_stream():
+        # Wait up to 15 seconds for the log file to be created initially
+        for _ in range(30):
+            if log_path.exists():
+                break
+            time.sleep(0.5)
+            
+        if not log_path.exists():
+            yield "event: error\ndata: log file not found\n\n"
+            return
+            
+        with open(log_path, "r", encoding="utf-8", errors="replace") as f:
+            # Send initial contents of the log
+            initial_content = f.read()
+            if initial_content:
+                yield f"event: log\ndata: {json.dumps(initial_content)}\n\n"
+                
+            # Tail the file for new outputs
+            while True:
+                line = f.readline()
+                if not line:
+                    # Check if job is still active
+                    current_job = job_db.get_job(job_id)
+                    if not current_job or current_job.get("status") not in ("queued", "starting", "running"):
+                        # Read one last time to capture trailing writes
+                        remaining = f.read()
+                        if remaining:
+                            yield f"event: log\ndata: {json.dumps(remaining)}\n\n"
+                        break
+                    time.sleep(0.5)
+                    continue
+                yield f"event: log\ndata: {json.dumps(line)}\n\n"
+                
+    return Response(generate_log_stream(), mimetype="text/event-stream")
 
 
 if __name__ == '__main__':

@@ -65,7 +65,8 @@ class CodeSafetyChecker:
                 line_num = code[:match.start()].count('\n') + 1
                 issues.append(f"Line {line_num}: {description} - '{match.group(0)}'")
                 # Some patterns are critical and should block
-                if 'eval' in description or 'exec' in description or 'system' in description:
+                critical_descriptions = ['Code evaluation', 'Code execution', 'Direct system command execution']
+                if description in critical_descriptions:
                     blocked = True
         
         return {

@@ -1,24 +1,7 @@
-# User Stories
+### User Stories
 
-## Primary Actor: Python Developer/Learner
-
-### Story 1: Perform Basic Arithmetic Operations
-As a Python developer/learner,
-I want to add and subtract numbers using a simple calculator,
-so that I can perform basic arithmetic operations efficiently.
-
-**Acceptance Criteria:**
-- The calculator should correctly return the sum of two numbers.
-- The calculator should correctly return the difference between two numbers.
-- The calculator should handle zero and negative numbers.
-- The calculator should provide clear and accurate results.
-
-### Story 2: Test Calculator Functionality
-As a developer,
-I want to test the calculator's functionality,
-so that I can ensure it works as expected.
-
-**Acceptance Criteria:**
-- Include unit tests using pytest.
-- Test all valid cases, edge cases, and invalid inputs.
-- Tests should pass consistently.
+1. **As a developer**, I want a `Calculator` class with an `add(a, b)` method so that I can compute the sum of two numbers.
+2. **As a developer**, I want a `Calculator` class with a `subtract(a, b)` method so that I can compute the difference between two numbers.
+3. **As a QA engineer**, I need unit tests for the `add` and `subtract` methods using `pytest` to ensure they work correctly for positive, negative, and zero values.
+4. **As a maintainer**, I want a `requirements.txt` file listing dependencies so that the project can be set up consistently.
+5. **As a new contributor**, I need a `README.md` with instructions on how to run the calculator and execute the tests.

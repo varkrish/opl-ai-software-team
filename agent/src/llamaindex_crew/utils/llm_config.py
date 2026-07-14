@@ -718,7 +718,7 @@ class GenericLlamaLLM(LLM):
 
             # assistant message with tool_calls: preserve tool_calls, never merge
             if original_role == "assistant" and extra.get("tool_calls"):
-                entry = {"role": "assistant", "content": content or None, "tool_calls": extra["tool_calls"]}
+                entry = {"role": "assistant", "content": content or "", "tool_calls": extra["tool_calls"]}
                 formatted_messages.append(entry)
                 last_original_role = "assistant"
                 continue

@@ -990,6 +990,12 @@ def write_files_from_response(
 
     if entries:
         logger.info("%ssimple mode: writing %d file(s) via %s", prefix, len(entries), strategy)
+        from .execution_log import log_pipeline_event
+        log_pipeline_event(
+            "simple_mode_write",
+            f"strategy={strategy} files={len(entries)}",
+            workspace_path=ws,
+        )
         for entry in entries:
             file_path = entry["file_path"]
             content = entry.get("content", "")

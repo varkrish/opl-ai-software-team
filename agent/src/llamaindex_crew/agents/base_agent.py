@@ -72,8 +72,13 @@ class BaseLlamaIndexAgent:
             self.llm = get_llm_for_agent(agent_type)
         else:
             self.llm = llm
-            
-        self.llm.callback_manager = CallbackManager([self.token_counter])
+        handlers = [self.token_counter]
+        from llama_index.core import Settings
+        if Settings.callback_manager and Settings.callback_manager.handlers:
+            for handler in Settings.callback_manager.handlers:
+                if handler not in handlers:
+                    handlers.append(handler)
+        self.llm.callback_manager = CallbackManager(handlers)
         
         # Create agent instance
         self.agent = self._create_agent()

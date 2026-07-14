@@ -20,8 +20,10 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import shutil
 import subprocess
+import sys
 from functools import partial
 from pathlib import Path
 from typing import Any, List, Optional
@@ -89,6 +91,55 @@ _EXT_LANG_MAP: dict[str, str] = {
 
 _SKIP_DIRS = {".git", "__pycache__", "node_modules", ".pytest_cache", "venv", ".venv"}
 
+_TLDR_BIN_CACHE: Optional[str] = None
+
+
+def _is_llm_tldr(binary: str) -> bool:
+    """True when *binary* is llm-tldr (code search), not tealdeer cheat sheets."""
+    try:
+        result = subprocess.run(
+            [binary, "search", "--help"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        combined = (result.stdout or "") + (result.stderr or "")
+        return "--context" in combined.lower() or "-C CONTEXT" in combined
+    except Exception:
+        return False
+
+
+def _resolve_tldr_bin() -> Optional[str]:
+    """Pick llm-tldr binary; UBI images also ship tealdeer ``tldr`` on PATH."""
+    global _TLDR_BIN_CACHE
+    if _TLDR_BIN_CACHE:
+        return _TLDR_BIN_CACHE
+
+    candidates: list[str] = []
+    env_bin = os.getenv("TLDR_BIN", "").strip()
+    if env_bin:
+        candidates.append(env_bin)
+
+    venv_bin = Path(sys.executable).parent / "tldr"
+    if venv_bin.is_file():
+        candidates.append(str(venv_bin))
+
+    path_bin = shutil.which("tldr")
+    if path_bin:
+        candidates.append(path_bin)
+
+    seen: set[str] = set()
+    for candidate in candidates:
+        if not candidate or candidate in seen:
+            continue
+        seen.add(candidate)
+        if Path(candidate).is_file() and _is_llm_tldr(candidate):
+            _TLDR_BIN_CACHE = candidate
+            logger.debug("Using llm-tldr binary: %s", candidate)
+            return candidate
+
+    return None
+
 
 def detect_tldr_lang(workspace_path: Path) -> Optional[str]:
     """Detect the primary language of a workspace for use as tldr --lang.
@@ -134,7 +185,7 @@ def detect_tldr_lang(workspace_path: Path) -> Optional[str]:
 
 def run_tldr(args: list[str]) -> str:
     """Run tldr with the given argument list and return truncated stdout or an error string."""
-    tldr_bin = shutil.which("tldr")
+    tldr_bin = _resolve_tldr_bin()
     if not tldr_bin:
         return "tldr is not installed or not in PATH. Install with: pip install llm-tldr"
 
@@ -308,7 +359,7 @@ def prefetch_tldr_context(
         return ""
 
     # Gate 2: tldr must be available
-    if not shutil.which("tldr"):
+    if not _resolve_tldr_bin():
         logger.debug("prefetch_tldr_context: tldr not in PATH — skipping")
         return ""
 
@@ -503,7 +554,7 @@ def build_solutioning_codebase_context(
         parts.append("Existing project files:")
         parts.append(", ".join(source_files))
 
-    if _workspace_has_indexable_source(workspace_path) and shutil.which("tldr"):
+    if _workspace_has_indexable_source(workspace_path) and _resolve_tldr_bin():
         lang = detect_tldr_lang(workspace_path)
         args: list[str] = ["structure", str(workspace_path)]
         if lang:
@@ -559,7 +610,7 @@ def build_symbol_map(workspace_path: Path, max_chars: int = 3000) -> str:
     """
     if not _workspace_has_indexable_source(workspace_path):
         return ""
-    tldr_bin = shutil.which("tldr")
+    tldr_bin = _resolve_tldr_bin()
     if not tldr_bin:
         return ""
     # Call subprocess directly — bypass run_tldr's output cap so large JSON is fully parsed.

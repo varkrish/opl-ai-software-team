@@ -23,6 +23,7 @@ from ..orchestrator.error_recovery import WorkflowErrorRecoveryEngine
 from ..budget.tracker import EnhancedBudgetTracker
 from ..utils.feature_parser import parse_features_from_files
 from ..utils.document_indexer import DocumentIndexer
+from ..tools.tldr_tools import refresh_call_graph
 from ..utils.rag_context import get_phase_rag_context
 from ..utils.llm_config import get_embedding_model
 from ..utils.test_companion import is_test_file_path
@@ -3815,6 +3816,14 @@ class SoftwareDevWorkflow:
             feat_id, TaskStatus.COMPLETED.value,
             f"Feature implemented: {feat_label}",
         )
+        
+        # Warm the TLDR cache so the next feature has an updated call graph
+        try:
+            refresh_call_graph(self.workspace_path)
+            logger.info("Successfully refreshed tldr call graph for feature: %s", feat_label)
+        except Exception as e:
+            logger.warning("Failed to refresh tldr call graph: %s", e)
+            
         return count + 1
 
     def _run_development_feature_by_feature(

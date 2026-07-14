@@ -7,11 +7,14 @@ import os
 import logging
 import re
 import threading
+import functools
+import inspect
 from pathlib import Path
 from typing import Dict, Optional, Any
 from functools import partial
 from llama_index.core.tools import FunctionTool
 from ..utils.code_safety import CodeSafetyChecker
+from ..utils.execution_log import log_tool_invocation
 
 logger = logging.getLogger(__name__)
 
@@ -21,11 +24,15 @@ _workspace_local = threading.local()
 def set_thread_workspace(path: str) -> None:
     """Set the workspace path for the current thread (thread-safe)."""
     _workspace_local.workspace_path = path
+    from ..utils.execution_log import set_thread_workspace as _set_exec_ws
+    _set_exec_ws(path)
 
 
 def clear_thread_workspace() -> None:
     """Clear the thread-local workspace override."""
     _workspace_local.workspace_path = None
+    from ..utils.execution_log import clear_thread_workspace as _clear_exec_ws
+    _clear_exec_ws()
 
 
 def _resolve_workspace(workspace_path: Optional[str] = None) -> Path:
@@ -36,6 +43,47 @@ def _resolve_workspace(workspace_path: Optional[str] = None) -> Path:
     if thread_ws is not None:
         return Path(thread_ws)
     return Path(os.getenv("WORKSPACE_PATH", "./workspace"))
+
+
+def _emit_tool_log(
+    tool_name: str,
+    result: str,
+    *,
+    workspace_path: Optional[str] = None,
+    **args: Any,
+) -> None:
+    """Log file-tool rejections and warnings to execution.log (not every success)."""
+    text = str(result)
+    if text.startswith("✅"):
+        return
+    status = "error" if text.startswith("❌") else "warning"
+    log_tool_invocation(
+        tool_name,
+        args,
+        result=result,
+        status=status,
+        workspace_path=workspace_path,
+    )
+
+
+def _logged_file_tool(tool_name: str):
+    """Decorator: log rejections/warnings from file tools to execution.log."""
+    def decorator(fn):
+        @functools.wraps(fn)
+        def wrapper(*args, **kwargs):
+            result = fn(*args, **kwargs)
+            try:
+                bound = inspect.signature(fn).bind_partial(*args, **kwargs)
+                bound.apply_defaults()
+                preview = dict(bound.arguments)
+                preview.pop("kwargs", None)
+                ws = preview.get("workspace_path")
+                _emit_tool_log(tool_name, str(result), workspace_path=ws, **preview)
+            except Exception:
+                _emit_tool_log(tool_name, str(result))
+            return result
+        return wrapper
+    return decorator
 
 
 _SOURCE_EXTENSIONS = frozenset({
@@ -173,6 +221,7 @@ def set_allowed_file_paths(paths: Optional[set], workspace: Optional[str] = None
     # If workspace is None but paths is not None, ignore (no global guard).
 
 
+@_logged_file_tool("file_writer")
 def file_writer(file_path: str, content: str, workspace_path: Optional[str] = None, **kwargs) -> str:
     """Write content to a file. Creates parent directories if needed. Use this tool to create or update any file in the workspace.
     CRITICAL: Do NOT pass file keys (like 'version' or 'dependencies') as extra arguments. Provide the entire file text inside the 'content' string argument.
@@ -189,10 +238,11 @@ def file_writer(file_path: str, content: str, workspace_path: Optional[str] = No
         file_path = (file_path or "").strip()
         if not file_path or file_path.lower() == "unknown":
             logger.warning("file_writer REJECTED invalid path %r", file_path or "(empty)")
-            return (
+            msg = (
                 "❌ Rejected: file_path must be a valid path (e.g. 'src/app/main.ts'). "
                 "Do not use 'unknown' or empty."
             )
+            return msg
 
         if not isinstance(content, str):
             import json as _json
@@ -319,6 +369,7 @@ def file_writer(file_path: str, content: str, workspace_path: Optional[str] = No
         return f"❌ Error writing to {file_path}: {str(e)}"
 
 
+@_logged_file_tool("file_line_replacer")
 def file_line_replacer(
     file_path: str,
     start_line: int,
@@ -368,6 +419,7 @@ def file_line_replacer(
         return f"❌ Error replacing lines in {file_path}: {str(e)}"
 
 
+@_logged_file_tool("file_reader")
 def file_reader(file_path: Optional[str] = None, workspace_path: Optional[str] = None, **kwargs) -> str:
     """Read content from a file in the workspace.
     
@@ -399,6 +451,7 @@ def file_reader(file_path: Optional[str] = None, workspace_path: Optional[str] =
         return f"❌ Error reading {file_path}: {str(e)}"
 
 
+@_logged_file_tool("file_lister")
 def file_lister(directory: str = ".", workspace_path: Optional[str] = None, **kwargs) -> str:
     """List all files in a directory recursively. Returns file paths relative to workspace and sizes.
     
@@ -450,6 +503,7 @@ def file_lister(directory: str = ".", workspace_path: Optional[str] = None, **kw
         return f"❌ Error listing {directory}: {str(e)}"
 
 
+@_logged_file_tool("file_deleter")
 def file_deleter(file_path: Optional[str] = None, workspace_path: Optional[str] = None, **kwargs) -> str:
     """Delete a file in the workspace. Use this when the user asks to remove or delete a file.
     Do NOT empty the file with file_writer — call file_deleter to remove the file from the filesystem.
@@ -487,6 +541,7 @@ def file_deleter(file_path: Optional[str] = None, workspace_path: Optional[str] 
         logger.error(f"Error deleting {file_path}: {e}")
         return f"❌ Error deleting {file_path}: {str(e)}"
 
+@_logged_file_tool("bulk_file_writer")
 def bulk_file_writer(files: list, workspace_path: Optional[str] = None, **kwargs) -> str:
     """Write multiple files at once. Use this to create or update several files in the workspace simultaneously.
     CRITICAL: Pass a list of objects, where each object has 'file_path' and 'content'.
@@ -524,6 +579,7 @@ def bulk_file_writer(files: list, workspace_path: Optional[str] = None, **kwargs
     
     return "\n".join(results)
 
+@_logged_file_tool("replace_file_content")
 def replace_file_content(
     file_path: Optional[str] = None,
     start_line: int = 0,
@@ -625,14 +681,96 @@ FileDeleterTool = FunctionTool.from_defaults(
     description="Delete a file from the workspace. Use when the user asks to remove or delete a file. Do NOT empty the file with file_writer — use file_deleter to remove it from the filesystem."
 )
 
-ReplaceFileContentTool = FunctionTool.from_defaults(
-    fn=replace_file_content,
-    name="replace_file_content",
+@_logged_file_tool("patch_file_content")
+def patch_file_content(file_path: str, diff_blocks: str, workspace_path: Optional[str] = None, **kwargs) -> str:
+    """Patch an existing file using Aider-style SEARCH/REPLACE blocks."""
+    ws = _resolve_workspace(workspace_path)
+    try:
+        target = (ws / file_path).resolve()
+        if not str(target).startswith(str(ws.resolve())):
+            return f"❌ Security Error: Cannot write outside workspace: {file_path}"
+    except Exception as e:
+        return f"❌ Error resolving path: {e}"
+        
+    if not target.exists():
+        return f"❌ Error: File does not exist: {file_path}"
+        
+    try:
+        content = target.read_text(encoding="utf-8")
+    except Exception as e:
+        return f"❌ Error reading file: {e}"
+        
+    search_replace = []
+    current_search = []
+    current_replace = []
+    state = "OUTSIDE"
+    
+    for line in diff_blocks.splitlines(keepends=True):
+        if line.strip() in ("<<<<<<< SEARCH", "<<<< SEARCH"):
+            state = "SEARCH"
+            current_search = []
+            continue
+        elif line.strip() in ("=======", "===="):
+            if state == "SEARCH":
+                state = "REPLACE"
+                current_replace = []
+            continue
+        elif line.strip() in (">>>>>>> REPLACE", ">>>> REPLACE"):
+            if state == "REPLACE":
+                search_replace.append(("".join(current_search), "".join(current_replace)))
+                state = "OUTSIDE"
+            continue
+            
+        if state == "SEARCH":
+            current_search.append(line)
+        elif state == "REPLACE":
+            current_replace.append(line)
+            
+    if not search_replace:
+        return "❌ Error: No valid SEARCH/REPLACE blocks found in diff_blocks."
+        
+    patched_text = content
+    applied = 0
+    for search, replace in search_replace:
+        if not search:
+            continue
+            
+        if search in patched_text:
+            patched_text = patched_text.replace(search, replace, 1)
+            applied += 1
+        else:
+            # Fallback: line-by-line ignoring trailing whitespace
+            search_lines = [l.rstrip() for l in search.splitlines()]
+            file_lines = patched_text.splitlines()
+            match_start = -1
+            for i in range(len(file_lines) - len(search_lines) + 1):
+                if [l.rstrip() for l in file_lines[i:i+len(search_lines)]] == search_lines:
+                    match_start = i
+                    break
+            
+            if match_start != -1:
+                replace_lines = replace.splitlines()
+                file_lines[match_start:match_start+len(search_lines)] = replace_lines
+                patched_text = "\n".join(file_lines) + ("\n" if patched_text.endswith("\n") or replace.endswith("\n") else "")
+                applied += 1
+            else:
+                return f"❌ Error: SEARCH block not found in file:\n{search}"
+                
+    try:
+        target.write_text(patched_text, encoding="utf-8")
+        return f"✅ Successfully applied {applied} block(s)."
+    except Exception as e:
+        return f"❌ Error writing file: {e}"
+
+
+PatchFileContentTool = FunctionTool.from_defaults(
+    fn=patch_file_content,
+    name="patch_file_content",
     description=(
-        "Replace a specific range of lines in an existing file. "
-        "Args: file_path (str), start_line (int, 1-indexed), end_line (int, 1-indexed inclusive), "
-        "replacement_content (str). Use for ALL edits to existing files — especially large ones. "
-        "Do NOT use file_writer to update existing files."
+        "Patch a file using Aider-style SEARCH/REPLACE blocks. "
+        "Args: file_path (str), diff_blocks (str). "
+        "Format diff_blocks with <<<< SEARCH, ====, and >>>> REPLACE markers. "
+        "Use for ALL edits to existing files."
     ),
 )
 
@@ -668,8 +806,8 @@ def create_workspace_file_tools(workspace_path: Path):
             description=FileDeleterTool.metadata.description
         ),
         FunctionTool.from_defaults(
-            fn=partial(replace_file_content, workspace_path=ws),
-            name="replace_file_content",
-            description=ReplaceFileContentTool.metadata.description
+            fn=partial(patch_file_content, workspace_path=ws),
+            name="patch_file_content",
+            description=PatchFileContentTool.metadata.description
         ),
     ]

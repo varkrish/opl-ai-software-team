@@ -113,6 +113,16 @@ def log_tool_error(tool_name: str, error: Exception, duration_ms: float = 0.0):
             "event": "tool_error",
         },
     )
+    try:
+        from .execution_log import log_tool_invocation
+        log_tool_invocation(
+            tool_name,
+            {},
+            result=f"{type(error).__name__}: {error}",
+            status="error",
+        )
+    except Exception:
+        pass
 
 
 def configure_structured_logging(level: str = "INFO"):

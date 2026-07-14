@@ -84,6 +84,20 @@ pytest tests/e2e/test_stack_contract_e2e.py -m e2e -v
 
 **Cost**: Free (filesystem + API contract only)
 
+### Standalone Sandbox API E2E (`test_sandbox_api_standalone.py`)
+
+Same vision as mono `scripts/e2e-sandbox-api-vision.json`, but runs **in-process** via
+`run_build_pipeline` — no backend container, no `curl`, no port 8099.
+
+```bash
+cd opl-ai-software-team && make backend-test-e2e-sandbox
+```
+
+Uses **fast** capability profile and checks for `go.mod`, `README.md`, clean `.go` sources
+(no planning monologue / channel stub pollution). Timeout: 30 minutes.
+
+**Cost**: LLM usage (large Go project); faster to iterate than compose + HTTP submit.
+
 ### Workflow E2E Tests (`test_workflow_e2e.py`)
 
 Tests the complete software development workflow:

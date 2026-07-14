@@ -1,25 +1,13 @@
-# Technology Stack
+## Stack
+- Python 3.11
+- Pytest for unit testing
 
-## Core Technology
-- **Programming Language**: Python
-- **Testing Framework**: pytest
-- **Module System**: Python standard (import/export)
-
-## File Structure
+## Repository Layout
 ```
-calculator_project/
-├── README.md                 [CONFIG]
-├── requirements.txt          [CONFIG]
-├── src/
-│   ├── __init__.py           [SOURCE]
-│   └── calculator/
-│       ├── __init__.py       [SOURCE]
-│       └── calculator.py     [SOURCE]
+project/
+├── calculator.py
+├── requirements.txt
+├── README.md
 └── tests/
-    ├── __init__.py           [SOURCE]
-    └── test_calculator.py    [SOURCE]
+    └── test_calculator.py
 ```
-
-## Dependencies
-- pytest
-- pytest-cov

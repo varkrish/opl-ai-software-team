@@ -65,6 +65,10 @@ class CodeCompletenessValidator:
 
         if not path.exists():
             return {"complete": False, "issues": ["File does not exist"], "file": str(path)}
+            
+        if path.suffix.lower() not in _SOURCE_EXTENSIONS and path.name not in ("Makefile", "Dockerfile", "Containerfile"):
+            # Non-source files (like requirements.txt, .md, .json) are structurally assumed complete if they exist
+            return {"complete": True, "issues": [], "file": str(path)}
 
         try:
             content = path.read_text(encoding="utf-8", errors="replace")
@@ -478,6 +482,8 @@ class CodeCompletenessValidator:
 
         for src in ws.rglob("*"):
             if not src.is_file() or src.suffix not in _SOURCE_EXTENSIONS:
+                continue
+            if src.name in {"__init__.py", "index.js", "index.ts", "index.jsx", "index.tsx", "page.tsx", "layout.tsx", "page.js", "layout.js", "conftest.py"}:
                 continue
             rel = str(src.relative_to(ws))
             by_name.setdefault(src.name, []).append(rel)

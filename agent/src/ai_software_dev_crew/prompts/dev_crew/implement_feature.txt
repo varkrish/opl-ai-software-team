@@ -38,7 +38,7 @@ Write the test file BEFORE writing any implementation code.
 - For Scenario Outlines with Examples: write parameterised tests covering EVERY row in the table.
 - Tests must call the implementation functions/endpoints that do NOT exist yet (they will fail — that is correct).
 - Include realistic test data from the Examples table — not placeholder values.
-- Use `replace_file_content` if adding to an existing test file.
+- Use `patch_file_content` if adding to an existing test file. Use Aider-style SEARCH/REPLACE blocks.
 - Use `bulk_file_writer` if creating a brand new test file.
 - CRITICAL MANIFEST RULE: Only create test files listed in the PROJECT FILE TREE.
 
@@ -47,7 +47,7 @@ STEP 5: IMPLEMENT TO MAKE TESTS PASS (GREEN PHASE)
 Now write the minimum implementation code to make all tests from Step 4 pass.
 
 SCENARIO A: The file ALREADY EXISTS (Brownfield/Updates)
-- You MUST use `replace_file_content` with a `start_line` and `end_line` to patch specific methods or classes.
+- You MUST use `patch_file_content` with exact `<<<< SEARCH`, `====`, and `>>>> REPLACE` blocks.
 - NEVER use `file_writer` or `bulk_file_writer` on an existing file, as it will delete the rest of the file!
 
 SCENARIO B: The file is BRAND NEW (Greenfield)
@@ -67,7 +67,7 @@ Confirm that:
 
 CRITICAL RULES (tool mode):
 - You MUST ONLY call ONE tool per turn! After outputting `Action:` and `Action Input:`, STOP generating text. Wait for the Observation.
-- For existing files, ONLY use `replace_file_content`.
+- For existing files, ONLY use `patch_file_content`.
 - TESTS COME BEFORE IMPLEMENTATION. Never write implementation code before its test exists.
 
 ✅ SUCCESS: Tests written first, implementation makes all scenarios and Examples rows pass.

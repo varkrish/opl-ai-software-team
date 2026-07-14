@@ -41,6 +41,24 @@ def run_build_pipeline(
     workspace_path.mkdir(parents=True, exist_ok=True)
     error_log_path = workspace_path / "crew_errors.log"
 
+    # Register the clean job logger to write to workspace/execution.log
+    from llama_index.core import Settings
+    from llama_index.core.callbacks import CallbackManager
+    from llamaindex_crew.utils.clean_logger import CleanJobLogger
+
+    from llamaindex_crew.utils.execution_log import append_execution_log
+
+    execution_log_path = workspace_path / "execution.log"
+    # Clean up previous execution log if not resuming
+    if not resume and execution_log_path.exists():
+        try:
+            execution_log_path.unlink()
+        except OSError:
+            pass
+
+    clean_logger = CleanJobLogger(str(execution_log_path))
+    Settings.callback_manager = CallbackManager([clean_logger])
+
     # Thread-local: each job thread sees its own workspace path in file tools
     set_thread_workspace(str(workspace_path))
     # Also set env var for code that reads os.getenv("WORKSPACE_PATH") directly
@@ -76,6 +94,15 @@ def run_build_pipeline(
             f"Vision: {vision[:2000]}{'...' if len(vision) > 2000 else ''}",
             f"{'='*80}\n",
         )
+        append_execution_log(
+            f"{'='*80}\n"
+            f"JOB STARTED - {datetime.now().isoformat()}\n"
+            f"Job ID: {job_id}\n"
+            f"Retry failed: {retry_failed}\n"
+            f"Resume: {resume}\n"
+            f"{'='*80}\n",
+            workspace_path=workspace_path,
+        )
 
         progress_callback("initializing", 5, "Initializing workflow...")
         from src.llamaindex_crew.utils.llm_config import ensure_llm_api_key
@@ -100,6 +127,13 @@ def run_build_pipeline(
             f"JOB COMPLETED SUCCESSFULLY - {datetime.now().isoformat()}",
             f"{'='*80}\n",
         )
+        append_execution_log(
+            f"{'='*80}\n"
+            f"JOB COMPLETED - {datetime.now().isoformat()}\n"
+            f"Status: {results.get('status')}\n"
+            f"{'='*80}\n",
+            workspace_path=workspace_path,
+        )
         return results
 
     except Exception as e:
@@ -113,6 +147,13 @@ def run_build_pipeline(
             f"Traceback:\n{error_trace}",
             f"{'='*80}\n",
         )
+        append_execution_log(
+            f"{'='*80}\n"
+            f"JOB FAILED - {datetime.now().isoformat()}\n"
+            f"Error: {type(e).__name__}: {e}\n"
+            f"{'='*80}\n",
+            workspace_path=workspace_path,
+        )
         raise
     finally:
         clear_thread_workspace()
@@ -120,3 +161,7 @@ def run_build_pipeline(
             os.environ["WORKSPACE_PATH"] = original_workspace
         elif "WORKSPACE_PATH" in os.environ:
             del os.environ["WORKSPACE_PATH"]
+        # Clear callback manager
+        from llama_index.core import Settings
+        from llama_index.core.callbacks import CallbackManager
+        Settings.callback_manager = CallbackManager([])

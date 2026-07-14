@@ -1,4 +1,4 @@
-.PHONY: setup agent-test studio-run backend-test-api backend-test-e2e backend-test-e2e-quick backend-test-all refine-test refine-test-e2e connector-test test-all reset-db compose-up compose-down compose-logs compose-clean compose-validate container-build container-build-linux container-build-backend container-build-validator container-run container-stop help ci-install test-quick test-coverage ci-test-e2e install-docs docs docs-deploy
+.PHONY: setup agent-test studio-run backend-test-api backend-test-e2e backend-test-e2e-quick backend-test-e2e-sandbox backend-test-all refine-test refine-test-e2e connector-test test-all reset-db compose-up compose-down compose-logs compose-clean compose-validate container-build container-build-linux container-build-backend container-build-validator container-run container-stop help ci-install test-quick test-coverage ci-test-e2e install-docs docs docs-deploy
 
 ROOT_DIR := $(shell pwd)
 # Jira connector repo (sibling dir or set CONNECTOR_DIR)
@@ -24,7 +24,8 @@ help:
 	@echo "Testing:"
 	@echo "  backend-test-api       - Run backend API tests (pytest)"
 	@echo "  backend-test-e2e       - Run backend E2E tests (job execution)"
-	@echo "  backend-test-e2e-quick - Run quick E2E smoke test"
+	@echo "  backend-test-e2e-quick   - Run quick E2E smoke test"
+	@echo "  backend-test-e2e-sandbox - Standalone Sandbox API E2E (no container)"
 	@echo "  backend-test-all       - Run all backend tests"
 	@echo "  refine-test            - Run refinement unit + API tests"
 	@echo "  refine-test-e2e        - Run refinement E2E test (slow)"
@@ -134,6 +135,13 @@ backend-test-e2e-quick:
 	@ln -sfn $(ROOT_DIR)/crew_studio agent/src/llamaindex_crew/web
 	export PYTHONPATH=$(ROOT_DIR):$(ROOT_DIR)/agent:$(ROOT_DIR)/agent/src:$(PYTHONPATH) && \
 	cd agent && pytest tests/e2e/test_job_execution.py::test_job_starts_within_timeout -v
+
+backend-test-e2e-sandbox:
+	@echo "Running standalone Sandbox API E2E (in-process, no container)..."
+	@rm -rf agent/src/llamaindex_crew/web
+	@ln -sfn $(ROOT_DIR)/crew_studio agent/src/llamaindex_crew/web
+	export PYTHONPATH=$(ROOT_DIR):$(ROOT_DIR)/agent:$(ROOT_DIR)/agent/src:$(PYTHONPATH) && \
+	cd agent && python3 -m pytest tests/e2e/test_sandbox_api_standalone.py -v -s
 
 refine-test:
 	@echo "Running refinement unit + API tests..."
