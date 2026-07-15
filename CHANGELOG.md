@@ -17,6 +17,7 @@ Version tags match container releases (`v2.x.y` → `quay.io/varkrish/crew-backe
 
 ### Fixed
 - **Auto-approve skips solution review** — `_should_skip_solution_review()` honors `auto_approve_plan` / `auto_approve_solution`; job create mirrors plan auto-approve onto solution so Fast + auto-approve no longer pauses at solution review.
+- **On-demand GitHub push** — detect GitPython rejected pushes; create-or-reuse the requested repo name and retarget `origin`; reuse existing repos on 422; native FastAPI `POST /api/jobs/{id}/push` with clear errors.
 - **Empty / island Python trees** — coerce string wiring symbols to structured objects; synthesize package `.files` from owns; re-lock wiring from `<wiring_patch>` before creation-manifest registration; soft-fail hardens when contract sources are missing (HTML/CSS count as implementation).
 - **Python `src/`-layout import validation** — `PythonStrategy` also searches `src/`, `lib/`, and pyproject `where = [...]` so `from package import` no longer false-fails under src layout.
 - **Tiny-project empty codegen** — adaptive `min_impl` (no hard floor of 4 files); soft-register any concrete source paths, not only contract-tier; wiring jq safety no longer rejects Python `def` inside signature strings; normalize map-style `.deps["x"] = ["y"]` to array-append form.

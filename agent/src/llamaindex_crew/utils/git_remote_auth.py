@@ -38,12 +38,59 @@ def inject_push_credentials(remote_url: str, token: str) -> str:
     after_scheme = remote_url.split("://", 1)[1] if "://" in remote_url else ""
     if "@" in after_scheme.split("/", 1)[0]:
         return remote_url
-    return re.sub(r"^https://", f"https://{token}@", remote_url, count=1)
+    # Prefer x-access-token so GitHub accepts fine-grained + classic PATs.
+    return re.sub(r"^https://", f"https://x-access-token:{token}@", remote_url, count=1)
 
 
 def parse_github_slug(remote_url: str) -> Optional[str]:
     m = re.search(r"github\.com[/:](.+?/.+?)(?:\.git)?$", remote_url)
     return m.group(1) if m else None
+
+
+def sanitize_github_repo_name(repo_name: str) -> str:
+    name = (repo_name or "").strip().lower().replace(" ", "-")
+    return re.sub(r"[^a-z0-9._-]", "-", name).strip("-._") or "crew-ai-project"
+
+
+def _github_api_json(
+    method: str,
+    url: str,
+    token: str,
+    payload: Optional[dict] = None,
+) -> tuple[Optional[dict], Optional[int], str]:
+    data = json.dumps(payload).encode() if payload is not None else None
+    req = urllib.request.Request(
+        url,
+        data=data,
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/vnd.github+json",
+            "Content-Type": "application/json",
+            "X-GitHub-Api-Version": "2022-11-28",
+        },
+        method=method,
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            body = resp.read()
+            return (json.loads(body) if body else {}), resp.status, ""
+    except urllib.error.HTTPError as e:
+        err_body = ""
+        try:
+            err_body = e.read().decode("utf-8", errors="replace")
+        except Exception:
+            err_body = str(e)
+        return None, e.code, err_body
+    except Exception as e:
+        return None, None, str(e)
+
+
+def github_login_for_token(token: str) -> Optional[str]:
+    data, _status, _err = _github_api_json("GET", "https://api.github.com/user", token)
+    if not data:
+        return None
+    login = (data.get("login") or "").strip()
+    return login or None
 
 
 def create_github_repo(
@@ -54,34 +101,45 @@ def create_github_repo(
 ) -> Optional[str]:
     if not token:
         return None
-    repo_name = repo_name.strip().lower().replace(" ", "-")
-    repo_name = re.sub(r"[^a-z0-9._-]", "-", repo_name)
+    repo_name = sanitize_github_repo_name(repo_name)
     if org:
         url = f"https://api.github.com/orgs/{org}/repos"
     else:
         url = "https://api.github.com/user/repos"
-    payload = json.dumps({"name": repo_name, "private": private}).encode()
-    req = urllib.request.Request(
+    data, status, err = _github_api_json(
+        "POST",
         url,
-        data=payload,
-        headers={
-            "Authorization": f"Bearer {token}",
-            "Accept": "application/vnd.github+json",
-            "Content-Type": "application/json",
-        },
-        method="POST",
+        token,
+        {"name": repo_name, "private": private},
     )
-    try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            data = json.loads(resp.read())
-        return data.get("clone_url")
-    except urllib.error.HTTPError as e:
-        logger.warning("GitHub repo creation failed: %s", e)
-        return None
-    except Exception as e:
-        logger.warning("GitHub repo creation error: %s", e)
-        return None
+    if data and data.get("clone_url"):
+        return data["clone_url"]
 
+    # Name already exists (or similar validation) — reuse the existing repo URL.
+    if status == 422:
+        owner = org or github_login_for_token(token)
+        if owner:
+            existing, get_status, get_err = _github_api_json(
+                "GET",
+                f"https://api.github.com/repos/{owner}/{repo_name}",
+                token,
+            )
+            if existing and existing.get("clone_url"):
+                logger.info(
+                    "GitHub repo %s/%s already exists — reusing clone_url",
+                    owner,
+                    repo_name,
+                )
+                return existing["clone_url"]
+            logger.warning(
+                "GitHub repo exists but could not fetch %s/%s (status=%s): %s",
+                owner,
+                repo_name,
+                get_status,
+                get_err[:300],
+            )
+    logger.warning("GitHub repo creation failed (status=%s): %s", status, (err or "")[:300])
+    return None
 
 def ensure_remote(
     repo,
@@ -133,7 +191,38 @@ def push_with_token(
             info = remote.push(f"HEAD:refs/heads/{branch_name}")
         else:
             info = remote.push()
-        summaries = [str(pi.summary) for pi in info]
+        # GitPython often does not raise on rejected pushes — inspect flags.
+        try:
+            from git import PushInfo
+            error_mask = (
+                PushInfo.ERROR
+                | PushInfo.REMOTE_FAILURE
+                | PushInfo.REMOTE_REJECTED
+            )
+        except Exception:
+            PushInfo = None  # type: ignore[misc, assignment]
+            error_mask = 1024 | 16 | 8
+
+        if not info:
+            return PushResult(
+                False,
+                f"Push to {remote_name} returned no result — remote may be missing or unreachable",
+            )
+
+        summaries: list[str] = []
+        errors: list[str] = []
+        for pi in info:
+            summary = str(getattr(pi, "summary", "") or pi)
+            summaries.append(summary)
+            flags = int(getattr(pi, "flags", 0) or 0)
+            if flags & error_mask:
+                errors.append(summary or f"push flags={flags}")
+        if errors:
+            return PushResult(
+                False,
+                f"Push failed: {'; '.join(errors)}",
+                summaries,
+            )
         return PushResult(True, f"Pushed to {remote_name}. {'; '.join(summaries)}", summaries)
     except Exception as e:
         err = str(e)
@@ -144,7 +233,6 @@ def push_with_token(
     finally:
         if auth_url != original_url:
             remote.set_url(original_url)
-
 
 def maybe_auto_push_after_commit(workspace: Path) -> str:
     if not is_auto_push_enabled():

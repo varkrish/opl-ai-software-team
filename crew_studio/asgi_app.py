@@ -972,6 +972,59 @@ async def get_job_tool_stats(job_id: str, user: CurrentUser = Depends(get_curren
     return {"total": len(rows), "by_tool": by_tool, "by_agent": by_agent}
 
 
+class PushJobRequest(BaseModel):
+    repo_name: Optional[str] = None
+
+
+@app.post("/api/jobs/{job_id}/push")
+async def push_job_to_git_api(
+    job_id: str,
+    body: PushJobRequest = PushJobRequest(),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Push the job workspace to GitHub on demand (create-or-reuse private repo)."""
+    from pathlib import Path
+    import json as _json
+    from crew_studio.llamaindex_web_app import _push_build_to_github
+
+    job = job_db.get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    if not user.is_admin:
+        has_access = (
+            (job.get("owner_id") == user.user_id)
+            or (job.get("team_id") and job.get("team_id").lstrip("/") in user.teams)
+        )
+        if not has_access:
+            raise HTTPException(status_code=404, detail="Job not found")
+
+    repo_name_override = (body.repo_name or "").strip()
+    if repo_name_override:
+        raw_meta = job.get("metadata") or "{}"
+        try:
+            meta = _json.loads(raw_meta) if isinstance(raw_meta, str) else dict(raw_meta)
+        except (TypeError, ValueError):
+            meta = {}
+        meta["target_repo_name"] = repo_name_override
+        job_db.update_job(job_id, {"metadata": _json.dumps(meta)})
+
+    job_workspace = Path(job["workspace_path"])
+    try:
+        repo_url = _push_build_to_github(job_id, job_workspace, job_db)
+    except RuntimeError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+    if not repo_url:
+        raise HTTPException(
+            status_code=400,
+            detail="No GitHub token configured. Connect a PAT in Settings → API Configuration (GitHub).",
+        )
+    return {"status": "pushed", "repo_url": repo_url}
+
+
 @app.get("/api/stats")
 async def stats(user: CurrentUser = Depends(get_current_user)):
     return job_db.get_stats(owner_id=user.user_id, team_ids=user.teams, is_admin=user.is_admin)

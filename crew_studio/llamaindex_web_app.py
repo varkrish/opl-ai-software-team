@@ -958,8 +958,8 @@ def _push_build_to_github(job_id: str, job_workspace: Path, job_db) -> Optional[
     ``resolve_github_token``. If the workspace has no git remote yet, a new
     (private) repository is created on GitHub — named from job metadata
     ``target_repo_name`` if the user provided one, otherwise derived from the
-    project vision. Non-fatal: any failure is logged and returns None so the
-    job's completion is unaffected.
+    project vision. Non-fatal for post-build: callers may ignore failures.
+    On-demand push should surface raised ``RuntimeError`` messages to the UI.
     """
     from crew_studio.github_client import resolve_github_token
     token = resolve_github_token(job_db, job_id)
@@ -998,7 +998,7 @@ def _push_build_to_github(job_id: str, job_workspace: Path, job_db) -> Optional[
         publishable = collect_publishable_files(job_workspace)
         if not publishable:
             logger.warning("No publishable files for job %s — skipping GitHub push", job_id)
-            return None
+            raise RuntimeError("No publishable project files found in the workspace")
 
         if not (job_workspace / ".git").exists():
             repo = git.Repo.init(job_workspace)
@@ -1018,30 +1018,50 @@ def _push_build_to_github(job_id: str, job_workspace: Path, job_db) -> Optional[
         actor = git.Actor(git_name, git_email)
         staged = stage_publishable_files(repo, job_workspace, publishable)
         if staged == 0:
-            logger.warning("Nothing staged for GitHub push (job %s)", job_id)
-            return None
-        repo.index.commit("crew-ai: initial generated project", author=actor, committer=actor)
+            # Still allow push of an existing commit (re-push / retarget).
+            if not repo.head.is_valid() or not list(repo.iter_commits(max_count=1)):
+                logger.warning("Nothing staged for GitHub push (job %s)", job_id)
+                raise RuntimeError("Nothing to commit for GitHub push")
+        else:
+            repo.index.commit("crew-ai: initial generated project", author=actor, committer=actor)
 
         from llamaindex_crew.utils.git_remote_auth import (
-            create_github_repo, parse_github_slug, push_with_token,
+            create_github_repo,
+            parse_github_slug,
+            push_with_token,
+            sanitize_github_repo_name,
         )
 
-        if repo.remotes:
-            repo_url = repo.remote("origin").url
-        else:
-            repo_name = (meta.get("target_repo_name") or "").strip()
-            if not repo_name:
-                repo_name = suggest_github_repo_name(
-                    job.get("vision", "") or "",
+        desired_name = sanitize_github_repo_name(
+            (meta.get("target_repo_name") or "").strip()
+            or suggest_github_repo_name(
+                job.get("vision", "") or "",
+                job_id,
+                config=config,
+            )
+        )
+
+        # Always create-or-reuse the desired repo so a stale/missing origin cannot
+        # report a false success against a non-existent remote.
+        clone_url = create_github_repo(token, desired_name, private=True)
+        if not clone_url:
+            raise RuntimeError(
+                f"Failed to create or access GitHub repo '{desired_name}'. "
+                "Check token scopes (repo) and the repository name."
+            )
+
+        if "origin" in [r.name for r in repo.remotes]:
+            current = repo.remote("origin").url
+            if current.rstrip("/") != clone_url.rstrip("/"):
+                logger.info(
+                    "Retargeting origin for job %s → %s",
                     job_id,
-                    config=config,
+                    desired_name,
                 )
-            clone_url = create_github_repo(token, repo_name, private=True)
-            if not clone_url:
-                logger.warning("Failed to create GitHub repo (name=%r) for job %s", repo_name, job_id)
-                return None
+            repo.remote("origin").set_url(clone_url)
+        else:
             repo.create_remote("origin", clone_url)
-            repo_url = clone_url
+        repo_url = clone_url
 
         try:
             branch_name = repo.active_branch.name
@@ -1051,7 +1071,7 @@ def _push_build_to_github(job_id: str, job_workspace: Path, job_db) -> Optional[
         push_result = push_with_token(repo, remote_name="origin", branch_name=branch_name, token=token)
         if not push_result.success:
             logger.warning("Post-build push failed for job %s: %s", job_id, push_result.message)
-            return None
+            raise RuntimeError(push_result.message)
 
         html_url = repo_url
         slug = parse_github_slug(repo_url)
@@ -1059,12 +1079,15 @@ def _push_build_to_github(job_id: str, job_workspace: Path, job_db) -> Optional[
             html_url = f"https://github.com/{slug}"
 
         meta["github_repo_url"] = html_url
+        meta["target_repo_name"] = desired_name
         job_db.update_job(job_id, {"metadata": json.dumps(meta)})
         logger.info("Pushed generated project for job %s to %s", job_id, html_url)
         return html_url
+    except RuntimeError:
+        raise
     except Exception as e:
         logger.warning("Post-build GitHub push failed (non-fatal) for job %s: %s", job_id, e)
-        return None
+        raise RuntimeError(str(e)) from e
 
 
 ALLOWED_EXTENSIONS = {
@@ -2498,8 +2521,12 @@ def push_job_to_git(job_id):
         repo_url = _push_build_to_github(job_id, job_workspace, job_db)
         if repo_url:
             return jsonify({'status': 'pushed', 'repo_url': repo_url})
-        else:
-            return jsonify({'error': 'Push failed or no GitHub token configured. Check Settings → API Configuration.'}), 400
+        return jsonify({
+            'error': 'Push failed or no GitHub token configured. Check Settings → API Configuration.',
+        }), 400
+    except RuntimeError as e:
+        logger.warning("On-demand push failed for job %s: %s", job_id, e)
+        return jsonify({'error': str(e)}), 400
     except Exception as e:
         logger.warning("On-demand push failed for job %s: %s", job_id, e)
         return jsonify({'error': str(e)}), 500
