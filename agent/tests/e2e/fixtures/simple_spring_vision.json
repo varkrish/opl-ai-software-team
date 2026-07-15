@@ -1,0 +1,5 @@
+{
+  "vision": "Create a minimal Spring Boot 3 calculator REST API in Java. Provide a CalculatorService with add(int a, int b) and subtract(int a, int b), a CalculatorController exposing GET /api/add and GET /api/subtract, and a @SpringBootApplication entrypoint. Use Maven (pom.xml) with spring-boot-starter-web. No database, no React, no Go, no Python.",
+  "auto_approve_plan": true,
+  "auto_approve_solution": true
+}

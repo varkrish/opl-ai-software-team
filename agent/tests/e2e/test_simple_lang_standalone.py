@@ -5,7 +5,7 @@ Runs via run_build_pipeline (no container, no HTTP server).
 Visions are intentionally tiny so we can compare language adapters
 and island/codegen quality without Sandbox API complexity.
 
-Languages: Python, Java, Go, HTML, Node.js.
+Languages: Python, Java, Go, HTML, Node.js, Frappe, Spring Boot.
 """
 from __future__ import annotations
 
@@ -64,6 +64,18 @@ def _assert_java_artifacts(workspace: Path) -> None:
         (workspace / name).is_file()
         for name in ("pom.xml", "build.gradle", "build.gradle.kts", "README.md")
     ), "expected a Java build marker or README"
+    # Plain JDK vision must not drift into Go or Frappe layouts
+    assert not (workspace / "go.mod").is_file(), "plain Java must not have go.mod"
+    assert not list(workspace.rglob("hooks.py")), "plain Java must not have Frappe hooks.py"
+    wiring_path = workspace / "wiring_contract.json"
+    if wiring_path.is_file():
+        wiring = json.loads(wiring_path.read_text(encoding="utf-8"))
+        language = str(wiring.get("language") or "").lower()
+        if language:
+            assert language == "java", f"expected language=java, got {language!r}"
+        module = str(wiring.get("module") or "")
+        assert module != "app_name", f"unexpected module={module!r}"
+        assert "github.com/" not in module.lower(), f"Java must not use Go module path: {module!r}"
 
 
 def _assert_go_artifacts(workspace: Path) -> None:
@@ -72,9 +84,25 @@ def _assert_go_artifacts(workspace: Path) -> None:
         if not p.name.endswith("_test.go")
     ]
     assert go_files, "expected Go source files"
-    assert (workspace / "go.mod").is_file() or (workspace / "README.md").is_file(), (
-        "expected go.mod or README"
-    )
+    assert (workspace / "go.mod").is_file(), "expected go.mod for Go projects"
+    assert not list(workspace.rglob("hooks.py")), "Go must not have Frappe hooks.py"
+    assert not list(workspace.rglob("*.java")), "Go calculator must not emit Java sources"
+
+    wiring_path = workspace / "wiring_contract.json"
+    if wiring_path.is_file():
+        wiring = json.loads(wiring_path.read_text(encoding="utf-8"))
+        language = str(wiring.get("language") or "").lower()
+        if language:
+            assert language == "go", f"expected language=go, got {language!r}"
+        module = str(wiring.get("module") or "")
+        assert module and module != "app_name", f"expected Go module path, got {module!r}"
+
+    manifest_path = workspace / "stack_manifest.json"
+    if manifest_path.is_file():
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        chosen = [str(s).lower() for s in (manifest.get("chosen_stack") or [])]
+        assert "frappe" not in chosen, f"Go job must not lock frappe: {chosen}"
+        assert "spring" not in " ".join(chosen), f"Go job must not lock spring: {chosen}"
 
 
 def _assert_html_artifacts(workspace: Path) -> None:
@@ -103,6 +131,107 @@ def _assert_nodejs_artifacts(workspace: Path) -> None:
     )
 
 
+def _assert_frappe_artifacts(workspace: Path) -> None:
+    """Catch Go/app_name wiring regressions on Frappe greenfield jobs."""
+    manifest_path = workspace / "stack_manifest.json"
+    assert manifest_path.is_file(), "expected stack_manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    chosen = [str(s).lower() for s in (manifest.get("chosen_stack") or [])]
+    assert any("frappe" in s for s in chosen), (
+        f"expected frappe in chosen_stack, got {manifest.get('chosen_stack')}"
+    )
+
+    wiring_path = workspace / "wiring_contract.json"
+    assert wiring_path.is_file(), "expected wiring_contract.json"
+    wiring = json.loads(wiring_path.read_text(encoding="utf-8"))
+    module = str(wiring.get("module") or "")
+    language = str(wiring.get("language") or "").lower()
+    assert module and module != "app_name", f"expected real app slug, got module={module!r}"
+    assert "github.com/" not in module.lower(), f"unexpected Go-style module: {module!r}"
+    if language:
+        assert language == "python", f"expected language=python, got {language!r}"
+    assert language != "go", "Frappe wiring must not be Go"
+
+    hooks = list(workspace.rglob("hooks.py"))
+    modules_txt = list(workspace.rglob("modules.txt"))
+    assert hooks, "expected hooks.py on disk"
+    assert modules_txt, "expected modules.txt on disk"
+
+    assert not (workspace / "go.mod").is_file(), "Frappe app must not have go.mod"
+    app_name_paths = [
+        p for p in workspace.rglob("*")
+        if "app_name" in p.parts
+    ]
+    assert not app_name_paths, (
+        f"literal app_name path segments: "
+        f"{[str(p.relative_to(workspace)) for p in app_name_paths[:10]]}"
+    )
+
+    py_sources = [
+        p for p in workspace.rglob("*.py")
+        if p.name != "__init__.py"
+    ]
+    doctype_json = [
+        p for p in workspace.rglob("*.json")
+        if "doctype" in {part.lower() for part in p.parts}
+        and p.name not in (
+            "stack_manifest.json",
+            "wiring_contract.json",
+            "agent_backstories.json",
+            "delivery_mode_triage.json",
+            "skill_prefetch.json",
+        )
+    ]
+    assert py_sources or doctype_json, (
+        "expected Frappe Python sources or DocType JSON under doctype/"
+    )
+
+
+def _assert_spring_artifacts(workspace: Path) -> None:
+    """Spring Boot greenfield: Maven/Gradle + Boot entrypoint, not plain JDK/Go/Frappe."""
+    java_files = list(workspace.rglob("*.java"))
+    assert java_files, "expected Java source files for Spring Boot"
+    assert any(
+        (workspace / name).is_file()
+        for name in ("pom.xml", "build.gradle", "build.gradle.kts")
+    ), "expected Maven or Gradle build file"
+
+    boot_hit = False
+    for path in java_files:
+        text = path.read_text(encoding="utf-8", errors="replace")
+        if "@SpringBootApplication" in text or "SpringApplication.run" in text:
+            boot_hit = True
+            break
+    assert boot_hit, "expected @SpringBootApplication or SpringApplication.run"
+
+    pom = workspace / "pom.xml"
+    if pom.is_file():
+        pom_text = pom.read_text(encoding="utf-8", errors="replace").lower()
+        assert "spring-boot" in pom_text, "pom.xml should declare spring-boot"
+
+    assert not (workspace / "go.mod").is_file(), "Spring job must not have go.mod"
+    assert not list(workspace.rglob("hooks.py")), "Spring job must not have Frappe hooks.py"
+
+    wiring_path = workspace / "wiring_contract.json"
+    assert wiring_path.is_file(), "expected wiring_contract.json"
+    wiring = json.loads(wiring_path.read_text(encoding="utf-8"))
+    language = str(wiring.get("language") or "").lower()
+    if language:
+        assert language == "java", f"expected language=java, got {language!r}"
+    module = str(wiring.get("module") or "")
+    assert module and module != "app_name", f"expected Java package root, got {module!r}"
+    assert "github.com/" not in module.lower(), f"Spring must not use Go module: {module!r}"
+
+    manifest_path = workspace / "stack_manifest.json"
+    assert manifest_path.is_file(), "expected stack_manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    chosen = [str(s).lower() for s in (manifest.get("chosen_stack") or [])]
+    blob = " ".join(chosen)
+    assert "spring" in blob or "java" in blob, f"expected spring/java in chosen_stack, got {chosen}"
+    assert "go" not in chosen and "golang" not in chosen, f"Spring must not lock Go: {chosen}"
+    assert "frappe" not in chosen, f"Spring must not lock frappe: {chosen}"
+
+
 @pytest.mark.e2e
 @pytest.mark.slow
 @pytest.mark.requires_api_key
@@ -115,8 +244,10 @@ def _assert_nodejs_artifacts(workspace: Path) -> None:
         ("simple_go_vision.json", _assert_go_artifacts, "*.go"),
         ("simple_html_vision.json", _assert_html_artifacts, "*.html"),
         ("simple_nodejs_vision.json", _assert_nodejs_artifacts, "*.js"),
+        ("simple_frappe_vision.json", _assert_frappe_artifacts, "*.py"),
+        ("simple_spring_vision.json", _assert_spring_artifacts, "*.java"),
     ],
-    ids=["python", "java", "golang", "html", "nodejs"],
+    ids=["python", "java", "golang", "html", "nodejs", "frappe", "spring"],
 )
 def test_simple_lang_standalone_e2e_fast(
     tmp_path, monkeypatch, fixture_name, assert_artifacts, source_glob

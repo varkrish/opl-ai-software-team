@@ -28,20 +28,14 @@ Be concrete and actionable. Do not repeat the full vision verbatim.
 Include package-level interface hints (public function/class names per package).
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+FRAMEWORK SKILLS (authoritative for layout + wiring)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+{wiring_example}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 REQUIRED — WIRING PATCH (jq program, token-efficient)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Also emit a short jq filter (NOT shell) that locks module + ownership early:
-
-<wiring_patch>
-.module = "github.com/example/my-app"
-| .language = "python"
-| .packages["src/api"].owns = ["CreateOrder", "ListOrders"]
-| .packages["src/services"].owns = ["OrderService"]
-| .symbols["src/services.OrderService"] = {{"package":"src/services","signature":"class OrderService","exports":["OrderService"]}}
-| .deps += [{{"from":"src/api","to":"src/services"}}]
-</wiring_patch>
-
-Rules: jq only; symbol keys are "package.Name"; .module is the local import root
-(not bare "cmd"/"src"/"api"/"service" — use a real package name like
-"github.com/org/app", "@org/app", or "my_app"); one package per concern;
-HTTP handlers live in the API package.
+Also emit a short jq <wiring_patch> that locks module + ownership early.
+Derive paths from FRAMEWORK SKILLS above when present (do not invent a conflicting layout).
+Rules: jq only; symbol keys are "package.Name"; never bare "cmd"/"src"/"api"/"app_name"
+as .module; always prefer concrete .files paths with extensions.

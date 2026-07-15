@@ -44,9 +44,9 @@ class SolutionResearchAgent:
             GitHubSearchReposTool(token, max_calls=max_github_searches),
             GitHubRepoReadmeTool(token),
         ]
-        skills_url = None
-        if config and getattr(config, "skills", None):
-            skills_url = getattr(config.skills, "service_url", None)
+        from ..tools.skill_tools import resolve_skills_service_url
+
+        skills_url = resolve_skills_service_url(config)
         if skills_url:
             tools.append(SkillQueryTool(service_url=skills_url))
         if self.workspace_path is not None and get_supports_react("manager"):
@@ -128,6 +128,21 @@ class SolutionArchitectAgent:
         feedback_section = ""
         if feedback.strip():
             feedback_section = f"Critique feedback to address:\n{feedback.strip()}\n"
+        from ..tools.skill_tools import prefetch_skills
+        from ..utils.wiring_prompt import compose_framework_reference_with_wiring
+
+        skill_context = ""
+        if vision:
+            skill_context = prefetch_skills(
+                vision=vision,
+                role="tech_architect",
+                workspace_path=self.workspace_path,
+            )
+        wiring_example = compose_framework_reference_with_wiring(
+            skill_context or "",
+            vision=vision or "",
+            workspace_path=self.workspace_path,
+        )
         prompt = load_prompt(
             "solutioning/architect_task.txt",
             fallback="Write solution_spec.md for vision: {vision}",
@@ -136,6 +151,7 @@ class SolutionArchitectAgent:
             project_context=project_context or "",
             candidates_json=candidates_json,
             feedback_section=feedback_section,
+            wiring_example=wiring_example,
         )
         spec_path = self.workspace_path / "solution_spec.md" if self.workspace_path else None
         content_before = (

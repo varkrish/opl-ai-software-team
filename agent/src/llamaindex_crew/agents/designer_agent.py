@@ -171,12 +171,12 @@ You create C4 Model diagrams and define component capabilities."""
                 role="designer",
                 workspace_path=self.workspace_path,
             )
-            if not (skill_context or "").strip():
-                skill_context = (
-                    "(No indexed skill matched closely enough.) Infer architecture from "
-                    "the STACK SELECTION BRIEF and vision. Use framework terminology "
-                    "only when the vision requires that framework."
-                )
+            from ..utils.wiring_prompt import compose_framework_reference_with_wiring
+            skill_context = compose_framework_reference_with_wiring(
+                skill_context or "",
+                vision=vision or "",
+                workspace_path=self.workspace_path,
+            )
 
         stack_brief = build_stack_selection_brief(
             vision or "",

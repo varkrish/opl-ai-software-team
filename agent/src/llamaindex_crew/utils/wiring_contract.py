@@ -39,6 +39,8 @@ logger = logging.getLogger(__name__)
 WIRING_CONTRACT_FILENAME = "wiring_contract.json"
 
 # Injected into solution architect / designer prompts — compact jq patches, not full JSON.
+# Concrete <wiring_patch> examples are injected at runtime via wiring_prompt.compose_*
+# (stack/skills override) — keep this block language-neutral so it cannot fight Frappe/Go.
 WIRING_PATCH_EMIT_INSTRUCTIONS = """
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 REQUIRED — WIRING PATCH (jq program, token-efficient)
@@ -46,29 +48,18 @@ REQUIRED — WIRING PATCH (jq program, token-efficient)
 The pipeline seeds packages/files from your paths. You MUST also emit a short jq filter
 (NOT shell) that sets module, language, package ownership, key signatures, and deps.
 
-<wiring_patch>
-.module = "github.com/example/my-app"
-| .language = "go"
-| .packages["internal/api"].files = ["internal/api/handler.go"]
-| .packages["internal/api"].owns = ["CreateHandler", "DeleteHandler"]
-| .packages["internal/service"].files = ["internal/service/manager.go"]
-| .packages["internal/service"].owns = ["NewService", "Create"]
-| .symbols["internal/service.Create"] = {"package":"internal/service","signature":"func (s *Service) Create(ctx context.Context, name string) (string, error)","exports":["Create"]}
-| .symbols["internal/api.CreateHandler"] = {"package":"internal/api","signature":"func CreateHandler(svc *service.Service) http.HandlerFunc","exports":["CreateHandler"]}
-| .deps += [{"from":"internal/api","to":"internal/service"}]
-| .deps += [{"from":"cmd/my-app","to":"internal/api"}]
-</wiring_patch>
+Follow FRAMEWORK SKILLS when injected — they are AUTHORITATIVE for folders, files,
+and wiring_patch paths. Do not invent a competing language layout from memory.
 
 Rules (language-neutral):
 - jq filter syntax only (chains with |). Do NOT emit shell.
 - .module = canonical import/package root for the WHOLE project (never bare layer names
-  like "api", "service", "cmd", "src", "app"). Prefer real roots such as
-  "github.com/org/my-app", "@org/my-app", or "my_app".
+  like "api", "service", "cmd", "src", "app", "app_name").
+- Never leave the placeholder token app_name in any path.
 - .language = primary language (go|python|typescript|javascript|java|rust|…).
 - Always set .packages["<pkg>"].files to concrete source paths (with extensions). Owns alone
   are not enough — the pipeline registers file_creation tasks from .files.
 - One package per concern — no parallel packages for the same ownership (api vs handlers).
-- HTTP/API handlers live in the API package; entrypoint/main only wires the mux — it does not reimplement handlers.
 - Symbol keys MUST be "package.SymbolName" (qualified). Signatures use the project's language.
 - .deps are within-tier package edges; HTTP boundaries stay in api_contract.yaml.
 - Also list the same public APIs as interface contracts in the prose/design so they can be recovered if jq fails.
@@ -480,7 +471,7 @@ def apply_wiring_patch(seed: dict, patch_program: str) -> Optional[dict]:
 
 _WEAK_MODULE_NAMES = frozenset({
     # layout roots
-    "cmd", "src", "app", "main", "pkg", "lib", "internal", "unknown",
+    "cmd", "src", "app", "app_name", "main", "pkg", "lib", "internal", "unknown",
     "project", "root", "code", "backend", "frontend",
     # bare layer / concern names — never a whole-project import root
     "api", "apis", "server", "servers", "service", "services", "sandbox",
@@ -513,6 +504,208 @@ def _is_weak_module_name(name: str) -> bool:
             return False
         return parts[0] in _WEAK_MODULE_NAMES if parts else True
     return n in _WEAK_MODULE_NAMES
+
+
+def _stack_mentions_frappe(
+    *texts: str,
+    stack_manifest: Optional[dict] = None,
+) -> bool:
+    if isinstance(stack_manifest, dict):
+        for key in ("chosen_stack", "explicit_technologies"):
+            vals = stack_manifest.get(key) or []
+            if isinstance(vals, list) and any(
+                "frappe" in str(v).lower() or "erpnext" in str(v).lower() for v in vals
+            ):
+                return True
+        sq = str(stack_manifest.get("skills_query") or "").lower()
+        if "frappe" in sq or "erpnext" in sq:
+            return True
+    blob = " ".join(t or "" for t in texts).lower()
+    return any(tok in blob for tok in ("frappe", "erpnext", "doctype"))
+
+
+def _rewrite_app_name_placeholder(text: str, slug: str) -> str:
+    if not text or "app_name" not in text:
+        return text
+    return re.sub(r"(^|/)app_name(?=/|$)", rf"\1{slug}", text)
+
+
+def _infer_frappe_app_slug_from_contract(
+    contract: dict,
+    *texts: str,
+) -> str:
+    from .wiring_prompt import infer_app_slug
+
+    packages = contract.get("packages") or {}
+    skip = {
+        "app_name", "api", "src", "internal", "integrations", "js", "web",
+        "pos", "services", "tests", "test", "cmd", "docs", "static", "helm",
+        "scripts", "features",
+    }
+    for key in packages:
+        parts = str(key).replace("\\", "/").split("/")
+        if parts and parts[0] not in skip and re.match(r"^[a-z][a-z0-9_]*$", parts[0]):
+            if parts[0] != "app_name":
+                return parts[0]
+    vision = texts[0] if texts else ""
+    return infer_app_slug(vision or " ".join(texts), fallback="frappe_app")
+
+
+def normalize_frappe_wiring_contract(
+    contract: dict | None,
+    *,
+    vision: str = "",
+    solution_spec: str = "",
+    design_spec: str = "",
+    tech_stack: str = "",
+    stack_manifest: Optional[dict] = None,
+) -> dict | None:
+    """Rewrite placeholder Frappe contracts (app_name / Go modules / internal/).
+
+    Safety net when LLM copies generic wiring examples onto a Frappe stack.
+    """
+    if not contract or not isinstance(contract, dict):
+        return contract
+    if not _stack_mentions_frappe(
+        vision, solution_spec, design_spec, tech_stack,
+        stack_manifest=stack_manifest,
+    ):
+        return contract
+
+    out = json.loads(json.dumps(contract))
+    slug = _infer_frappe_app_slug_from_contract(
+        out, vision, solution_spec, design_spec, tech_stack,
+    )
+    mod = (out.get("module") or "").strip()
+    mod_l = mod.lower()
+    if (
+        not mod
+        or mod_l in ("app_name", "unknown")
+        or "github.com/" in mod_l
+        or mod_l.startswith("github.com")
+        or _is_weak_module_name(mod)
+    ):
+        logger.info("Frappe wiring: replacing module %r with %r", mod, slug)
+        out["module"] = slug
+    out["language"] = "python"
+
+    drop_prefixes = ("internal/", "cmd/")
+    new_packages: Dict[str, Any] = {}
+    for key, pkg in (out.get("packages") or {}).items():
+        nk = _rewrite_app_name_placeholder(str(key), slug)
+        if nk.startswith(drop_prefixes) or nk in ("internal", "cmd"):
+            logger.info("Frappe wiring: dropping non-Frappe package %r", key)
+            continue
+        if not isinstance(pkg, dict):
+            continue
+        pkg_out = dict(pkg)
+        files = []
+        for f in pkg_out.get("files") or []:
+            nf = _rewrite_app_name_placeholder(str(f), slug)
+            if nf.startswith(drop_prefixes):
+                continue
+            files.append(nf)
+        pkg_out["files"] = files
+        new_packages[nk] = pkg_out
+
+    # Prefer whatever scaffolding layout is already declared (flat or nested).
+    # Agents commonly emit flat ``{slug}/hooks.py``; forcing nested on top causes
+    # wiring_reconciliation false failures when nested paths are never written.
+    flat_root = slug
+    nested_root = f"{slug}/{slug}"
+    all_files = {
+        f
+        for pkg in new_packages.values()
+        for f in (pkg.get("files") or [])
+        if isinstance(f, str)
+    }
+    has_flat_scaffold = any(
+        f == f"{flat_root}/hooks.py" or f == f"{flat_root}/modules.txt"
+        for f in all_files
+    )
+    has_nested_scaffold = any(
+        f.startswith(f"{nested_root}/") and f.endswith(("hooks.py", "modules.txt", "__init__.py"))
+        for f in all_files
+    )
+    if has_flat_scaffold and not has_nested_scaffold:
+        scaffold_root = flat_root
+        # Drop empty nested package stub if present without scaffolding files
+        nested_pkg = new_packages.get(nested_root)
+        if isinstance(nested_pkg, dict):
+            nested_files = [
+                f for f in (nested_pkg.get("files") or [])
+                if isinstance(f, str) and f.startswith(f"{nested_root}/")
+            ]
+            if not nested_files:
+                new_packages.pop(nested_root, None)
+    elif has_nested_scaffold:
+        scaffold_root = nested_root
+    else:
+        # Match common greenfield / skill-scaffolded app-root layout
+        scaffold_root = flat_root
+
+    pkg = new_packages.setdefault(scaffold_root, {"files": [], "owns": []})
+    if not isinstance(pkg.get("files"), list):
+        pkg["files"] = []
+    for required in (
+        f"{scaffold_root}/hooks.py",
+        f"{scaffold_root}/modules.txt",
+        f"{scaffold_root}/__init__.py",
+    ):
+        if required not in pkg["files"]:
+            pkg["files"].append(required)
+    if "owns" not in pkg or not isinstance(pkg["owns"], list):
+        pkg["owns"] = []
+    if "hooks" not in pkg["owns"]:
+        pkg["owns"].append("hooks")
+    new_packages[scaffold_root] = pkg
+
+    # When flat is canonical, strip nested scaffold declarations so reconciliation
+    # does not demand movie_ticketing/movie_ticketing/hooks.py.
+    if scaffold_root == flat_root and nested_root in new_packages:
+        nested_pkg = new_packages.get(nested_root) or {}
+        nested_files = [
+            f for f in (nested_pkg.get("files") or [])
+            if isinstance(f, str)
+            and not f.endswith(("hooks.py", "modules.txt"))
+            and f != f"{nested_root}/__init__.py"
+        ]
+        if nested_files:
+            nested_pkg = dict(nested_pkg)
+            nested_pkg["files"] = nested_files
+            new_packages[nested_root] = nested_pkg
+        else:
+            new_packages.pop(nested_root, None)
+
+    out["packages"] = new_packages
+
+    # Rewrite symbols / deps keys that still contain app_name
+    symbols = out.get("symbols")
+    if isinstance(symbols, dict):
+        new_syms: Dict[str, Any] = {}
+        for sk, sv in symbols.items():
+            nsk = _rewrite_app_name_placeholder(str(sk), slug)
+            if isinstance(sv, dict):
+                sv = dict(sv)
+                if "package" in sv:
+                    sv["package"] = _rewrite_app_name_placeholder(str(sv["package"]), slug)
+            new_syms[nsk] = sv
+        out["symbols"] = new_syms
+    deps = out.get("deps")
+    if isinstance(deps, list):
+        new_deps = []
+        for dep in deps:
+            if not isinstance(dep, dict):
+                continue
+            d = dict(dep)
+            d["from"] = _rewrite_app_name_placeholder(str(d.get("from") or ""), slug)
+            d["to"] = _rewrite_app_name_placeholder(str(d.get("to") or ""), slug)
+            if d["from"].startswith(drop_prefixes) or d["to"].startswith(drop_prefixes):
+                continue
+            new_deps.append(d)
+        out["deps"] = new_deps
+
+    return out
 
 
 _MANIFEST_LANGUAGE_HINTS: tuple[tuple[str, str], ...] = (
@@ -1524,9 +1717,35 @@ def validate_wiring_contract(data: dict) -> dict:
 
 def write_wiring_contract(workspace: Path, data: dict) -> Path:
     """validate → write workspace/wiring_contract.json (indent=2, trailing newline)."""
+    workspace = Path(workspace)
+    stack_manifest = None
+    manifest_path = workspace / "stack_manifest.json"
+    if manifest_path.is_file():
+        try:
+            stack_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except Exception:
+            stack_manifest = None
+
+    def _read(name: str) -> str:
+        p = workspace / name
+        if p.is_file():
+            try:
+                return p.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                return ""
+        return ""
+
+    data = normalize_frappe_wiring_contract(
+        data,
+        vision=_read("requirements.md") or _read("user_stories.md"),
+        solution_spec=_read("solution_spec.md"),
+        design_spec=_read("design_spec.md"),
+        tech_stack=_read("tech_stack.md"),
+        stack_manifest=stack_manifest if isinstance(stack_manifest, dict) else None,
+    ) or data
     synced = sync_module_identity_from_workspace(data, workspace)
     normalized = validate_wiring_contract(normalize_signatures_for_language(synced))
-    target = Path(workspace) / WIRING_CONTRACT_FILENAME
+    target = workspace / WIRING_CONTRACT_FILENAME
     content = json.dumps(normalized, indent=2) + "\n"
     target.write_text(content, encoding="utf-8")
     return target
@@ -2556,6 +2775,10 @@ def missing_declared_source_files(contract: dict, workspace: Path) -> List[str]:
 
     Only checks known source suffixes (``.go``, ``.py``, …). Docs/config paths
     in ``packages[*].files`` are ignored.
+
+    For Frappe scaffolding, flat ``{app}/hooks.py`` satisfies a declared nested
+    ``{app}/{app}/hooks.py`` (and the reverse) so layout variants do not
+    false-fail wiring reconciliation.
     """
     if not contract:
         return []
@@ -2570,9 +2793,30 @@ def missing_declared_source_files(contract: dict, workspace: Path) -> List[str]:
             rel = normalize_workspace_path(f)
             if not _has_source_suffix(rel):
                 continue
-            if not (workspace / rel).is_file():
-                missing.append(rel)
+            if (workspace / rel).is_file():
+                continue
+            alt = _frappe_scaffold_alt_path(rel)
+            if alt and (workspace / alt).is_file():
+                continue
+            missing.append(rel)
     return missing
+
+
+def _frappe_scaffold_alt_path(rel: str) -> Optional[str]:
+    """Map flat↔nested Frappe hooks/modules/__init__ paths, else None."""
+    parts = rel.replace("\\", "/").split("/")
+    if len(parts) < 2:
+        return None
+    name = parts[-1]
+    if name not in ("hooks.py", "modules.txt", "__init__.py"):
+        return None
+    # nested: app/app/hooks.py -> flat app/hooks.py
+    if len(parts) >= 3 and parts[0] == parts[1]:
+        return "/".join([parts[0], *parts[2:]])
+    # flat: app/hooks.py -> nested app/app/hooks.py
+    if len(parts) == 2:
+        return f"{parts[0]}/{parts[0]}/{name}"
+    return None
 
 
 def unauthorized_package_prefix_for_path(path: str, declared_prefixes: set[str]) -> Optional[str]:
@@ -2946,11 +3190,32 @@ def extract_wiring_contract_from_specs(
     workspace: Optional[Path] = None,
 ) -> dict:
     """Resolve contract: full JSON emit > jq patch on path seed > path-only + prose interfaces."""
+    stack_manifest = None
+    if workspace:
+        mp = Path(workspace) / "stack_manifest.json"
+        if mp.is_file():
+            try:
+                stack_manifest = json.loads(mp.read_text(encoding="utf-8"))
+            except Exception:
+                stack_manifest = None
+
+    def _finalize(contract: dict | None) -> dict:
+        if not contract:
+            return contract  # type: ignore[return-value]
+        fixed = normalize_frappe_wiring_contract(
+            contract,
+            solution_spec=solution_spec or "",
+            design_spec=design_spec or "",
+            tech_stack=tech_stack or "",
+            stack_manifest=stack_manifest if isinstance(stack_manifest, dict) else None,
+        )
+        return ensure_package_file_paths(normalize_symbol_keys(fixed or contract)) or (fixed or contract)
+
     emitted = parse_emitted_wiring_contract(solution_spec or "", design_spec or "", tech_stack or "")
     if emitted:
         if language_hint and not emitted.get("language"):
             emitted["language"] = language_hint
-        return ensure_package_file_paths(normalize_symbol_keys(emitted)) or emitted
+        return _finalize(emitted)
 
     seed = _build_path_only_contract_from_specs(
         solution_spec or "",
@@ -2966,7 +3231,7 @@ def extract_wiring_contract_from_specs(
         if patched:
             if language_hint and not patched.get("language"):
                 patched["language"] = language_hint
-            return ensure_package_file_paths(normalize_symbol_keys(patched)) or patched
+            return _finalize(patched)
         logger.warning("wiring jq patch invalid; strengthening path-only seed from prose")
 
     strengthened = strengthen_contract_from_specs(
@@ -2975,4 +3240,4 @@ def extract_wiring_contract_from_specs(
         solution_spec or "",
         tech_stack or "",
     )
-    return ensure_package_file_paths(strengthened) or strengthened
+    return _finalize(strengthened)

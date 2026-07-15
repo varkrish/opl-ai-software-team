@@ -100,16 +100,38 @@ def _match_any(text: str, patterns: Sequence[str]) -> bool:
     return any(re.search(p, text) for p in patterns)
 
 
+def _technology_marker_positions(text: str, marker: str) -> List[int]:
+    """Start indices of *marker* in already-normalized vision text."""
+    if marker.startswith(r"\b") or marker.endswith(r"\b"):
+        return [m.start() for m in re.finditer(marker, text)]
+    positions: List[int] = []
+    idx = 0
+    while True:
+        found_at = text.find(marker, idx)
+        if found_at < 0:
+            break
+        positions.append(found_at)
+        idx = found_at + max(len(marker), 1)
+    return positions
+
+
 def _extract_named_technologies(text: str) -> List[str]:
+    """Return named stacks mentioned as *positive* requirements (skip negations).
+
+    Visions often say ``no Go, no Flask, no FastAPI`` while locking Frappe;
+    those tokens must not enter ``explicit_technologies`` / ``chosen_stack``.
+    """
     found: List[str] = []
     for name, markers in _NAMED_TECHNOLOGIES:
+        matched = False
         for m in markers:
-            if m.startswith(r"\b") or m.endswith(r"\b"):
-                if re.search(m, text):
-                    found.append(name)
-                    break
-            elif m in text:
+            for pos in _technology_marker_positions(text, m):
+                if _is_negated_tier_mention(text, pos):
+                    continue
                 found.append(name)
+                matched = True
+                break
+            if matched:
                 break
     return found
 

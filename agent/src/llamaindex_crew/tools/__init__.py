@@ -13,7 +13,7 @@ from .git_tools import (
     clone_repository_into_directory,
 )
 from .test_tools import PytestRunnerTool, CodeCoverageTool
-from .skill_tools import SkillQueryTool, prefetch_skills
+from .skill_tools import SkillQueryTool, prefetch_skills, resolve_skills_service_url
 from .tldr_tools import create_tldr_tools, detect_tldr_lang, append_tldr_tools
 from .tool_loader import load_tools
 
@@ -33,6 +33,7 @@ __all__ = [
     "CodeCoverageTool",
     "SkillQueryTool",
     "prefetch_skills",
+    "resolve_skills_service_url",
     "create_tldr_tools",
     "detect_tldr_lang",
     "append_tldr_tools",

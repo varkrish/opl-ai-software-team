@@ -35,6 +35,22 @@ _PLATFORM_SKILL_MARKERS = (
     "erpnext", "doctype", "mariadb", "postgres", "mongodb",
 )
 
+# Exclusive framework families: a skill named/tagged for one must not inject
+# when chosen_stack locks a different family (e.g. Frappe skills on a Go job).
+_EXCLUSIVE_SKILL_FAMILIES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("frappe", ("frappe", "erpnext", "doctype")),
+    ("spring", ("spring-boot", "spring boot", "springframework", "springboot")),
+    ("django", ("django",)),
+    ("fastapi", ("fastapi",)),
+    ("flask", ("flask",)),
+    ("rails", ("rails", "ruby on rails")),
+    ("laravel", ("laravel",)),
+    ("react", ("react", "reactjs")),
+    ("angular", ("angular",)),
+    ("vue", ("vue", "vuejs")),
+    ("golang", ("golang", "gin-gonic")),
+)
+
 
 def _passes_relevance(result: dict) -> bool:
     score = result.get("score")
@@ -51,11 +67,43 @@ def _load_stack_manifest(workspace_path: Optional[Path]) -> Optional[dict]:
         return None
 
 
+def _chosen_matches_family(chosen_blob: str, family: str, markers: tuple[str, ...]) -> bool:
+    if family in chosen_blob:
+        return True
+    if any(m in chosen_blob for m in markers):
+        return True
+    # Spring Boot jobs often lock "spring boot"; plain "java" must NOT match spring.
+    if family == "golang" and ("go" == chosen_blob.strip() or " go " in f" {chosen_blob} "):
+        return True
+    return False
+
+
+def _skill_exclusive_family_conflict(skill_name: str, content: str, chosen: list[str]) -> bool:
+    """True when skill belongs to a framework family absent from chosen_stack."""
+    if not chosen:
+        return False
+    chosen_blob = " ".join(chosen).lower()
+    name_l = (skill_name or "").lower()
+    # Prefer skill name — content can mention many stacks in comparisons.
+    for family, markers in _EXCLUSIVE_SKILL_FAMILIES:
+        skill_is_family = name_l.startswith(family) or any(m in name_l for m in markers)
+        if not skill_is_family and family == "spring":
+            skill_is_family = "spring" in name_l
+        if not skill_is_family:
+            continue
+        if not _chosen_matches_family(chosen_blob, family, markers):
+            return True
+    return False
+
+
 def _skill_conflicts_with_manifest(skill_name: str, content: str, manifest: dict) -> bool:
-    """Drop skills that pull forbidden platform tiers into a locked client stack."""
+    """Drop skills that fight the locked stack_manifest."""
     from ..utils.vision_stack_analysis import _effective_forbidden_tiers
 
     chosen = [s.lower() for s in (manifest.get("chosen_stack") or [])]
+    if _skill_exclusive_family_conflict(skill_name, content, chosen):
+        return True
+
     forbidden = set(
         _effective_forbidden_tiers(
             [t.lower() for t in (manifest.get("forbidden_tiers") or [])],
@@ -119,6 +167,63 @@ def _record_skills_used(job_id: str, skill_names: List[str]):
             db.add_skills_used(job_id, skill_names)
     except Exception as e:
         logger.warning("Failed to record skills used: %s", e)
+
+
+def resolve_skills_service_url(config=None) -> Optional[str]:
+    """Resolve skills HTTP base URL from config YAML, then ``SKILLS_SERVICE_URL`` env.
+
+    Dev compose sets ``SKILLS_SERVICE_URL`` on the backend even when
+    ``~/.crew-ai/config.yaml`` omits ``skills.service_url``. Prefetch and
+    agent tools must honor the env fallback (same as asgi_app / DevOps).
+    """
+    url = None
+    if config is not None:
+        skills = getattr(config, "skills", None)
+        url = getattr(skills, "service_url", None) if skills else None
+    else:
+        try:
+            from ..config import ConfigLoader
+
+            loaded = ConfigLoader.load()
+            skills = getattr(loaded, "skills", None)
+            url = getattr(skills, "service_url", None) if skills else None
+        except Exception:
+            url = None
+    if not url:
+        url = (os.environ.get("SKILLS_SERVICE_URL") or "").strip() or None
+    return url.rstrip("/") if url else None
+
+
+def _write_prefetch_debug(
+    workspace_path: Optional[Path],
+    role: str,
+    *,
+    entries: Optional[list] = None,
+    meta: Optional[dict] = None,
+) -> None:
+    """Persist skill_prefetch.json so missing skills are visible in the workspace."""
+    if not workspace_path:
+        return
+    try:
+        prefetch_file = Path(workspace_path) / "skill_prefetch.json"
+        existing: dict = {}
+        if prefetch_file.exists():
+            existing = json.loads(prefetch_file.read_text(encoding="utf-8"))
+            if not isinstance(existing, dict):
+                existing = {}
+        if entries is not None:
+            existing[role] = entries
+        if meta:
+            meta_block = existing.get("_meta")
+            if not isinstance(meta_block, dict):
+                meta_block = {}
+            meta_block[role] = meta
+            existing["_meta"] = meta_block
+        prefetch_file.write_text(
+            json.dumps(existing, indent=2, default=str), encoding="utf-8",
+        )
+    except Exception:
+        logger.debug("skill_prefetch.json write failed", exc_info=True)
 
 
 def SkillQueryTool(
@@ -199,17 +304,20 @@ def prefetch_skills(
         Formatted string of ``[Skill: name]\\ncontent`` blocks separated by
         ``---``, or ``""`` when the service is unavailable.
     """
-    from ..config import ConfigLoader
-
-    try:
-        config = ConfigLoader.load()
-        url = getattr(config, "skills", None)
-        service_url = getattr(url, "service_url", None) if url else None
-        if not service_url:
-            logger.info("prefetch_skills: no skills.service_url configured — skipping")
-            return ""
-    except Exception:
-        logger.warning("prefetch_skills: config load failed — skipping", exc_info=True)
+    service_url = resolve_skills_service_url()
+    if not service_url:
+        logger.info(
+            "prefetch_skills: no skills.service_url / SKILLS_SERVICE_URL — skipping"
+        )
+        _write_prefetch_debug(
+            workspace_path,
+            role,
+            entries=[],
+            meta={
+                "status": "skipped",
+                "reason": "no skills.service_url or SKILLS_SERVICE_URL",
+            },
+        )
         return ""
 
     manifest = _load_stack_manifest(workspace_path)
@@ -255,18 +363,17 @@ def prefetch_skills(
         except Exception:
             logger.warning("prefetch_skills: query %r failed", q, exc_info=True)
 
-    if workspace_path and debug_entries:
-        try:
-            prefetch_file = Path(workspace_path) / "skill_prefetch.json"
-            existing: dict = {}
-            if prefetch_file.exists():
-                existing = json.loads(prefetch_file.read_text(encoding="utf-8"))
-            existing[role] = debug_entries
-            prefetch_file.write_text(
-                json.dumps(existing, indent=2, default=str), encoding="utf-8",
-            )
-        except Exception:
-            pass
+    _write_prefetch_debug(
+        workspace_path,
+        role,
+        entries=debug_entries,
+        meta={
+            "status": "ok" if debug_entries else "empty",
+            "service_url": service_url,
+            "queries": queries,
+            "skill_count": len(debug_entries),
+        },
+    )
 
     if sections:
         logger.info(

@@ -54,6 +54,17 @@ class TestInferCapabilityProfile:
         assert profile.needs_server_runtime is True
         assert profile.suggested_path == "full"
 
+    def test_negated_tech_tokens_are_not_explicit(self):
+        vision = (
+            "Create a minimal Frappe app named movie_ticketing. "
+            "Use Frappe only — no Go, no Flask, no FastAPI."
+        )
+        profile = infer_capability_profile(vision)
+        assert profile.explicit_technologies == ["frappe"]
+        assert "go" not in profile.explicit_technologies
+        assert "flask" not in profile.explicit_technologies
+        assert "fastapi" not in profile.explicit_technologies
+
     def test_api_vision_needs_server(self):
         profile = infer_capability_profile(SPRING_VISION)
         assert profile.needs_api is True

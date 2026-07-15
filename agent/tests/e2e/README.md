@@ -7,8 +7,9 @@ End-to-end tests for the AI Software Development Crew system.
 ```
 tests/e2e/
 ├── conftest.py                    # E2E fixtures and helpers
-├── fixtures/stack_contract/       # Voyager-style stack contract fixtures
+├── fixtures/                      # Vision JSON (python/java/go/html/nodejs/frappe) + stack_contract/
 ├── test_stack_contract_e2e.py    # Stack manifest + coherence E2E (no LLM)
+├── test_simple_lang_standalone.py # Fast multi-lang + Frappe generation E2E
 ├── test_workflow_e2e.py          # Core workflow E2E tests
 ├── test_web_api_e2e.py           # Web API E2E tests
 ├── test_web_ui_playwright.py     # UI E2E tests (Playwright)
@@ -83,6 +84,20 @@ pytest tests/e2e/test_stack_contract_e2e.py -m e2e -v
 ```
 
 **Cost**: Free (filesystem + API contract only)
+
+### Simple multi-language standalone E2E (`test_simple_lang_standalone.py`)
+
+Fast-path in-process builds via `run_build_pipeline` for tiny calculator / app visions:
+Python, Java, Go, HTML, Node.js, **Frappe**, and **Spring Boot** (`simple_spring_vision.json`).
+
+Frappe assertions lock stack/`wiring_contract` to Python (not Go/`app_name`) and require
+on-disk `hooks.py` + `modules.txt`. Skills service is not required.
+
+```bash
+pytest agent/tests/e2e/test_simple_lang_standalone.py -k frappe -m e2e -v
+```
+
+**Cost**: LLM usage (per language param).
 
 ### Standalone Sandbox API E2E (`test_sandbox_api_standalone.py`)
 

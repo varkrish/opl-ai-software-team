@@ -305,6 +305,92 @@ class TestPrefetchSkillsManifestGating:
         assert "frappe-doctype-patterns" not in result
         assert "html-accessibility" in result
 
+    def test_drops_frappe_skill_when_go_stack_locked(self, tmp_path):
+        from llamaindex_crew.tools.skill_tools import prefetch_skills
+        from llamaindex_crew.workflows.solutioning_loop import write_stack_manifest
+
+        write_stack_manifest(
+            tmp_path,
+            {
+                "path": "fast",
+                "chosen_stack": ["go"],
+                "forbidden_tiers": [],
+                "skills_query": "go",
+            },
+        )
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status = MagicMock()
+        mock_resp.json.return_value = {
+            "results": [
+                {
+                    "skill_name": "frappe-app-scaffold",
+                    "content": "Create hooks.py",
+                    "tags": ["frappe"],
+                    "score": 0.95,
+                },
+                {
+                    "skill_name": "go-module-layout",
+                    "content": "Use go.mod and internal/",
+                    "tags": ["go"],
+                    "score": 0.9,
+                },
+            ]
+        }
+
+        with patch("llamaindex_crew.config.ConfigLoader.load", return_value=self._mock_config()), \
+             patch("httpx.post", return_value=mock_resp):
+            result = prefetch_skills(
+                vision="Create a Go calculator",
+                role="tech_architect",
+                workspace_path=tmp_path,
+            )
+
+        assert "frappe-app-scaffold" not in result
+        assert "go-module-layout" in result
+
+    def test_drops_frappe_skill_when_spring_boot_locked(self, tmp_path):
+        from llamaindex_crew.tools.skill_tools import prefetch_skills
+        from llamaindex_crew.workflows.solutioning_loop import write_stack_manifest
+
+        write_stack_manifest(
+            tmp_path,
+            {
+                "path": "fast",
+                "chosen_stack": ["spring boot"],
+                "forbidden_tiers": [],
+                "skills_query": "spring boot",
+            },
+        )
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status = MagicMock()
+        mock_resp.json.return_value = {
+            "results": [
+                {
+                    "skill_name": "frappe-architect",
+                    "content": "Frappe DocType layout",
+                    "tags": ["frappe"],
+                    "score": 0.93,
+                },
+                {
+                    "skill_name": "spring-boot-rest",
+                    "content": "Use @SpringBootApplication",
+                    "tags": ["spring"],
+                    "score": 0.91,
+                },
+            ]
+        }
+
+        with patch("llamaindex_crew.config.ConfigLoader.load", return_value=self._mock_config()), \
+             patch("httpx.post", return_value=mock_resp):
+            result = prefetch_skills(
+                vision="Create a Spring Boot calculator API",
+                role="tech_architect",
+                workspace_path=tmp_path,
+            )
+
+        assert "frappe-architect" not in result
+        assert "spring-boot-rest" in result
+
     def test_uses_manifest_skills_query_not_raw_vision_alone(self, tmp_path):
         from llamaindex_crew.tools.skill_tools import prefetch_skills
 
@@ -352,3 +438,76 @@ class TestPrefetchSkillsManifestGating:
         assert "frappe-api-patterns" in result
         payload = mock_post.call_args.kwargs.get("json") or mock_post.call_args[1].get("json")
         assert "Frappe" in payload["query"] or "frappe" in payload["query"].lower()
+
+
+class TestResolveSkillsServiceUrl:
+    def test_falls_back_to_env_when_config_url_missing(self, monkeypatch):
+        from llamaindex_crew.tools.skill_tools import resolve_skills_service_url
+
+        monkeypatch.setenv("SKILLS_SERVICE_URL", "http://skills-service:8090/")
+        config = MagicMock()
+        config.skills.service_url = None
+        assert resolve_skills_service_url(config) == "http://skills-service:8090"
+
+    def test_prefers_config_over_env(self, monkeypatch):
+        from llamaindex_crew.tools.skill_tools import resolve_skills_service_url
+
+        monkeypatch.setenv("SKILLS_SERVICE_URL", "http://env:8090")
+        config = MagicMock()
+        config.skills.service_url = "http://config:8090"
+        assert resolve_skills_service_url(config) == "http://config:8090"
+
+
+class TestPrefetchSkillsEnvFallback:
+    def test_uses_env_url_when_yaml_skills_unset(self, tmp_path, monkeypatch):
+        from llamaindex_crew.tools.skill_tools import prefetch_skills
+
+        monkeypatch.setenv("SKILLS_SERVICE_URL", "http://skills-from-env:8090")
+        config = MagicMock()
+        config.skills.service_url = None
+
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status = MagicMock()
+        mock_resp.json.return_value = {
+            "results": [
+                {
+                    "skill_name": "frappe-api-patterns",
+                    "content": "Use @whitelist",
+                    "tags": ["frappe"],
+                    "score": 0.9,
+                },
+            ]
+        }
+
+        with patch("llamaindex_crew.config.ConfigLoader.load", return_value=config), \
+             patch("httpx.post", return_value=mock_resp) as mock_post:
+            result = prefetch_skills(
+                vision="Build a Frappe app",
+                role="designer",
+                workspace_path=tmp_path,
+            )
+
+        assert "frappe-api-patterns" in result
+        assert mock_post.call_args.args[0].startswith("http://skills-from-env:8090/")
+        prefetch = json.loads((tmp_path / "skill_prefetch.json").read_text())
+        assert prefetch["designer"]
+        assert prefetch["_meta"]["designer"]["status"] == "ok"
+
+    def test_writes_skill_prefetch_when_skipped(self, tmp_path, monkeypatch):
+        from llamaindex_crew.tools.skill_tools import prefetch_skills
+
+        monkeypatch.delenv("SKILLS_SERVICE_URL", raising=False)
+        config = MagicMock()
+        config.skills.service_url = None
+
+        with patch("llamaindex_crew.config.ConfigLoader.load", return_value=config):
+            result = prefetch_skills(
+                vision="Build a Frappe app",
+                role="tech_architect",
+                workspace_path=tmp_path,
+            )
+
+        assert result == ""
+        prefetch = json.loads((tmp_path / "skill_prefetch.json").read_text())
+        assert prefetch["tech_architect"] == []
+        assert prefetch["_meta"]["tech_architect"]["status"] == "skipped"

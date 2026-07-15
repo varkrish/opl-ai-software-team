@@ -8,6 +8,8 @@ Version tags match container releases (`v2.x.y` → `quay.io/varkrish/crew-backe
 ## [Unreleased]
 
 ### Added
+- **Frappe app generation E2E** — `simple_frappe_vision.json` in `test_simple_lang_standalone.py` asserts Frappe stack lock, real app slug wiring (not Go/`app_name`), and on-disk `hooks.py` / `modules.txt`.
+- **Spring Boot simple fast E2E** — `simple_spring_vision.json` asserts Boot entrypoint + Maven/Gradle spring-boot deps and rejects Go/Frappe drift; tighten Go/Java artifact checks.
 - **Multi-language simple fast E2E** — extend `test_simple_lang_standalone.py` with Go, HTML, and Node.js calculator fixtures alongside Python/Java.
 - **Wiring contract / creation manifest pipeline** — contract-driven file manifests, language-neutral module identity sync from package manifests (`go.mod`, `package.json`, `pyproject.toml`, `Cargo.toml`, `build.sbt`, …), per-file TLDR enrich, and soft-register of concrete paths when completeness checks soft-fail.
 - **`workflow_resolver`** — single pipeline resolver for YAML `workflows`, persisted `selected_workflow_phases`, and `smart_router` (adaptive only on first run). Plan-approve resume walks the resolved pipeline (`qa` before dev on full/TDD paths).
@@ -16,8 +18,14 @@ Version tags match container releases (`v2.x.y` → `quay.io/varkrish/crew-backe
 - **Solutioning E2E** — `test_solutioning_e2e.py` runs the live research → architect → critique loop (`solution_approved=False`) and a second test that approves then resumes the full pipeline.
 
 ### Fixed
+- **Skills own wiring layout** — Designer/TA/solution architect prompts no longer inject hardcoded Go/Frappe/Java wiring trees; FRAMEWORK SKILLS are authoritative, with a language-neutral fallback only when no skill matches.
+- **Exclusive skill-family gating** — locked ``chosen_stack`` drops foreign framework skills (e.g. Frappe skills on Go/Java/Spring jobs).
+- **Negated vision tech tokens** — ``no Go, no Flask, no FastAPI`` no longer pollutes ``chosen_stack`` / ``skills_query``.
+- **Frappe flat↔nested reconciliation** — flat ``{app}/hooks.py`` satisfies nested contract declarations (and normalize no longer forces nested on top of flat).
+- **Skills prefetch honors ``SKILLS_SERVICE_URL``** — Designer/TA `prefetch_skills` and solution research tools fall back to the compose env when YAML `skills.service_url` is unset; always write `skill_prefetch.json` (including skip/empty `_meta`) for workspace debugging.
 - **Auto-approve skips solution review** — `_should_skip_solution_review()` honors `auto_approve_plan` / `auto_approve_solution`; job create mirrors plan auto-approve onto solution so Fast + auto-approve no longer pauses at solution review.
 - **On-demand GitHub push** — detect GitPython rejected pushes; create-or-reuse the requested repo name and retarget `origin`; reuse existing repos on 422; native FastAPI `POST /api/jobs/{id}/push` with clear errors.
+- **Stack wiring override** — skills/stack inject an authoritative STACK WIRING EXAMPLE that overrides generic wiring samples; normalize placeholder module/paths when they conflict with the locked stack.
 - **Empty / island Python trees** — coerce string wiring symbols to structured objects; synthesize package `.files` from owns; re-lock wiring from `<wiring_patch>` before creation-manifest registration; soft-fail hardens when contract sources are missing (HTML/CSS count as implementation).
 - **Python `src/`-layout import validation** — `PythonStrategy` also searches `src/`, `lib/`, and pyproject `where = [...]` so `from package import` no longer false-fails under src layout.
 - **Tiny-project empty codegen** — adaptive `min_impl` (no hard floor of 4 files); soft-register any concrete source paths, not only contract-tier; wiring jq safety no longer rejects Python `def` inside signature strings; normalize map-style `.deps["x"] = ["y"]` to array-append form.

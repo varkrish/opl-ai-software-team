@@ -148,6 +148,12 @@ You consider the project vision and constraints when making decisions."""
             role="tech_architect",
             workspace_path=self.workspace_path,
         )
+        from ..utils.wiring_prompt import compose_framework_reference_with_wiring
+        skill_context = compose_framework_reference_with_wiring(
+            skill_context or "",
+            vision=vision or "",
+            workspace_path=self.workspace_path,
+        )
 
         stack_brief = build_stack_selection_brief(
             vision or "",
@@ -170,14 +176,6 @@ You consider the project vision and constraints when making decisions."""
             if approved_solution
             else ""
         )
-
-        if not (skill_context or "").strip():
-            skill_context = (
-                "(No indexed skill matched this project's technology closely enough to be "
-                "trustworthy — none was injected.) Infer the minimal appropriate stack from "
-                "the STACK SELECTION BRIEF and vision. Use standard conventions for the "
-                "chosen technology. Do NOT default to an unrelated application platform."
-            )
 
         return {
             "design_spec": design_spec or "",

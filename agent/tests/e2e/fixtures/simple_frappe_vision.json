@@ -1,0 +1,5 @@
+{
+  "vision": "Create a minimal Frappe app named movie_ticketing for movie screening and ticketing. Include DocTypes for Movie and Ticket, plus hooks.py and modules.txt under the standard Frappe app layout (movie_ticketing/movie_ticketing/). Use Frappe framework patterns only — no Go, no Flask, no FastAPI, no generic web API layout.",
+  "auto_approve_plan": true,
+  "auto_approve_solution": true
+}

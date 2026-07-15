@@ -14,10 +14,11 @@ Project Context:
 {context_digest}
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-FRAMEWORK REFERENCE (when required by vision — not a default platform choice)
+FRAMEWORK SKILLS (authoritative for layout + wiring)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-The following skill documents describe conventions for frameworks that match the vision.
-Use them to make your design concrete — only when the vision requires that framework.
+The following block is framework skill content (when available). Skills are
+AUTHORITATIVE for folders, files, and <wiring_patch> paths — do not invent a
+competing layout from memory.
 
 {skill_context}
 
@@ -30,21 +31,12 @@ TASK — Create design_spec.md
 3. For COMPLEX projects: Bounded Contexts, Data Flow, Domain Events, C4 diagrams.
 4. Define interface contracts (signatures for public APIs between packages).
 
-CRITICAL — Use the FRAMEWORK REFERENCE above only when the vision requires that framework:
-- Name components using the chosen stack's terminology.
+CRITICAL — Use FRAMEWORK SKILLS above when present:
+- Name components using the chosen stack's terminology from the skills.
 - Describe data modelling only when persistence is required.
 - Specify UI patterns appropriate to the delivery surface in the vision.
-- When showing file paths, follow the reference nesting when a framework is required.
-
-FRAPPE FILE PATHS — when and only when the vision requires a Frappe app:
-If this is a Frappe app, every file path you write MUST use THREE levels of nesting:
-  app_name/app_name/module_name/doctype/doctype_name/file
-Example for app "leave_tracker", module "Leave Tracker":
-  CORRECT: leave_tracker/leave_tracker/leave_tracker/doctype/leave_request/leave_request.json
-  WRONG:   leave_tracker/leave_tracker/doctype/leave_request/leave_request.json  ← missing module folder!
-  WRONG:   leave_tracker/doctype/leave_request/leave_request.json  ← missing inner package AND module folder!
-The doctype/ folder is ALWAYS inside a module folder, never directly under the inner package.
-Same rule applies to page/ and report/ folders.
+- When showing file paths, follow skill nesting / conventions.
+- Never write the literal token app_name in paths. Substitute a real snake_case app slug.
 
 The goal is a design that a developer familiar with the framework can immediately start implementing — not a generic DDD document.
 
@@ -53,30 +45,12 @@ Match the design complexity to the requirements. A simple utility doesn't need c
 Call file_writer(file_path='design_spec.md', content='<your design>')
 
 In the design body, include an "Interface contracts" section with package headings
-(e.g. `## internal/api`) and language-real signatures for every public cross-package API.
+and language-real signatures for every public cross-package API.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 REQUIRED — WIRING PATCH (jq program, token-efficient)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-After writing design_spec.md, you MUST also emit a wiring patch (append it to the
-design file or include it in the same write). The pipeline seeds packages/files from
-paths; this patch locks module identity, ownership, and signatures before codegen.
-
-<wiring_patch>
-.module = "github.com/example/my-app"
-| .language = "go"
-| .packages["internal/api"].owns = ["CreateHandler"]
-| .packages["internal/service"].owns = ["NewService", "Create"]
-| .symbols["internal/service.Create"] = {{"package":"internal/service","signature":"func (s *Service) Create(ctx context.Context, name string) (string, error)","exports":["Create"]}}
-| .deps += [{{"from":"internal/api","to":"internal/service"}}]
-| .deps += [{{"from":"cmd/my-app","to":"internal/api"}}]
-</wiring_patch>
-
-Rules:
-- jq filter only (not shell). Symbol keys MUST be "package.SymbolName".
-- .module = canonical import/package root for the WHOLE project (never bare layer
-  names like "api", "service", "cmd", "src", "app"). Prefer real roots such as
-  "github.com/org/my-app", "@org/my-app", or "my_app".
-- .language = primary language (go|python|typescript|javascript|java|rust|…).
-- One package per concern; HTTP handlers only in the API package; entrypoint/main only wires the mux.
-- Interface contracts in the prose MUST align with .packages[*].owns and .symbols.
+After writing design_spec.md, emit a <wiring_patch>...</wiring_patch> jq filter.
+Derive module, language, and package paths from FRAMEWORK SKILLS above when present.
+Rules: jq only; symbol keys are "package.SymbolName"; never bare layer names or app_name
+as .module; always set .packages[*].files to concrete paths with extensions.
