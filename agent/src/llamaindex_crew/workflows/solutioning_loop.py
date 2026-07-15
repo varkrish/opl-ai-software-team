@@ -70,7 +70,33 @@ def _minimal_chosen_stack(profile: CapabilityProfile, vision: str) -> List[str]:
     if profile.explicit_technologies:
         return list(profile.explicit_technologies)
     text = (vision or "").lower()
+    from ..utils.vision_stack_analysis import _extract_named_technologies
+
+    named = _extract_named_technologies(text)
+    if named:
+        return list(named)
+
     stack: List[str] = []
+    # Backend / API visions must not fall through to html/css.
+    is_backend = (
+        profile.needs_api
+        or profile.needs_server_runtime
+        or profile.delivery_surface in ("api_service", "fullstack")
+    )
+    if is_backend and profile.delivery_surface != "client_deliverable":
+        if re.search(r"\bgo(?:lang)?\b", text):
+            return ["go"]
+        if "rust" in text or "cargo" in text:
+            return ["rust"]
+        if "python" in text or "fastapi" in text or "django" in text or "flask" in text:
+            return ["python"]
+        if "java" in text or "spring" in text:
+            return ["java"]
+        if "node" in text or "typescript" in text or "express" in text:
+            return ["typescript"] if "typescript" in text else ["javascript"]
+        # Unknown backend language — prefer go for api_service, else python
+        return ["go"] if profile.delivery_surface == "api_service" else ["python"]
+
     if "html" in text or "<!doctype" in text or "<html" in text:
         stack.append("html")
     if "css" in text or "colour" in text or "color" in text or "style" in text:
@@ -80,6 +106,7 @@ def _minimal_chosen_stack(profile: CapabilityProfile, vision: str) -> List[str]:
     if "javascript" in text or re.search(r"\bes\s+module", text):
         stack.append("javascript")
     if not stack:
+        # Client deliverable with no cues — html/css is appropriate
         stack = ["html", "css"]
     seen = set()
     ordered: List[str] = []

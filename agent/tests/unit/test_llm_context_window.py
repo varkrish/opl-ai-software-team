@@ -78,22 +78,21 @@ _MAAS_URL = "https://litellm-prod.apps.maas.redhatworkshops.io/v1"
 
 class TestDeepseekMaaSContextWindow:
 
-    def test_deepseek_r1_distill_max_tokens_capped_to_6144(self):
+    def test_deepseek_r1_distill_max_tokens_capped_to_8192(self):
         """
-        deepseek-r1-distill-qwen-14b has a 16 384-token context.
-        max_tokens must be ≤ 6 144 so the input prompt can use up to 10 240 tokens.
-        Bug: max_tokens was 8192 → only 8192 left for input → TA prompt at 8193 → 400.
+        deepseek-r1-distill-qwen-14b has a 128 000-token context.
+        max_tokens must be ≤ 8 192.
         """
         kwargs = _call_production_llm("deepseek-r1-distill-qwen-14b", _MAAS_URL)
-        assert kwargs["max_tokens"] <= 6_144, (
-            f"deepseek-r1-distill on MaaS must cap max_tokens ≤ 6144, got {kwargs['max_tokens']}"
+        assert kwargs["max_tokens"] <= 8_192, (
+            f"deepseek-r1-distill on MaaS must cap max_tokens ≤ 8192, got {kwargs['max_tokens']}"
         )
 
     def test_deepseek_r1_distill_context_window_set_correctly(self):
-        """context_window must be 16 384, not the default 4 000 000."""
+        """context_window must be 128 000, not the default 4 000 000."""
         kwargs = _call_production_llm("deepseek-r1-distill-qwen-14b", _MAAS_URL)
-        assert kwargs["context_window"] == 16_384, (
-            f"deepseek-r1-distill context_window must be 16384, got {kwargs['context_window']}"
+        assert kwargs["context_window"] == 128_000, (
+            f"deepseek-r1-distill context_window must be 128000, got {kwargs['context_window']}"
         )
 
     def test_deepseek_r1_distill_input_headroom(self):
@@ -108,12 +107,12 @@ class TestDeepseekMaaSContextWindow:
     def test_deepseek_r1_without_distill_also_capped(self):
         """Any deepseek-r1 variant on MaaS must be capped."""
         kwargs = _call_production_llm("deepseek-r1", _MAAS_URL)
-        assert kwargs["max_tokens"] <= 6_144
+        assert kwargs["max_tokens"] <= 8_192
 
     def test_unknown_maas_model_gets_conservative_cap(self):
-        """Unknown MaaS models should use the conservative 6 144 cap."""
+        """Unknown MaaS models should use the conservative 8 192 cap."""
         kwargs = _call_production_llm("some-unknown-model-v1", _MAAS_URL)
-        assert kwargs["max_tokens"] <= 6_144, (
+        assert kwargs["max_tokens"] <= 8_192, (
             f"Unknown MaaS model should use conservative cap, got {kwargs['max_tokens']}"
         )
 

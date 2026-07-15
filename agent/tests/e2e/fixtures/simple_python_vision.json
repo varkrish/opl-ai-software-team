@@ -1,0 +1,5 @@
+{
+  "vision": "Create a simple Python command-line calculator. Provide a Calculator class in calculator.py with add(a, b) and subtract(a, b) methods that return numbers. Include a main entrypoint that prints add(2, 3) and subtract(10, 4). Add a minimal pytest test file. Use only the Python standard library plus pytest for tests. No web framework, no database.",
+  "auto_approve_plan": true,
+  "auto_approve_solution": true
+}

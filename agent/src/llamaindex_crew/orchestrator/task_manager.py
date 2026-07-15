@@ -27,27 +27,13 @@ from ..utils.vision_stack_analysis import (
 
 logger = logging.getLogger(__name__)
 
-# Blacklist for registration: reject dangerous binaries and image assets only.
-# Any other extension (go.mod, Cargo.lock, .svg, …) is accepted.
-REJECTED_FILE_EXTENSIONS = frozenset({
-    # Dangerous / executable / native binaries
-    'exe', 'dll', 'so', 'dylib', 'o', 'a', 'bin', 'com',
-    'bat', 'cmd', 'msi', 'scr',
-    'class', 'pyc', 'pyo', 'wasm',
-    # Pictures / media images
-    'png', 'jpg', 'jpeg', 'gif', 'webp', 'ico', 'bmp',
-    'tif', 'tiff', 'heic', 'avif',
-})
-
-# Extensionless basenames that are still real project artifacts.
-EXTENSIONLESS_FILENAMES = frozenset({
-    'dockerfile', 'containerfile', 'makefile', 'gnumakefile',
-    'gemfile', 'procfile', 'rakefile', 'brewfile',
-    'license', 'licence', 'notice', 'authors', 'contributors',
-    'copying', 'changelog', 'changes', 'history',
-    'cargo.lock',  # defensive; normally matched via .lock extension
-    'pipfile', 'vagrantfile', 'jenkinsfile',
-})
+from ..utils.wiring_contract import (
+    REJECTED_FILE_EXTENSIONS,
+    EXTENSIONLESS_FILENAMES,
+    FileEntry,
+    build_creation_manifest,
+    validate_manifest_completeness as _validate_manifest_completeness,
+)
 
 
 def _trim_existing_files(
@@ -96,33 +82,9 @@ def _trim_existing_files(
 
 
 def _is_valid_file_path(name: str) -> bool:
-    """Return True if *name* looks like a real file path, not numbered-list junk or a blacklisted type.
-
-    Registration gate is a blacklist (dangerous binaries + images). Unknown
-    extensions are accepted so stacks like go.mod / go.sum register as tasks.
-    Extensionless names are accepted only when the basename is in
-    EXTENSIONLESS_FILENAMES (Dockerfile, Makefile, …).
-    """
-    if not name or len(name) < 2:
-        return False
-    # Reject purely numeric prefixes like "1.", "2.", "23."
-    stem = name.rsplit('.', 1)[0] if '.' in name else name
-    if stem.isdigit():
-        return False
-    basename = name.rsplit('/', 1)[-1]
-    # Dotfiles / multi-dot names: treat last segment after '.' as extension
-    # unless the name is a known extensionless artifact (e.g. CMakeLists.txt is listed).
-    if '.' not in basename:
-        return basename.lower() in EXTENSIONLESS_FILENAMES
-    # Names like "CMakeLists.txt" may be listed extensionless-style; also allow via ext
-    if basename.lower() in EXTENSIONLESS_FILENAMES:
-        return True
-    ext = basename.rsplit('.', 1)[1].lower()
-    if not ext:
-        return False
-    if ext in REJECTED_FILE_EXTENSIONS:
-        return False
-    return True
+    """Return True if *name* looks like a real file path, not numbered-list junk or a blacklisted type."""
+    from ..utils.wiring_contract import _is_valid_file_path as val_path
+    return val_path(name)
 
 
 class TaskStatus(Enum):
@@ -158,9 +120,17 @@ class TaskDefinition:
 class TaskManager:
     """Manages task registry, creation tracking, and execution validation with SQLite"""
     
-    def __init__(self, db_path: Path, project_id: str):
+    def __init__(self, db_path: Path, project_id: str, workspace_path: Optional[Path] = None):
         self.db_path = db_path
         self.project_id = project_id
+        if workspace_path:
+            self.workspace_path = Path(workspace_path)
+        elif isinstance(db_path, Path):
+            self.workspace_path = db_path.parent
+        elif isinstance(db_path, str) and db_path != ":memory:":
+            self.workspace_path = Path(db_path).parent
+        else:
+            self.workspace_path = None
         self._init_database()
     
     def _init_database(self):
@@ -731,7 +701,7 @@ class TaskManager:
             
         # 2. Fallback to hardcoded extensions if no tag is provided
         lower = path.lower()
-        if "/test/" in lower or lower.startswith("test/") or "/tests/" in lower:
+        if "/test/" in lower or lower.startswith("test/") or lower.startswith("tests/") or "/tests/" in lower:
             return False
         return any(lower.endswith(ext) for ext in TaskManager._SOURCE_FILE_EXTENSIONS)
 
@@ -809,9 +779,18 @@ class TaskManager:
                 return True
         return False
 
-    def _is_tier_applicable(self, tier: int, workspace_path: Path, tech_stack_content: Optional[str] = None) -> bool:
-        """Determine if a directory/layer tier is applicable to this project based on tech stack or skills."""
-        # 1. Parse tech stack (content passed or read from disk)
+    def _is_tier_applicable(
+        self,
+        tier: int,
+        workspace_path: Path,
+        tech_stack_content: Optional[str] = None,
+        manifest_paths: Optional[List[str]] = None,
+    ) -> bool:
+        """Determine if a directory/layer tier is applicable based on manifest or skills."""
+        if manifest_paths and self._tier_keywords_present(manifest_paths, tier):
+            return True
+
+        # Legacy: parse tech stack when no manifest
         if not tech_stack_content:
             tech_stack_file = workspace_path / "tech_stack.md"
             if tech_stack_file.exists():
@@ -917,15 +896,19 @@ class TaskManager:
 
     def detect_workspace_structure_gaps(self, workspace: Path) -> List[str]:
         """Return human-readable gap prompts for missing structural layers on disk."""
-        paths: List[str] = []
-        for p in workspace.rglob("*"):
-            if not p.is_file():
-                continue
-            rel = str(p.relative_to(workspace)).replace("\\", "/")
-            if rel.startswith("features/") or rel.endswith(".md"):
-                continue
-            if self._is_source_file_path(rel):
-                paths.append(rel)
+        manifest = self.get_manifest_entries()
+        if manifest:
+            paths = [e["path"] for e in manifest if e.get("path")]
+        else:
+            paths = []
+            for p in workspace.rglob("*"):
+                if not p.is_file():
+                    continue
+                rel = str(p.relative_to(workspace)).replace("\\", "/")
+                if rel.startswith("features/") or rel.endswith(".md"):
+                    continue
+                if self._is_source_file_path(rel):
+                    paths.append(rel)
 
         gaps: List[str] = []
         for tier, label in self._STRUCTURE_LAYER_TIERS.items():
@@ -936,7 +919,7 @@ class TaskManager:
                 if self._tier_keywords_present(paths, tier):
                     continue
 
-            if self._is_tier_applicable(tier, workspace):
+            if self._is_tier_applicable(tier, workspace, manifest_paths=paths):
                 if tier == 80:
                     gaps.append(
                         "Create the missing application entrypoint/bootstrap file following "
@@ -975,6 +958,20 @@ class TaskManager:
             impl.append(path)
         return impl
 
+    def validate_manifest_completeness(
+        self,
+        entries: List[FileEntry],
+        *,
+        design_spec: str = "",
+        solution_spec: str = "",
+    ) -> Dict[str, Any]:
+        """Validate creation manifest entries (DB or in-memory list)."""
+        return _validate_manifest_completeness(
+            entries,
+            design_spec=design_spec,
+            solution_spec=solution_spec,
+        )
+
     def validate_tech_stack_completeness(
         self,
         tech_stack_content: str,
@@ -985,8 +982,8 @@ class TaskManager:
         """
         Validate that the tech stack lists enough concrete implementation files.
 
-        Thresholds are derived from named components in design/solution specs —
-        not from hardcoded framework rules.
+        Thin wrapper: parses legacy ASCII trees when no manifest is available.
+        Prefer ``validate_manifest_completeness(get_manifest_entries())`` in new code.
         """
         if not tech_stack_content or not tech_stack_content.strip():
             return {
@@ -995,54 +992,54 @@ class TaskManager:
             }
 
         file_entries = self._extract_files_with_descriptions(tech_stack_content)
-        all_paths = [f["path"] for f in file_entries]
-        src_files = [
-            f["path"] for f in file_entries
-            if self._is_source_file_path(f["path"], f.get("description", ""))
+        manifest: List[FileEntry] = [
+            {
+                "path": e["path"],
+                "description": e.get("description", ""),
+                "manifest_source": "supplementary",
+                "tier": "supplementary",
+            }
+            for e in file_entries
         ]
-        impl_files = self._implementation_source_paths(file_entries)
+        return self.validate_manifest_completeness(
+            manifest,
+            design_spec=design_spec,
+            solution_spec=solution_spec,
+        )
 
-        issues: List[str] = []
-
-        if len(src_files) == 0:
-            issues.append(
-                "No concrete source files found in tech_stack.md. "
-                "List the project file structure with real filenames and extensions "
-                "(e.g. src/main.py, com/example/App.java). "
-                "Do NOT write file contents — just the tree structure."
-            )
-
-        components = extract_named_components(solution_spec) or extract_named_components(design_spec)
-        min_impl = max(4, len(components) * 2) if components else 4
-
-        if len(impl_files) < min_impl:
-            issues.append(
-                f"File tree is too shallow: found {len(impl_files)} implementation "
-                f"source file(s) but need at least {min_impl} "
-                f"(derived from {len(components) or 'default'} named component(s)). "
-                "Enumerate concrete source files for every module/service — not "
-                "directory-only entries or CI/config scaffolding."
-            )
-
-        if components:
-            missing = [
-                name for name in components
-                if not component_reflected_in_artifact(name, tech_stack_content, all_paths)
-            ]
-            if len(missing) > len(components) // 2:
-                issues.append(
-                    "File tree does not cover named components from the design/solution "
-                    f"spec. Missing or unrepresented: {missing[:8]}"
-                    + ("..." if len(missing) > 8 else "")
-                    + ". Each component needs its own directory with concrete source files."
-                )
-
-        if issues:
-            return {"valid": False, "issues": issues}
-
-        return {"valid": True, "issues": [], "implementation_files": len(impl_files)}
-
-    
+    def get_manifest_entries(self) -> List[FileEntry]:
+        """Return file_creation tasks as manifest rows (path, description, source, tier)."""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT metadata FROM tasks
+            WHERE project_id = ? AND task_type = 'file_creation'
+            ORDER BY created_at ASC
+            """,
+            (self.project_id,),
+        )
+        entries: List[FileEntry] = []
+        for (raw,) in cursor.fetchall():
+            if not raw:
+                continue
+            try:
+                meta = json.loads(raw)
+            except Exception:
+                continue
+            fp = (meta.get("file_path") or "").strip()
+            if not fp:
+                continue
+            source = meta.get("manifest_source") or meta.get("tier") or "supplementary"
+            tier = meta.get("tier") or source
+            entries.append({
+                "path": fp,
+                "description": meta.get("file_description") or "",
+                "manifest_source": source,
+                "tier": tier,
+            })
+        conn.close()
+        return entries
     def get_task_status(self, task_id: str) -> Optional[TaskStatus]:
         """Get current status of a task"""
         conn = sqlite3.connect(self.db_path)
@@ -1340,43 +1337,64 @@ class TaskManager:
     def register_granular_tasks(
         self,
         design_spec: str,
-        tech_stack_content: str,
+        tech_stack_content: str = "",
         *,
+        manifest: Optional[List[FileEntry]] = None,
         tdd: bool = False,
     ) -> List[TaskDefinition]:
-        """Decompose design spec + tech stack into per-file tasks with domain context.
+        """Register per-file tasks from a creation manifest (preferred) or legacy tech_stack."""
+        if manifest is None:
+            file_entries = self._extract_files_with_descriptions(tech_stack_content or "")
+            manifest = [
+                {
+                    "path": e["path"],
+                    "description": e.get("description", ""),
+                    "manifest_source": "supplementary",
+                    "tier": "supplementary",
+                }
+                for e in file_entries
+            ]
+        return self.register_granular_tasks_from_manifest(
+            manifest,
+            design_spec,
+            tdd=tdd,
+            tech_stack_content=tech_stack_content,
+        )
 
-        Parses the file structure from tech_stack_content and cross-references
-        bounded contexts from design_spec to attach domain context to each task.
-        Model/core files are registered before views/controllers to express dependencies.
-        File descriptions from tree comments are preserved in metadata.
-        """
+    def register_granular_tasks_from_manifest(
+        self,
+        manifest: List[FileEntry],
+        design_spec: str,
+        *,
+        tdd: bool = False,
+        tech_stack_content: str = "",
+    ) -> List[TaskDefinition]:
+        """Write manifest entries to SQLite as file_creation tasks."""
+        db_parent = Path(self.db_path).parent
         conn = sqlite3.connect(self.db_path)
         conn.execute(
             "DELETE FROM tasks WHERE project_id = ? AND task_type = 'file_creation' AND source IN ('tech_stack', ?)",
-            (self.project_id, str(self.db_path.parent / "tech_stack.md")),
+            (self.project_id, str(db_parent / "tech_stack.md")),
         )
         conn.commit()
         conn.close()
 
         self._tdd_mode = bool(tdd)
-
-        file_entries = self._extract_files_with_descriptions(tech_stack_content)
         contexts = self._extract_bounded_contexts(design_spec)
         feature_contents = self._load_workspace_feature_files()
 
         raw_tasks: List[TaskDefinition] = []
-
-        for entry in file_entries:
-            fp = entry["path"]
+        for entry in manifest:
+            fp = (entry.get("path") or "").strip()
             basename = Path(fp).name if fp else ""
             if not _is_valid_file_path(basename):
-                logger.warning("Skipping invalid file path from tech stack: %r", fp)
+                logger.warning("Skipping invalid manifest path: %r", fp)
                 continue
-            file_desc = entry.get("description", "")
+            file_desc = entry.get("description") or ""
+            manifest_source = entry.get("manifest_source") or entry.get("tier") or "supplementary"
+            tier = entry.get("tier") or manifest_source
             task_id = f"file_{self.normalize_file_path_for_task_id(fp)}"
             domain = self._match_domain_context(fp, contexts)
-
             task = TaskDefinition(
                 task_id=task_id,
                 phase="development",
@@ -1388,17 +1406,23 @@ class TaskManager:
                     "domain_context": domain,
                     "file_description": file_desc,
                     "feature_files": self._match_feature_files(fp, feature_contents),
+                    "manifest_source": manifest_source,
+                    "tier": tier,
                 },
             )
             raw_tasks.append(task)
 
-        # Auto-inject __init__.py for Python projects
         raw_tasks = self._inject_init_py_tasks(raw_tasks)
+        raw_tasks = self._inject_framework_scaffolding_tasks(
+            raw_tasks, tech_stack_content, design_spec,
+        )
+        for t in raw_tasks:
+            meta = t.metadata or {}
+            if "manifest_source" not in meta:
+                meta["manifest_source"] = "injected"
+                meta["tier"] = "injected"
+                t.metadata = meta
 
-        # Inject framework scaffolding tasks
-        raw_tasks = self._inject_framework_scaffolding_tasks(raw_tasks, tech_stack_content, design_spec)
-
-        # Sort tasks by tier so lower-tier files are registered first
         raw_tasks.sort(key=lambda t: self._classify_file_tier(
             (t.metadata or {}).get("file_path", ""),
             tdd=tdd,
@@ -1412,11 +1436,14 @@ class TaskManager:
             registered.append(t)
 
         all_tasks = registered
-        logger.info("Registered %d granular tasks (sorted by %d tiers)",
-                     len(all_tasks), len(set(
-                         self._classify_file_tier((t.metadata or {}).get("file_path", ""))
-                         for t in all_tasks
-                     )))
+        logger.info(
+            "Registered %d granular tasks from manifest (%d tiers)",
+            len(all_tasks),
+            len(set(
+                self._classify_file_tier((t.metadata or {}).get("file_path", ""))
+                for t in all_tasks
+            )),
+        )
 
         if tdd:
             plan_path = self.db_path.parent / "test_plan.md"
@@ -1440,7 +1467,7 @@ class TaskManager:
         tech_stack_content: str = "",
         test_plan_content: str = "",
     ) -> List[TaskDefinition]:
-        """Register missing test file_creation tasks derived from source tree + test plan."""
+        """Register missing test file_creation tasks derived from DB source paths + test plan."""
         self._tdd_mode = True
 
         source_paths: List[str] = []
@@ -1451,11 +1478,10 @@ class TaskManager:
             if fp and not is_test_file_path(fp):
                 source_paths.append(fp)
 
-        if not source_paths and tech_stack_content:
-            source_paths = [
-                e["path"]
-                for e in self._extract_files_with_descriptions(tech_stack_content)
-            ]
+        if not source_paths:
+            logger.debug(
+                "register_tdd_test_tasks: no source paths in DB; skipping tech_stack fallback"
+            )
 
         existing_paths = {
             (t.metadata or {}).get("file_path", "")
@@ -1674,110 +1700,50 @@ class TaskManager:
         return [e["path"] for e in entries]
 
     def _extract_files_with_descriptions(self, content: str) -> List[Dict[str, str]]:
-        """Extract file paths with descriptions from a tree structure in markdown code blocks.
+        """Extract file paths with descriptions from a tree structure in markdown code blocks."""
+        from ..utils.wiring_contract import extract_files_with_descriptions_from_tech_stack
+        return extract_files_with_descriptions_from_tech_stack(content)
 
-        Tracks indentation to reconstruct full paths like ``api/models.py``
-        instead of just ``models.py``.  Also captures inline comments
-        (e.g. ``# Database connection``) as descriptions.
-
-        The root project directory (first entry ending with ``/``) is stripped
-        from paths so files are relative to the project root.
-
-        Uses a two-pass approach: first identifies all code blocks, then only
-        parses those that contain tree characters (├, └, │, ─).  This avoids
-        toggling issues with nested backtick blocks.
-        """
-        # ── Pass 1: split into regions (code blocks and gaps between them) ─
-        regions: List[str] = []
-        current_lines: List[str] = []
-        in_block = False
-
-        for line in content.splitlines():
-            stripped = line.strip()
-            if stripped.startswith("```"):
-                # Save accumulated lines as a region before toggling
-                if current_lines:
-                    regions.append("\n".join(current_lines))
-                    current_lines = []
-                in_block = not in_block
+    def scaffold_directories_from_manifest(
+        self,
+        entries: List[FileEntry],
+        workspace_path: Path,
+    ) -> List[str]:
+        """Create empty parent directories for every manifest entry."""
+        workspace_path = Path(workspace_path)
+        created: List[str] = []
+        seen_dirs: set[str] = set()
+        for entry in entries:
+            rel = (entry.get("path") or "").strip()
+            if not rel:
                 continue
-            current_lines.append(line)
-        if current_lines:
-            regions.append("\n".join(current_lines))
-
-        # ── Pass 2: parse regions that contain tree characters ───────────
-        TREE_CHARS_RE = re.compile(r'[├└│─]')
-        entries: List[Dict[str, str]] = []
-
-        for block in regions:
-            if not TREE_CHARS_RE.search(block):
+            parent = (workspace_path / rel).parent
+            if parent == workspace_path or str(parent) in seen_dirs:
                 continue
-
-            dir_stack: List[tuple] = []
-            root_dir: Optional[str] = None
-
-            for line in block.splitlines():
-                tree_chars = re.match(r'^([\s│]*[├└─\s]*)', line)
-                indent = len(tree_chars.group(1).replace('│', ' ').replace('├', ' ')
-                             .replace('└', ' ').replace('─', ' ')) if tree_chars else 0
-
-                entry_match = re.search(
-                    r'[├└│─\s]*([a-zA-Z0-9_.\-][a-zA-Z0-9_/.\-]*/?)(?:\s+#\s*(.*))?',
-                    line,
-                )
-                if not entry_match:
-                    continue
-
-                name = entry_match.group(1).strip()
-                description = (entry_match.group(2) or "").strip()
-
-                while dir_stack and dir_stack[-1][0] >= indent:
-                    dir_stack.pop()
-
-                if name.endswith('/'):
-                    dir_name = name.rstrip('/')
-                    if root_dir is None and not dir_stack:
-                        root_dir = dir_name
-                    dir_stack.append((indent, dir_name))
-                elif _is_valid_file_path(name):
-                    prefix = "/".join(d[1] for d in dir_stack)
-                    full_path = f"{prefix}/{name}" if prefix else name
-                    if root_dir and full_path.startswith(root_dir + "/"):
-                        full_path = full_path[len(root_dir) + 1:]
-                    entries.append({"path": full_path, "description": description})
-
-        # ── Pass 3: plain path lists (one path per line, no tree chars) ──
-        # Tech architect pass 2 often outputs this format instead of unicode trees.
-        _PLAIN_PATH_RE = re.compile(
-            r'^([a-zA-Z0-9_.\-][a-zA-Z0-9_/.\-]*\.[a-zA-Z0-9]+)(?:\s+#\s*(.*))?\s*$'
-        )
-        for line in content.splitlines():
-            stripped = line.strip()
-            if not stripped or stripped.startswith("```"):
-                continue
-            if stripped.startswith("#") and not _PLAIN_PATH_RE.match(stripped.lstrip("#").strip()):
-                continue
-            match = _PLAIN_PATH_RE.match(stripped)
-            if match and _is_valid_file_path(match.group(1)):
-                entries.append({
-                    "path": match.group(1).strip(),
-                    "description": (match.group(2) or "").strip(),
-                })
-
-        seen: set = set()
-        deduped: List[Dict[str, str]] = []
-        for e in entries:
-            if e["path"] not in seen:
-                seen.add(e["path"])
-                deduped.append(e)
-        return deduped
+            if not parent.exists():
+                parent.mkdir(parents=True, exist_ok=True)
+                seen_dirs.add(str(parent))
+                try:
+                    created.append(str(parent.relative_to(workspace_path)))
+                except ValueError:
+                    created.append(str(parent))
+        if created:
+            logger.info(
+                "Scaffolded %d director(ies) from manifest under %s",
+                len(created),
+                workspace_path,
+            )
+        return created
 
     def scaffold_directories_from_tech_stack(
         self,
         tech_stack_content: str,
         workspace_path: Path,
     ) -> List[str]:
-        """Create empty parent directories for every file in the tech_stack tree."""
+        """Create empty parent directories — prefer manifest entries when tasks exist."""
+        manifest = self.get_manifest_entries()
+        if manifest:
+            return self.scaffold_directories_from_manifest(manifest, workspace_path)
         workspace_path = Path(workspace_path)
         created: List[str] = []
         seen_dirs: set[str] = set()
@@ -2201,7 +2167,23 @@ class TaskManager:
         fp = (task.metadata or {}).get("file_path", "")
         fp_lower = fp.lower()
         tdd = getattr(self, "_tdd_mode", False)
-        task_tier = self._classify_file_tier(fp_lower, tdd=tdd)
+
+        # Load wiring contract if present
+        from ..utils.wiring_contract import load_wiring_contract, package_for_file, deps_for_package
+        contract = load_wiring_contract(self.workspace_path) if self.workspace_path else None
+
+        deps: List[str] = []
+
+        if contract:
+            current_pkg = package_for_file(contract, fp)
+            if current_pkg:
+                outbound_deps = deps_for_package(contract, current_pkg)
+                for et in earlier_tasks:
+                    et_fp = (et.metadata or {}).get("file_path", "")
+                    if et_fp:
+                        et_pkg = package_for_file(contract, et_fp)
+                        if et_pkg in outbound_deps:
+                            deps.append(et.task_id)
 
         if is_test_file_path(fp_lower):
             registered = [
@@ -2213,10 +2195,11 @@ class TaskManager:
             if companion:
                 for et in earlier_tasks:
                     if (et.metadata or {}).get("file_path", "") == companion:
-                        return [et.task_id]
-            return []
+                        if et.task_id not in deps:
+                            deps.append(et.task_id)
+            return deps
 
-        deps: List[str] = []
+        task_tier = self._classify_file_tier(fp_lower, tdd=tdd)
         for et in earlier_tasks:
             et_fp = (et.metadata or {}).get("file_path", "").lower()
             et_tier = self._classify_file_tier(et_fp, tdd=tdd)
@@ -2225,7 +2208,8 @@ class TaskManager:
             et_stem = Path(et_fp).stem.replace("_", "")
             fp_flat = fp_lower.replace("_", "")
             if et_stem in fp_flat or et_stem.rstrip("s") in fp_flat:
-                deps.append(et.task_id)
+                if et.task_id not in deps:
+                    deps.append(et.task_id)
 
         return deps
 
@@ -2447,6 +2431,19 @@ class TaskManager:
                     related_paths.add(fp)
 
         current_fp = (task.metadata or {}).get("file_path", "")
+        
+        # Load wiring contract
+        from ..utils.wiring_contract import load_wiring_contract, package_for_file, deps_for_package
+        contract = load_wiring_contract(self.workspace_path) if self.workspace_path else None
+        if contract and current_fp:
+            current_pkg = package_for_file(contract, current_fp)
+            if current_pkg:
+                outbound_deps = deps_for_package(contract, current_pkg)
+                for fp in completed_files:
+                    fp_pkg = package_for_file(contract, fp)
+                    if fp_pkg in outbound_deps:
+                        related_paths.add(fp)
+
         if current_fp:
             current_dir = str(Path(current_fp).parent)
             if current_dir and current_dir != ".":
@@ -2482,6 +2479,7 @@ class TaskManager:
         max_tokens: Optional[int] = None,
         simple_mode: bool = False,
         tldr_context: Optional[str] = None,
+        wiring_contract: Optional[Dict[str, Any]] = None,
     ) -> str:
         """Build a focused prompt for generating a single file.
 
@@ -2491,7 +2489,7 @@ class TaskManager:
         cross-file consistency rules, and the tech stack so the LLM produces
         a complete, contextual implementation.
         """
-        cap = max_project_vision_chars if max_project_vision_chars is not None else 14_000
+        cap = max_project_vision_chars if isinstance(max_project_vision_chars, int) else 14_000
         if project_vision and len(project_vision) > cap:
             before = len(project_vision)
             project_vision = project_vision[:cap] + "\n\n[... project vision truncated to fit API limit ...]"
@@ -2517,6 +2515,30 @@ class TaskManager:
         if project_vision:
             parts.append(f"PROJECT VISION: {project_vision}")
             parts.append("")
+
+        if wiring_contract:
+            from ..utils.wiring_contract import format_prompt_section, import_prefix
+            parts.append(format_prompt_section(wiring_contract, file_path))
+
+            workspace_path = self.db_path.parent
+            module_root = import_prefix(wiring_contract, workspace_path) or wiring_contract.get("module", "")
+            if module_root:
+                parts.extend([
+                    "PROJECT IDENTITY:",
+                    f"- Module / import root: {module_root}",
+                    "- All local imports MUST use this exact prefix. Do NOT invent a shorter prefix "
+                    "(never use bare layer names like api/, service/, or sandbox/ as the module root). "
+                    "Do NOT mix divergent prefixes; stick to this single canonical prefix.",
+                    ""
+                ])
+
+        if file_path and file_path.endswith(("main.go", "main.py", "index.js", "app.py")):
+            parts.extend([
+                "APPLICATION ENTRYPOINT DELEGATION RULE:",
+                "- Do NOT write inline HTTP handlers, controller routes, database models, or core business logic directly in this entrypoint file.",
+                "- This entrypoint file must ONLY wire up configuration, routers/multiplexers, and dependency injection, delegating all operations to the packages (e.g. internal/api).",
+                ""
+            ])
 
         if rag_context and rag_context.strip():
             parts.append("REFERENCE & PLAN EXCERPTS (retrieved — follow precisely):")

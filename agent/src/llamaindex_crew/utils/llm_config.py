@@ -748,7 +748,36 @@ class GenericLlamaLLM(LLM):
                 last_content = last_entry.get("content", "")
                 if "Action:" not in last_content and "Action Input:" not in last_content:
                     formatted_messages.append({"role": "user", "content": "Please provide your final answer or next step."})
-        return formatted_messages
+
+        # Fix 2: sanitize orphaned tool messages.
+        # When a model generates non-standard tool-call tokens (e.g. Vertex AI's
+        # gpt-oss-120b emits <|channel|> syntax instead of OpenAI tool_calls),
+        # LlamaIndex stores the turn as a plain assistant message (no tool_calls),
+        # then injects a tool-result message anyway.  The resulting conversation
+        # history [... assistant(no tool_calls), tool(result) ...] causes strict
+        # OpenAI-compatible endpoints to respond with HTTP 400:
+        # "Message has tool role, but there was no previous assistant message
+        # with a tool call!"
+        # We convert orphaned tool messages to user messages to preserve context
+        # while making the history valid for all endpoints.
+        sanitized: list = []
+        for msg in formatted_messages:
+            if msg.get("role") == "tool":
+                prev = sanitized[-1] if sanitized else None
+                if prev and prev.get("role") == "assistant" and prev.get("tool_calls"):
+                    sanitized.append(msg)
+                else:
+                    logger.debug(
+                        "_format_messages_for_api: orphaned tool message detected "
+                        "— converting to user role to avoid HTTP 400"
+                    )
+                    sanitized.append({
+                        "role": "user",
+                        "content": f"[Tool result]: {msg.get('content', '')}",
+                    })
+            else:
+                sanitized.append(msg)
+        return sanitized
 
     @llm_chat_callback()
     async def achat(self, messages: list[ChatMessage], **kwargs) -> ChatResponse:

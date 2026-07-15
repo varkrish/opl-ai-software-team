@@ -565,3 +565,34 @@ class TestSolutioningLoop:
         assert isinstance(result.spec_path, Path)
         assert isinstance(result.candidates_path, Path)
         assert isinstance(result.critique_history, list)
+
+
+class TestMinimalChosenStack:
+    def test_go_api_vision_does_not_default_to_html_css(self):
+        from llamaindex_crew.utils.vision_stack_analysis import CapabilityProfile
+        from llamaindex_crew.workflows.solutioning_loop import _minimal_chosen_stack
+
+        profile = CapabilityProfile(
+            needs_api=True,
+            needs_server_runtime=True,
+            delivery_surface="api_service",
+        )
+        vision = (
+            "Build a secure Sandbox API in Go that creates Podman sandboxes "
+            "and streams command output. Configure as a systemd user service."
+        )
+        stack = _minimal_chosen_stack(profile, vision)
+        assert "go" in stack
+        assert "html" not in stack
+        assert "css" not in stack
+
+    def test_client_deliverable_still_defaults_html_css(self):
+        from llamaindex_crew.utils.vision_stack_analysis import CapabilityProfile
+        from llamaindex_crew.workflows.solutioning_loop import _minimal_chosen_stack
+
+        profile = CapabilityProfile(
+            delivery_surface="client_deliverable",
+            has_client_surface=True,
+        )
+        stack = _minimal_chosen_stack(profile, "Build a colourful landing page")
+        assert "html" in stack or "css" in stack

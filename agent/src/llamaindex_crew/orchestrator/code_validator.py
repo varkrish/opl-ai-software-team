@@ -13,6 +13,8 @@ checks and provides backward-compatible class-method APIs.
 import ast
 import json as _json
 import re
+import shutil
+import subprocess
 import sys
 import logging
 import urllib.request
@@ -74,6 +76,18 @@ class CodeCompletenessValidator:
             content = path.read_text(encoding="utf-8", errors="replace")
         except Exception as e:
             return {"complete": False, "issues": [f"Cannot read: {e}"], "file": str(path)}
+
+        # Reject unparsed LLM tags or markdown block fences
+        if any(tag in content for tag in ["<|start|>", "<|channel|>", "<|message|>", "<|call|>", "<|end|>"]):
+            issues.append("Contains unparsed LLM control tags (like <|channel|>)")
+
+        if "```" in content:
+            issues.append("Contains unparsed markdown code fences (```)")
+
+        if path.suffix == ".go":
+            pkg_decls = re.findall(r'^\s*package\s+[a-zA-Z0-9_]+', content, re.MULTILINE)
+            if len(pkg_decls) > 1:
+                issues.append("Contains multiple package declarations (stitched or duplicate package declarations)")
 
         if not content.strip():
             if path.name == "__init__.py":
@@ -828,3 +842,79 @@ class CodeCompletenessValidator:
             if not result.get("note"):
                 return result
         return {"valid": True, "missing_endpoints": [], "extra_endpoints": []}
+
+    # ── Workspace compile gate (when toolchain available) ─────────────────────
+
+    @classmethod
+    def run_workspace_compile_gate(cls, workspace_path: Path) -> Dict[str, Any]:
+        """Run language-appropriate compile/build when manifest + toolchain exist."""
+        ws = Path(workspace_path)
+        issues: List[str] = []
+
+        def _run(cmd: List[str], label: str, *, timeout: int = 180) -> None:
+            if not shutil.which(cmd[0]):
+                logger.debug("Compile gate skipped (%s): %s not installed", label, cmd[0])
+                return
+            try:
+                result = subprocess.run(
+                    cmd,
+                    cwd=ws,
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout,
+                )
+            except (subprocess.TimeoutExpired, OSError) as exc:
+                issues.append(f"{label}: {exc}")
+                return
+            if result.returncode != 0:
+                output = ((result.stdout or "") + (result.stderr or "")).strip()[:1500]
+                issues.append(f"{label} failed:\n{output}")
+
+        if (ws / "go.mod").is_file():
+            # Resolve module graph / go.sum before compile (language-specific dep sync).
+            _run(["go", "mod", "tidy"], "go mod tidy", timeout=240)
+            _run(["go", "build", "./..."], "go build")
+
+        if (ws / "pyproject.toml").is_file() or (ws / "requirements.txt").is_file():
+            _run(["python", "-m", "compileall", "-q", "."], "python compileall")
+
+        if (ws / "pom.xml").is_file():
+            _run(["mvn", "compile", "-q"], "maven compile")
+
+        if (ws / "build.gradle").is_file() or (ws / "build.gradle.kts").is_file():
+            gradle = "gradle" if shutil.which("gradle") else None
+            if gradle:
+                _run([gradle, "compileJava", "-q"], "gradle compileJava")
+
+        if (ws / "Makefile").is_file() or (ws / "makefile").is_file():
+            _run(["make", "-n"], "make dry-run")
+
+        if (ws / "CMakeLists.txt").is_file():
+            build_dir = ws / "build"
+            if shutil.which("cmake"):
+                build_dir.mkdir(exist_ok=True)
+                cfg = subprocess.run(
+                    ["cmake", ".."],
+                    cwd=build_dir,
+                    capture_output=True,
+                    text=True,
+                    timeout=120,
+                )
+                if cfg.returncode != 0:
+                    issues.append(f"cmake configure failed:\n{(cfg.stderr or cfg.stdout)[:1500]}")
+                elif shutil.which("cmake"):
+                    _run(["cmake", "--build", "."], "cmake build")
+
+        if (ws / "package.json").is_file():
+            if (ws / "tsconfig.json").is_file() and shutil.which("tsc"):
+                _run(["tsc", "--noEmit"], "typescript check")
+            elif shutil.which("npm"):
+                try:
+                    pkg = _json.loads((ws / "package.json").read_text(encoding="utf-8"))
+                    scripts = (pkg or {}).get("scripts") or {}
+                    if scripts.get("build"):
+                        _run(["npm", "run", "build"], "npm run build")
+                except Exception:
+                    pass
+
+        return {"valid": len(issues) == 0, "issues": issues, "severity": "error"}

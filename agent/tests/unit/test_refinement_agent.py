@@ -119,7 +119,7 @@ def test_create_workspace_file_tools_returns_six_tools():
     assert "file_reader" in names
     assert "file_lister" in names
     assert "file_deleter" in names
-    assert "replace_file_content" in names
+    assert "patch_file_content" in names
 
 
 def test_file_tools_accept_workspace_path_parameter():

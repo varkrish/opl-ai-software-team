@@ -134,7 +134,7 @@ class TestRunSolutionGate:
         ), patch.object(
             wf, "_pause_for_plan_review",
             return_value={"status": "pending_review", "project_id": wf.project_id},
-        ):
+        ), patch.object(wf.state_machine, "transition"):
             result = wf.run()
         sol_loop.assert_not_called()
         assert run_phase.call_count >= 1
@@ -149,7 +149,7 @@ class TestRunSolutionGate:
         ), patch.object(
             wf, "_pause_for_plan_review",
             return_value={"status": "pending_review", "project_id": wf.project_id},
-        ):
+        ), patch.object(wf.state_machine, "transition"):
             result = wf.run()
         sol_loop.assert_not_called()
         assert run_phase.call_count >= 1
@@ -169,7 +169,7 @@ class TestRunSolutionGate:
         ), patch.object(wf, "run_tech_architect_phase", return_value="stack"), patch.object(
             wf, "_run_phase_with_retry",
             side_effect=lambda phase, fn: fn(),
-        ):
+        ), patch.object(wf.state_machine, "transition"):
             result = wf.run()
         assert result["status"] == "pending_review"
         meta = _parse_meta(job_db.get_job(wf.project_id))

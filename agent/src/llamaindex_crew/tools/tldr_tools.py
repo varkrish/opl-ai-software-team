@@ -815,6 +815,11 @@ def create_tldr_tools(workspace_path: Path, lang: Optional[str] = None) -> List[
     return [
         FunctionTool.from_defaults(
             fn=search_fn,
+            name="file_search",
+            description="Alias for code_search.",
+        ),
+        FunctionTool.from_defaults(
+            fn=search_fn,
             name="code_search",
             description=(
                 "Search the codebase for a regex pattern. Returns matching lines with context. "
@@ -854,6 +859,7 @@ def create_tldr_tools(workspace_path: Path, lang: Optional[str] = None) -> List[
 
 TLDR_TOOL_NAMES = frozenset({
     "code_search",
+    "file_search",
     "code_structure",
     "code_context",
     "code_impact",

@@ -30,6 +30,9 @@ _NAMED_TECHNOLOGIES: Tuple[Tuple[str, Sequence[str]], ...] = (
     ("apache camel", ("apache camel", "camel route")),
     ("react native", ("react native",)),
     ("flutter", ("flutter",)),
+    ("go", (r"\bgo\b", "golang")),
+    ("rust", ("rust", "cargo")),
+    ("python", ("python", "pip")),
 )
 
 # Application-framework markers that imply a server-side platform (not infra alone).
@@ -100,8 +103,14 @@ def _match_any(text: str, patterns: Sequence[str]) -> bool:
 def _extract_named_technologies(text: str) -> List[str]:
     found: List[str] = []
     for name, markers in _NAMED_TECHNOLOGIES:
-        if any(m in text for m in markers):
-            found.append(name)
+        for m in markers:
+            if m.startswith(r"\b") or m.endswith(r"\b"):
+                if re.search(m, text):
+                    found.append(name)
+                    break
+            elif m in text:
+                found.append(name)
+                break
     return found
 
 

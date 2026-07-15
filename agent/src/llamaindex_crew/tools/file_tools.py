@@ -329,7 +329,7 @@ def file_writer(file_path: str, content: str, workspace_path: Optional[str] = No
             '.env', '.env.example', '.gitignore', '.dockerignore', '.csv',
         }
         ext = ('.' + file_path.rsplit('.', 1)[-1].lower()) if '.' in file_path else ''
-        if ext in _NON_CODE_EXTS:
+        if ext in _NON_CODE_EXTS or ext == '.go':
             language = 'none'
         elif file_path.endswith('.js') or file_path.endswith('.jsx'):
             language = 'javascript'
@@ -337,8 +337,10 @@ def file_writer(file_path: str, content: str, workspace_path: Optional[str] = No
             language = 'javascript'
         elif file_path.endswith('.sh') or file_path.endswith('.bash'):
             language = 'bash'
+        elif file_path.endswith('.py'):
+            language = 'python'
         else:
-            language = 'python'  # .py and any unknown code-like extension
+            language = 'none'  # fallback for other unknown languages
         
         # Validate file write
         safety_result = safety_checker.check_file_write(file_path, content, language)
@@ -605,6 +607,26 @@ def replace_file_content(
     replacement_content = extra.get("replacement_content", extra.get("new_content", replacement_content))
     if not file_path:
         return "❌ Error: file_path is required."
+
+    from ..utils.output_parser import (
+        is_agent_planning_monologue,
+        is_llm_stub_content,
+        looks_like_raw_agent_dump,
+    )
+    if (
+        is_llm_stub_content(replacement_content or "", file_path=file_path)
+        or is_agent_planning_monologue(replacement_content or "", file_path=file_path)
+        or looks_like_raw_agent_dump(replacement_content or "", file_path=file_path)
+    ):
+        logger.warning(
+            "replace_file_content REJECTED %s — content is unparsed LLM output (%d chars)",
+            file_path, len(replacement_content or ""),
+        )
+        return (
+            "❌ Rejected: replacement looks like unparsed LLM output "
+            "(channel tokens or meta-commentary), not real file content."
+        )
+
     try:
         ws_path = _resolve_workspace(workspace_path)
         full_path = (ws_path / file_path).resolve()
@@ -684,7 +706,26 @@ FileDeleterTool = FunctionTool.from_defaults(
 @_logged_file_tool("patch_file_content")
 def patch_file_content(file_path: str, diff_blocks: str, workspace_path: Optional[str] = None, **kwargs) -> str:
     """Patch an existing file using Aider-style SEARCH/REPLACE blocks."""
+    file_path = _sanitize_java_package_path((file_path or "").strip())
     ws = _resolve_workspace(workspace_path)
+    ws_key = str(ws)
+    allowed = _allowed_paths_by_workspace.get(ws_key)
+    if allowed is not None:
+        check_path = file_path
+        if check_path.startswith(str(ws)):
+            check_path = check_path[len(str(ws)):].lstrip("/")
+        if check_path not in allowed:
+            normalized = _normalize_manifest_path(check_path, allowed)
+            if normalized not in allowed:
+                from ..utils.manifest_guard import is_companion_python_init
+                if not is_companion_python_init(check_path, allowed):
+                    return (
+                        f"❌ Rejected: patch to '{file_path}' is outside the registered "
+                        f"manifest allowlist ({len(allowed)} paths)."
+                    )
+            else:
+                check_path = normalized
+        file_path = check_path
     try:
         target = (ws / file_path).resolve()
         if not str(target).startswith(str(ws.resolve())):
@@ -755,7 +796,26 @@ def patch_file_content(file_path: str, diff_blocks: str, workspace_path: Optiona
                 applied += 1
             else:
                 return f"❌ Error: SEARCH block not found in file:\n{search}"
-                
+
+    from ..utils.output_parser import (
+        is_agent_planning_monologue,
+        is_llm_stub_content,
+        looks_like_raw_agent_dump,
+    )
+    if (
+        is_llm_stub_content(patched_text, file_path=file_path)
+        or is_agent_planning_monologue(patched_text, file_path=file_path)
+        or looks_like_raw_agent_dump(patched_text, file_path=file_path)
+    ):
+        logger.warning(
+            "patch_file_content REJECTED %s — patched result is unparsed LLM output",
+            file_path,
+        )
+        return (
+            "❌ Rejected: patched content looks like unparsed LLM output "
+            "(channel tokens or meta-commentary), not real file content."
+        )
+
     try:
         target.write_text(patched_text, encoding="utf-8")
         return f"✅ Successfully applied {applied} block(s)."

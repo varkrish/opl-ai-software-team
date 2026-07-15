@@ -30,6 +30,16 @@ for _mod in [
         sys.modules[_mod] = MagicMock()
 
 
+# ── Autouse fixture to mock tldr bin path ─────────────────────────────────────
+@pytest.fixture(autouse=True)
+def mock_tldr_bin_cache():
+    from llamaindex_crew.tools import tldr_tools
+    old_cache = tldr_tools._TLDR_BIN_CACHE
+    tldr_tools._TLDR_BIN_CACHE = str(Path(__file__))
+    yield
+    tldr_tools._TLDR_BIN_CACHE = old_cache
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # run_tldr
 # ══════════════════════════════════════════════════════════════════════════════
@@ -69,6 +79,8 @@ class TestRunTldr:
 
     def test_returns_error_when_tldr_missing(self):
         from llamaindex_crew.tools.tldr_tools import run_tldr
+        from llamaindex_crew.tools import tldr_tools
+        tldr_tools._TLDR_BIN_CACHE = None
 
         with patch("shutil.which", return_value=None):
             result = run_tldr(["structure", "/tmp/ws"])
@@ -352,6 +364,8 @@ class TestPrefetchTldrContext:
 
     def test_returns_empty_when_tldr_not_in_path(self, tmp_path):
         from llamaindex_crew.tools.tldr_tools import prefetch_tldr_context
+        from llamaindex_crew.tools import tldr_tools
+        tldr_tools._TLDR_BIN_CACHE = None
 
         with patch("shutil.which", return_value=None):
             result = prefetch_tldr_context(
@@ -457,6 +471,8 @@ class TestPrefetchTldrContext:
     def test_returns_empty_on_none_config_no_tldr(self, tmp_path):
         """When config is None and tldr is not installed, return empty string."""
         from llamaindex_crew.tools.tldr_tools import prefetch_tldr_context
+        from llamaindex_crew.tools import tldr_tools
+        tldr_tools._TLDR_BIN_CACHE = None
 
         with patch("shutil.which", return_value=None):
             result = prefetch_tldr_context(

@@ -416,7 +416,8 @@ class SoftwareDevWorkflow:
         self.state_machine = ProjectStateMachine(workspace_path, project_id)
         self.task_manager = TaskManager(
             workspace_path / f"tasks_{project_id}.db",
-            project_id
+            project_id,
+            workspace_path=workspace_path
         )
         self.budget_tracker = EnhancedBudgetTracker()
         pl = getattr(config, "prompt_limits", None) if config else None
@@ -446,6 +447,7 @@ class SoftwareDevWorkflow:
         self.solution_spec = None
         self._export_registry: Dict[str, Any] = {}  # file_path -> export summary from dev phase
         self._tldr_structure_cache: dict = {}
+        self._wiring_contract = None
     
     def _report_progress(self, phase: str, progress: int, message: str = None):
         """Report progress via callback if available"""
@@ -626,6 +628,340 @@ class SoftwareDevWorkflow:
             logger.info("Locked stack_manifest.json from approved solution_spec")
         except Exception as exc:
             logger.warning("Could not lock stack_manifest from approved solution: %s", exc)
+
+        # Emit/Extract wiring_contract early
+        self._ensure_wiring_contract_locked()
+
+    def _ensure_wiring_contract_locked(self, *, skip_tech_stack_reseed: bool = False) -> None:
+        """Lock wiring_contract.json: JSON emit, jq patch on path seed, or path-only fallback."""
+        from ..utils.wiring_contract import (
+            load_wiring_contract,
+            write_wiring_contract,
+            extract_wiring_contract_from_specs,
+            enrich_wiring_contract_from_tldr,
+            should_skip_contract_reseed_from_tech_stack,
+        )
+
+        if not self._wiring_contract:
+            self._wiring_contract = load_wiring_contract(self.workspace_path)
+
+        if skip_tech_stack_reseed or should_skip_contract_reseed_from_tech_stack(
+            self._wiring_contract
+        ):
+            if self._wiring_contract:
+                try:
+                    enriched = enrich_wiring_contract_from_tldr(
+                        self.workspace_path,
+                        self._wiring_contract,
+                        lang=(self._wiring_contract.get("language") or None),
+                    )
+                    if enriched and enriched != self._wiring_contract:
+                        write_wiring_contract(self.workspace_path, enriched)
+                        self._wiring_contract = enriched
+                        logger.info("Enriched wiring_contract.json from tldr (reseed skipped)")
+                except Exception as exc:
+                    logger.debug("tldr enrich skipped: %s", exc)
+            return
+
+        solution_spec_text = self._load_solution_spec_text() if self._solution_contract_active() else ""
+        if not solution_spec_text:
+            spec_path = self.workspace_path / "solution_spec.md"
+            if spec_path.exists():
+                try:
+                    solution_spec_text = spec_path.read_text(encoding="utf-8", errors="replace")
+                except Exception:
+                    pass
+
+        design_spec_text = self.design_spec or ""
+        if not design_spec_text:
+            design_path = self.workspace_path / "design_spec.md"
+            if design_path.exists():
+                try:
+                    design_spec_text = design_path.read_text(encoding="utf-8", errors="replace")
+                except Exception:
+                    pass
+
+        tech_stack_text = self.tech_stack or ""
+        if not tech_stack_text:
+            tech_path = self.workspace_path / "tech_stack.md"
+            if tech_path.exists():
+                try:
+                    tech_stack_text = tech_path.read_text(encoding="utf-8", errors="replace")
+                except Exception:
+                    pass
+
+        if solution_spec_text or design_spec_text or tech_stack_text:
+            try:
+                lang_hint = None
+                manifest = _load_workspace_stack_manifest(self.workspace_path)
+                if manifest and "language" in manifest:
+                    lang_hint = manifest["language"]
+
+                contract_data = extract_wiring_contract_from_specs(
+                    solution_spec_text,
+                    design_spec_text,
+                    language_hint=lang_hint,
+                    tech_stack=tech_stack_text,
+                    workspace=self.workspace_path,
+                )
+                if contract_data and contract_data.get("packages"):
+                    if contract_data != self._wiring_contract:
+                        write_wiring_contract(self.workspace_path, contract_data)
+                        self._wiring_contract = contract_data
+                        source = (contract_data.get("_meta") or {}).get("source", "unknown")
+                        logger.info("Locked wiring_contract.json (source=%s)", source)
+            except Exception as exc:
+                logger.warning("Could not lock wiring_contract from specs: %s", exc)
+
+        # Observed overlay from tldr when workspace already has source (brownfield / mid-job)
+        if self._wiring_contract:
+            try:
+                enriched = enrich_wiring_contract_from_tldr(
+                    self.workspace_path,
+                    self._wiring_contract,
+                    lang=(self._wiring_contract.get("language") or None),
+                )
+                if enriched and enriched != self._wiring_contract:
+                    write_wiring_contract(self.workspace_path, enriched)
+                    self._wiring_contract = enriched
+                    logger.info("Enriched wiring_contract.json from tldr structure/call graph")
+            except Exception as exc:
+                logger.debug("tldr enrich skipped: %s", exc)
+
+    def _repair_wiring_planned_emit(self) -> None:
+        """One-shot repair when locked contract lacks planned owns/symbols.
+
+        Asks the LLM for a <wiring_patch> only, merges into design_spec.md when present,
+        then re-locks. Never fails the job if repair is weak.
+        """
+        from ..utils.wiring_contract import (
+            contract_has_planned_apis,
+            WIRING_PATCH_REPAIR_PROMPT,
+            parse_emitted_wiring_patch,
+        )
+
+        if contract_has_planned_apis(self._wiring_contract):
+            return
+
+        logger.info("Wiring contract lacks planned APIs — attempting one repair emit")
+        try:
+            from ..agents.base_agent import BaseLlamaIndexAgent
+
+            agent = BaseLlamaIndexAgent(
+                role="WiringArchitect",
+                goal="Emit a valid wiring_patch for the project",
+                backstory="You lock package ownership and public signatures before codegen.",
+                tools=[],
+                agent_type="manager",
+                budget_tracker=self.budget_tracker,
+            )
+            context_bits = []
+            if self.design_spec:
+                context_bits.append(f"DESIGN SPEC (excerpt):\n{(self.design_spec or '')[:6000]}")
+            if self.tech_stack:
+                context_bits.append(f"TECH STACK (excerpt):\n{(self.tech_stack or '')[:4000]}")
+            if self.vision:
+                context_bits.append(f"VISION:\n{(self.vision or '')[:1500]}")
+            prompt = (
+                WIRING_PATCH_REPAIR_PROMPT.strip()
+                + "\n\n"
+                + "\n\n".join(context_bits)
+            )
+            response = agent.chat(prompt)
+            patch = parse_emitted_wiring_patch(response or "")
+            if not patch:
+                logger.warning("Wiring repair emit produced no <wiring_patch>; continuing with seed")
+                return
+
+            # Append patch to design_spec when available so extract path sees it
+            design_path = self.workspace_path / "design_spec.md"
+            block = f"\n\n<wiring_patch>\n{patch}\n</wiring_patch>\n"
+            if design_path.exists():
+                try:
+                    existing = design_path.read_text(encoding="utf-8", errors="replace")
+                    if "<wiring_patch>" not in existing.lower():
+                        design_path.write_text(existing.rstrip() + block, encoding="utf-8")
+                    else:
+                        # Replace first patch block
+                        import re as _re
+                        design_path.write_text(
+                            _re.sub(
+                                r"<wiring_patch>.*?</wiring_patch>",
+                                f"<wiring_patch>\n{patch}\n</wiring_patch>",
+                                existing,
+                                count=1,
+                                flags=_re.DOTALL | _re.IGNORECASE,
+                            ),
+                            encoding="utf-8",
+                        )
+                    self.design_spec = design_path.read_text(encoding="utf-8", errors="replace")
+                except Exception as exc:
+                    logger.warning("Could not persist wiring repair to design_spec.md: %s", exc)
+                    # Fall back: stash on tech_stack
+                    tech_path = self.workspace_path / "tech_stack.md"
+                    if tech_path.exists():
+                        tech_path.write_text(
+                            tech_path.read_text(encoding="utf-8", errors="replace").rstrip() + block,
+                            encoding="utf-8",
+                        )
+                        self.tech_stack = tech_path.read_text(encoding="utf-8", errors="replace")
+            else:
+                tech_path = self.workspace_path / "tech_stack.md"
+                if tech_path.exists():
+                    tech_path.write_text(
+                        tech_path.read_text(encoding="utf-8", errors="replace").rstrip() + block,
+                        encoding="utf-8",
+                    )
+                    self.tech_stack = tech_path.read_text(encoding="utf-8", errors="replace")
+                else:
+                    design_path.write_text("# Design\n" + block, encoding="utf-8")
+                    self.design_spec = design_path.read_text(encoding="utf-8", errors="replace")
+
+            self._ensure_wiring_contract_locked()
+            if contract_has_planned_apis(self._wiring_contract):
+                logger.info("Wiring repair succeeded — planned APIs locked")
+            else:
+                logger.warning("Wiring repair still weak after re-lock; continuing")
+        except Exception as exc:
+            logger.warning("Wiring planned-emit repair failed (non-fatal): %s", exc)
+
+    def _is_strict_wiring_enforcement(self) -> bool:
+        from ..utils.wiring_contract import is_strict_wiring_enforcement
+        return is_strict_wiring_enforcement(self._wiring_contract)
+
+    def _enrich_wiring_after_codegen(self) -> None:
+        """Refresh wiring symbols/deps from tldr after files land on disk."""
+        if not self._wiring_contract:
+            self._ensure_wiring_contract_locked()
+        if not self._wiring_contract:
+            return
+        try:
+            from ..utils.wiring_contract import (
+                enrich_wiring_contract_from_tldr,
+                write_wiring_contract,
+            )
+            from ..tools.tldr_tools import refresh_call_graph
+            try:
+                refresh_call_graph(self.workspace_path)
+            except Exception:
+                pass
+            enriched = enrich_wiring_contract_from_tldr(
+                self.workspace_path,
+                self._wiring_contract,
+                lang=(self._wiring_contract.get("language") or None),
+            )
+            write_wiring_contract(self.workspace_path, enriched)
+            self._wiring_contract = enriched
+        except Exception as exc:
+            logger.warning("Post-codegen wiring enrich failed: %s", exc)
+
+    def _enrich_wiring_after_file(self, file_path: str, lock=None) -> None:
+        """Enrich wiring contract immediately after a file is generated."""
+        from ..utils.wiring_contract import (
+            _has_source_suffix,
+            sync_module_identity_from_workspace,
+            write_wiring_contract,
+        )
+        if not self._wiring_contract or not file_path:
+            return
+
+        basename = Path(file_path).name.lower()
+        # Package-manager manifests redefine the canonical import root (any language).
+        if basename in {
+            "go.mod", "package.json", "pyproject.toml", "cargo.toml",
+            "build.sbt", "pom.xml", "composer.json", "gemfile",
+        } or basename.startswith("build.gradle"):
+            try:
+                def _sync():
+                    synced = sync_module_identity_from_workspace(
+                        self._wiring_contract,
+                        self.workspace_path,
+                        solution_spec=self._load_solution_spec_text(),
+                        design_spec=self.design_spec or "",
+                        tech_stack=self.tech_stack or "",
+                    )
+                    write_wiring_contract(self.workspace_path, synced)
+                    self._wiring_contract = synced
+
+                if lock:
+                    with lock:
+                        _sync()
+                else:
+                    _sync()
+            except Exception as exc:
+                logger.debug("Module identity sync after %s failed: %s", file_path, exc)
+            return
+
+        if not _has_source_suffix(file_path):
+            return
+
+        try:
+            from ..utils.wiring_contract import enrich_wiring_contract_from_file
+            from ..tools.tldr_tools import run_tldr_extract, run_tldr_imports
+
+            # Extract outside the lock to prevent stalling parallel workers
+            extract_data = run_tldr_extract(self.workspace_path, file_path)
+            imports_data = run_tldr_imports(self.workspace_path, file_path)
+
+            if lock:
+                with lock:
+                    enriched = enrich_wiring_contract_from_file(
+                        self._wiring_contract,
+                        file_path,
+                        extract_data,
+                        imports_data,
+                    )
+                    write_wiring_contract(self.workspace_path, enriched)
+                    self._wiring_contract = enriched
+            else:
+                enriched = enrich_wiring_contract_from_file(
+                    self._wiring_contract,
+                    file_path,
+                    extract_data,
+                    imports_data,
+                )
+                write_wiring_contract(self.workspace_path, enriched)
+                self._wiring_contract = enriched
+
+        except Exception as exc:
+            logger.debug("Per-file wiring enrich failed for %s: %s", file_path, exc)
+
+    def _build_wiring_allowlist(self) -> set[str] | None:
+        if not self._wiring_contract:
+            return None
+        allowed = set()
+        packages = self._wiring_contract.get("packages") or {}
+        for pkg_name, pkg_data in packages.items():
+            for f in pkg_data.get("files") or []:
+                f_norm = f.replace("\\", "/").strip().lstrip("/")
+                pkg_norm = pkg_name.replace("\\", "/").strip().lstrip("/")
+                if f_norm.startswith(pkg_norm + "/"):
+                    allowed.add(f_norm)
+                else:
+                    allowed.add(f"{pkg_norm}/{f_norm}")
+        
+        # Add registered tech stack paths
+        registered = self.task_manager.get_registered_file_paths()
+        if registered:
+            allowed.update(registered)
+            
+        # Add workflow-specific documents (language-agnostic)
+        workflow_docs = {
+            "api_contract.yaml", "tech_stack.md", "implementation_plan.md", 
+            "design_spec.md", "solution_spec.md", "user_stories.md", 
+            "wiring_contract.json", ".gitignore", "README.md", "README"
+        }
+        allowed.update(workflow_docs)
+
+        # Add all existing files in the root workspace directory dynamically (config/tooling roots)
+        if self.workspace_path.exists():
+            try:
+                for p in self.workspace_path.iterdir():
+                    if p.is_file():
+                        allowed.add(p.name)
+            except Exception:
+                pass
+        return allowed
 
     def _run_stack_contract_phase(self):
         """
@@ -1757,9 +2093,58 @@ class SoftwareDevWorkflow:
             "missing": pom_result.get("missing", []),
         }
 
+        # 15. Wiring reconciliation
+        wiring_reconcile = self._run_wiring_reconcile_pass()
+        report["checks"]["wiring_reconciliation"] = wiring_reconcile
+
         all_passed = all(c.get("pass", True) for c in report["checks"].values())
         report["overall"] = "PASS" if all_passed else "ISSUES_FOUND"
         return report
+
+    def _run_wiring_reconcile_pass(self) -> Dict[str, Any]:
+        """Verify on-disk imports and packages against wiring_contract.json."""
+        self._enrich_wiring_after_codegen()
+
+        if not self._wiring_contract:
+            return {"pass": True, "issues": []}
+
+        from ..utils.wiring_contract import reconcile_workspace_against_contract
+
+        issues = reconcile_workspace_against_contract(
+            self._wiring_contract,
+            self.workspace_path,
+        )
+        # Soft signature-drift issues collected during per-file enrich
+        seen = {
+            (i.get("file", ""), i.get("symbol", ""), i.get("description", ""))
+            for i in issues
+            if isinstance(i, dict)
+        }
+        for wi in self._wiring_contract.get("wiring_issues") or []:
+            if not isinstance(wi, dict):
+                continue
+            key = (wi.get("file", ""), wi.get("symbol", ""), wi.get("description", ""))
+            if key in seen:
+                continue
+            issues.append(wi)
+            seen.add(key)
+
+        # Missing declared source files always fail (even in relaxed mode).
+        # Soft warnings never fail. Other errors fail only under strict enforcement.
+        missing = [
+            i for i in issues
+            if isinstance(i, dict)
+            and "declared source file missing" in (i.get("description") or "")
+        ]
+        blocking = [
+            i for i in issues
+            if isinstance(i, dict) and i.get("severity") != "warning"
+        ]
+        strict = bool(self._wiring_contract and self._is_strict_wiring_enforcement())
+        return {
+            "pass": len(missing) == 0 and (len(blocking) == 0 if strict else True),
+            "issues": issues,
+        }
 
     def _collect_fixable_issues(self, report: Dict[str, Any]) -> List[Dict[str, Any]]:
         """Distil validation report into a list of actionable file-level issues."""
@@ -1854,6 +2239,16 @@ class SoftwareDevWorkflow:
                     "check": "pom_xml_completeness",
                     "description": f"Maven dependency '{group_id}:{artifact_id}' needed but not declared in pom.xml",
                 })
+
+        for w in report.get("checks", {}).get("wiring_reconciliation", {}).get("issues", []):
+            # Soft signature-drift warnings are informational — do not feed into fix loops
+            if w.get("severity") == "warning":
+                continue
+            issues.append({
+                "file": w.get("file", ""),
+                "check": "wiring_reconciliation",
+                "description": w.get("description", ""),
+            })
 
         return issues
 
@@ -2005,7 +2400,21 @@ class SoftwareDevWorkflow:
             "TypeORM: import decorators directly from 'typeorm'.\n"
         )
 
+        wiring_info = ""
+        if self._wiring_contract:
+            from ..utils.wiring_contract import format_prompt_section, import_prefix
+            wiring_info = format_prompt_section(self._wiring_contract, file_path)
+            module_root = import_prefix(self._wiring_contract, self.workspace_path) or self._wiring_contract.get("module", "")
+            if module_root:
+                wiring_info += (
+                    "PROJECT IDENTITY:\n"
+                    f"- Module / import root: {module_root}\n"
+                    "- All local imports MUST use this exact prefix. "
+                    "Never invent a shorter bare layer prefix.\n\n"
+                )
+
         fix_prompt = (
+            f"{wiring_info}"
             f"The file `{file_path}` has these validation issues:\n{issue_list}\n\n"
             f"Tech stack:\n{(self.tech_stack or '')[:2000]}\n\n"
             f"{content_section}"
@@ -2017,6 +2426,46 @@ class SoftwareDevWorkflow:
             self.dev_agent.agent.chat(fix_prompt)
         except Exception as e:
             logger.warning("Post-build fix failed for %s: %s", file_path, e)
+
+    def _resolve_final_job_status(self) -> str:
+        """Return completed_with_errors when validation report has blocking failures."""
+        report = getattr(self, "_validation_report", {}) or {}
+        if report.get("overall") != "ISSUES_FOUND":
+            return "completed"
+
+        for check_name, check in (report.get("checks") or {}).items():
+            if not isinstance(check, dict):
+                continue
+            if check.get("pass", True):
+                continue
+            if check_name == "wiring_reconciliation":
+                issues = check.get("issues") or []
+                blocking = [
+                    i for i in issues
+                    if isinstance(i, dict) and i.get("severity") != "warning"
+                ]
+                if blocking:
+                    logger.warning(
+                        "Job completed_with_errors: wiring reconciliation has %d blocking issue(s)",
+                        len(blocking),
+                    )
+                    return "completed_with_errors"
+                continue
+            severity = check.get("severity", "error")
+            if severity != "warning":
+                logger.warning(
+                    "Job completed_with_errors: check '%s' failed", check_name,
+                )
+                return "completed_with_errors"
+
+        fixable = self._collect_fixable_issues(report)
+        if fixable:
+            logger.warning(
+                "Job completed_with_errors: %d fixable validation issue(s) remain",
+                len(fixable),
+            )
+            return "completed_with_errors"
+        return "completed"
 
     def _run_post_build_fix_iteration(self) -> None:
         """After all phases complete, re-validate and iterate to fix issues.
@@ -2082,6 +2531,12 @@ class SoftwareDevWorkflow:
             allowed = remediation_write_allowlist(
                 registered, self.workspace_path,
             )
+            wiring_allowed = self._build_wiring_allowlist()
+            if wiring_allowed:
+                if allowed:
+                    allowed.update(wiring_allowed)
+                else:
+                    allowed = wiring_allowed
             set_allowed_file_paths(allowed, workspace=str(self.workspace_path))
 
             # Ensure dev agent is available
@@ -2173,6 +2628,14 @@ class SoftwareDevWorkflow:
                 logger.info("Resume: loaded agent_backstories.json")
             except Exception as e:
                 logger.warning("Resume: could not load agent_backstories.json: %s", e)
+
+        try:
+            from ..utils.wiring_contract import load_wiring_contract
+            self._wiring_contract = load_wiring_contract(self.workspace_path)
+            if self._wiring_contract:
+                logger.info("Resume: loaded wiring_contract.json")
+        except Exception as e:
+            logger.warning("Resume: could not load wiring_contract.json: %s", e)
 
     def _infer_resume_state_from_artifacts(self) -> Optional[ProjectState]:
         """Infer the last completed planning phase from persisted workspace files."""
@@ -2563,8 +3026,92 @@ class SoftwareDevWorkflow:
             # Index design spec for RAG
             self.document_indexer.index_artifacts(["design_spec.md"])
         
+        self._ensure_wiring_contract_locked()
+        self._repair_wiring_planned_emit()
         logger.info("✅ Designer phase completed")
         return result
+
+    def _extract_tech_stack_prose(self, tech_stack_text: str = "") -> str:
+        """Return stack selection prose without the File Structure section."""
+        text = (tech_stack_text or self.tech_stack or "").strip()
+        if not text:
+            ts_path = self.workspace_path / "tech_stack.md"
+            if ts_path.is_file():
+                try:
+                    text = ts_path.read_text(encoding="utf-8", errors="replace")
+                except OSError:
+                    text = ""
+        if "## File Structure" in text:
+            return text.split("## File Structure", 1)[0].strip()
+        return text
+
+    def _build_and_register_creation_manifest(
+        self,
+        supplementary_paths: list,
+        *,
+        design_spec: str = "",
+        tdd: bool = False,
+        solution_spec: str = "",
+    ) -> dict:
+        """Shared manifest → validate → DB → render tech_stack path (full + fast pipelines)."""
+        from ..utils.wiring_contract import (
+            build_creation_manifest,
+            load_wiring_contract,
+            render_tech_stack_from_manifest,
+        )
+
+        contract = self._wiring_contract or load_wiring_contract(self.workspace_path)
+        manifest = build_creation_manifest(
+            contract,
+            supplementary_paths,
+            design_spec,
+            tdd=tdd,
+            workspace=self.workspace_path,
+        )
+        validation = self.task_manager.validate_manifest_completeness(
+            manifest,
+            design_spec=design_spec,
+            solution_spec=solution_spec,
+        )
+        contract_paths = [
+            e for e in (manifest or [])
+            if (e.get("tier") or e.get("manifest_source")) == "contract" and e.get("path")
+        ]
+        # Soft gate: register any concrete file paths even when "shallow" /
+        # component-coverage checks fail. Empty manifests still block.
+        registerable = contract_paths or [
+            e for e in (manifest or [])
+            if e.get("path") and Path(e["path"]).suffix
+        ]
+        if not validation.get("valid"):
+            if not registerable:
+                return validation
+            logger.warning(
+                "Manifest completeness soft-fail with %d file(s) — "
+                "registering anyway: %s",
+                len(registerable),
+                "; ".join(validation.get("issues") or [])[:500],
+            )
+            validation = {
+                "valid": True,
+                "issues": validation.get("issues") or [],
+                "soft_fail": True,
+                "implementation_files": len(registerable),
+            }
+
+        self.task_manager.register_granular_tasks_from_manifest(
+            manifest,
+            design_spec,
+            tdd=tdd,
+            tech_stack_content=self.tech_stack or "",
+        )
+        entries = self.task_manager.get_manifest_entries()
+        stack_prose = self._extract_tech_stack_prose()
+        rendered = render_tech_stack_from_manifest(entries, stack_prose=stack_prose)
+        (self.workspace_path / "tech_stack.md").write_text(rendered, encoding="utf-8")
+        self.tech_stack = rendered
+        self.task_manager.scaffold_directories_from_manifest(entries, self.workspace_path)
+        return validation
     
     def run_tech_architect_phase(self) -> str:
         """Run Tech Architect phase to define tech stack"""
@@ -2609,6 +3156,7 @@ class SoftwareDevWorkflow:
                     stack_correction=stack_correction,
                     approved_solution=contract_active,
                     solution_spec=solution_spec_text,
+                    wiring_contract=self._wiring_contract,
                 )
                 stack_correction = None
             else:
@@ -2625,6 +3173,7 @@ class SoftwareDevWorkflow:
                     ),
                     approved_solution=contract_active,
                     solution_spec=solution_spec_text,
+                    wiring_contract=self._wiring_contract,
                 )
             
             # Fallback: if agent returned content but didn't call file_writer
@@ -2634,12 +3183,19 @@ class SoftwareDevWorkflow:
             if tech_stack_file.exists():
                 with open(tech_stack_file, 'r', encoding='utf-8') as f:
                     self.tech_stack = f.read()
-                    
-                validation_result = self.task_manager.validate_tech_stack_completeness(
-                    self.tech_stack,
+
+                supplementary = (
+                    self.tech_architect_agent.get_supplementary_entries()
+                    if self.tech_architect_agent
+                    else []
+                )
+                manifest_validation = self._build_and_register_creation_manifest(
+                    supplementary,
                     design_spec=self.design_spec or "",
+                    tdd=self._is_tdd_enabled(),
                     solution_spec=solution_spec_text if contract_active else "",
                 )
+                validation_result = manifest_validation
                 spec_mismatch = None
                 overreach = None
                 if contract_active:
@@ -2648,6 +3204,15 @@ class SoftwareDevWorkflow:
                         self.tech_stack,
                         stack_manifest=_load_workspace_stack_manifest(self.workspace_path),
                     )
+                    if not spec_mismatch and self._wiring_contract and supplementary:
+                        from ..utils.wiring_contract import tech_stack_violates_contract
+                        supp_paths = [e.get("path", "") for e in supplementary if e.get("path")]
+                        wiring_violation = tech_stack_violates_contract(
+                            self._wiring_contract, "", supp_paths, strict=False,
+                        )
+                        if wiring_violation:
+                            spec_mismatch = wiring_violation
+                            logger.warning("Supplementary wiring drift: %s", wiring_violation)
                 else:
                     overreach = detect_stack_overreach(
                         self.vision,
@@ -2701,6 +3266,18 @@ class SoftwareDevWorkflow:
                 self.tech_stack or tech_stack_file.read_text(encoding="utf-8", errors="replace"),
                 stack_manifest=_load_workspace_stack_manifest(self.workspace_path),
             )
+            if not final_mismatch and self._wiring_contract and self.tech_architect_agent:
+                from ..utils.wiring_contract import tech_stack_violates_contract
+                supp_paths = [
+                    e.get("path", "")
+                    for e in self.tech_architect_agent.get_supplementary_entries()
+                    if e.get("path")
+                ]
+                wiring_violation = tech_stack_violates_contract(
+                    self._wiring_contract, "", supp_paths, strict=False,
+                )
+                if wiring_violation:
+                    final_mismatch = wiring_violation
             if final_mismatch:
                 raise RuntimeError(
                     f"Cannot proceed: tech_stack.md violates approved solution_spec — {final_mismatch}"
@@ -2717,16 +3294,19 @@ class SoftwareDevWorkflow:
                     workspace_path=self.workspace_path,
                 )
 
-            # Register granular per-file tasks with domain context from design spec
-            self.task_manager.register_granular_tasks(
-                self.design_spec or "",
-                self.tech_stack,
-                tdd=self._is_tdd_enabled(),
-            )
-            self.task_manager.scaffold_directories_from_tech_stack(
-                self.tech_stack,
-                self.workspace_path,
-            )
+            # Manifest already registered in validation loop; ensure TDD + artifacts
+            if not self.task_manager.get_manifest_entries():
+                supplementary = (
+                    self.tech_architect_agent.get_supplementary_entries()
+                    if self.tech_architect_agent
+                    else []
+                )
+                self._build_and_register_creation_manifest(
+                    supplementary,
+                    design_spec=self.design_spec or "",
+                    tdd=self._is_tdd_enabled(),
+                    solution_spec=solution_spec_text if contract_active else "",
+                )
 
             # Skills-first test plan (2nd pass — non-fatal, reuses existing test_plan.md)
             self._generate_test_plan()
@@ -2750,7 +3330,32 @@ class SoftwareDevWorkflow:
             # Second pass: generate API contract for fullstack projects
             self._generate_api_contract_if_fullstack()
         
-        logger.info("✅ Tech Architect phase completed")
+        self._ensure_wiring_contract_locked(skip_tech_stack_reseed=True)
+        self._repair_wiring_planned_emit()
+
+        # Hard gate: development must have per-file tasks from the creation manifest.
+        # Without them, feature-by-feature free-form thrash produces unbuildable trees.
+        file_creation_count = sum(
+            1 for t in self.task_manager.get_all_tasks()
+            if t.task_type == "file_creation"
+        )
+        if file_creation_count == 0:
+            raise RuntimeError(
+                "Tech Architect phase incomplete: creation manifest was not registered "
+                "(0 file_creation tasks). Fix wiring_contract.json / tech_stack.md and retry. "
+                "tech_stack.md must not still say '(Pending manifest registration.)'."
+            )
+        tech_stack_text = self.tech_stack or ""
+        if "(Pending manifest registration.)" in tech_stack_text:
+            raise RuntimeError(
+                "Tech Architect phase incomplete: tech_stack.md still has the "
+                "'(Pending manifest registration.)' placeholder. Manifest registration failed."
+            )
+
+        logger.info(
+            "✅ Tech Architect phase completed (%d file_creation tasks registered)",
+            file_creation_count,
+        )
         return result
 
     def _generate_api_contract_if_fullstack(self) -> None:
@@ -3175,7 +3780,7 @@ class SoftwareDevWorkflow:
         from ..tools.file_tools import set_thread_workspace, set_allowed_file_paths
 
         set_thread_workspace(str(self.workspace_path))
-        set_allowed_file_paths(None, workspace=str(self.workspace_path))
+        self._set_dev_phase_allowlist()
 
         num_workers = self._resolve_parallel_workers()
 
@@ -3240,7 +3845,7 @@ class SoftwareDevWorkflow:
 
         def worker(worker_id: int) -> int:
             set_thread_workspace(str(self.workspace_path))
-            set_allowed_file_paths(None, workspace=str(self.workspace_path))
+            self._set_dev_phase_allowlist()
             from ..utils.llm_config import set_thread_config
             if self.config is not None:
                 set_thread_config(self.config)
@@ -3289,6 +3894,21 @@ class SoftwareDevWorkflow:
         logger.info("[%s] ⚡ Parallel generation complete: %d total tasks", label, total[0])
         return total[0]
 
+    def _set_dev_phase_allowlist(self, extra_path: str = "") -> None:
+        """Central allowlist from registered manifest paths (+ optional current task)."""
+        from ..tools.file_tools import set_allowed_file_paths
+        from ..utils.manifest_guard import dev_phase_write_guard_enabled, dev_phase_write_allowlist
+
+        if not dev_phase_write_guard_enabled():
+            return
+        allowed = dev_phase_write_allowlist(self.task_manager.get_registered_file_paths())
+        wiring_allowed = self._build_wiring_allowlist()
+        if wiring_allowed:
+            allowed.update(wiring_allowed)
+        if extra_path:
+            allowed.add(extra_path.strip())
+        set_allowed_file_paths(allowed, workspace=str(self.workspace_path))
+
     def _process_claimed_task(
         self,
         task,
@@ -3312,6 +3932,8 @@ class SoftwareDevWorkflow:
             file_path = file_path.strip()
         else:
             file_path = ""
+        if file_path:
+            self._set_dev_phase_allowlist(extra_path=file_path)
         auto_content = (task.metadata or {}).get("auto_content")
 
         if task.task_type == "file_creation" and (not file_path or file_path.lower() == "unknown"):
@@ -3412,10 +4034,23 @@ class SoftwareDevWorkflow:
                 rag_context=file_rag,
                 simple_mode=agent_simple,
                 tldr_context=tldr_context,
+                wiring_contract=self._wiring_contract,
             )
 
             if attempt > 0 and retry_prompt:
-                prompt = retry_prompt
+                wiring_info = ""
+                if self._wiring_contract:
+                    from ..utils.wiring_contract import format_prompt_section, import_prefix
+                    wiring_info = format_prompt_section(self._wiring_contract, file_path)
+                    module_root = import_prefix(self._wiring_contract, self.workspace_path) or self._wiring_contract.get("module", "")
+                    if module_root:
+                        wiring_info += (
+                            "\nPROJECT IDENTITY:\n"
+                            f"- Module / import root: {module_root}\n"
+                            "- All local imports MUST use this exact prefix. "
+                            "Never invent a shorter bare layer prefix.\n\n"
+                        )
+                prompt = f"{wiring_info}{retry_prompt}"
 
             if agent_simple:
                 prompt = prompt + simple_mode_format_instruction(file_path or None)
@@ -3498,6 +4133,42 @@ class SoftwareDevWorkflow:
             )
             completeness = CodeCompletenessValidator.validate_file(full_path)
             all_issues = integration.get("issues", []) + completeness.get("issues", [])
+
+            # Dry-run check for wiring signature drift / conflicts before accepting
+            if self._wiring_contract and full_path.exists():
+                try:
+                    from ..tools.tldr_tools import run_tldr_extract, run_tldr_imports
+                    from ..utils.wiring_contract import enrich_wiring_contract_from_file
+                    
+                    extract_data = run_tldr_extract(self.workspace_path, file_path)
+                    imports_data = run_tldr_imports(self.workspace_path, file_path)
+                    
+                    with lock:
+                        dry_contract = json.loads(json.dumps(self._wiring_contract))
+                    
+                    dry_enriched = enrich_wiring_contract_from_file(
+                        dry_contract,
+                        file_path,
+                        extract_data,
+                        imports_data,
+                    )
+                    
+                    # Compare issues: find new issues in dry_enriched that were not in dry_contract
+                    old_issues_keys = {
+                        (i.get("file"), i.get("symbol"), i.get("description"))
+                        for i in dry_contract.get("wiring_issues") or []
+                        if isinstance(i, dict)
+                    }
+                    for issue in dry_enriched.get("wiring_issues") or []:
+                        if not isinstance(issue, dict):
+                            continue
+                        key = (issue.get("file"), issue.get("symbol"), issue.get("description"))
+                        if key not in old_issues_keys:
+                            desc = issue.get("description", "")
+                            all_issues.append(f"Wiring issue: {desc}")
+                except Exception as exc:
+                    logger.debug("Wiring contract dry-run enrich failed: %s", exc)
+
             retry_issues = filter_retry_issues(all_issues, critical_only=retry_critical_only)
 
             if not all_issues:
@@ -3520,6 +4191,7 @@ class SoftwareDevWorkflow:
                         export_registry[file_path] = summary.get("exports", [])
                 except Exception:
                     pass
+                self._enrich_wiring_after_file(file_path, lock)
                 return
 
             if not retry_issues:
@@ -3534,6 +4206,7 @@ class SoftwareDevWorkflow:
                         completed_files[file_path] = content[:8192]
                 except Exception:
                     pass
+                self._enrich_wiring_after_file(file_path, lock)
                 return
 
             if attempt < MAX_FILE_RETRIES and retry_issues:
@@ -3605,27 +4278,27 @@ class SoftwareDevWorkflow:
         )
         if existing:
             return
-        ts_path = self.workspace_path / "tech_stack.md"
-        if not (self.tech_stack or "").strip() and ts_path.exists():
-            try:
-                self.tech_stack = ts_path.read_text(encoding="utf-8", errors="replace")
-            except OSError:
-                pass
-        if not (self.tech_stack or "").strip():
-            logger.warning("No file_creation tasks and no tech_stack.md — dev cannot scaffold files")
-            return
+        from ..utils.wiring_contract import load_wiring_contract
+
+        contract = self._wiring_contract or load_wiring_contract(self.workspace_path)
+        supplementary: list = []
+        solution_spec_text = (
+            self._load_solution_spec_text() if self._solution_contract_active() else ""
+        )
         logger.warning(
-            "No file_creation tasks registered — recovering from tech_stack.md (resume path)"
+            "No file_creation tasks registered — rebuilding manifest from wiring contract"
         )
-        self.task_manager.register_granular_tasks(
-            self.design_spec or "",
-            self.tech_stack,
+        result = self._build_and_register_creation_manifest(
+            supplementary,
+            design_spec=self.design_spec or "",
             tdd=self._is_tdd_enabled(),
+            solution_spec=solution_spec_text,
         )
-        self.task_manager.scaffold_directories_from_tech_stack(
-            self.tech_stack,
-            self.workspace_path,
-        )
+        if not result.get("valid"):
+            logger.error(
+                "Manifest rebuild failed on resume: %s",
+                "; ".join(result.get("issues") or []),
+            )
 
     def _skip_test_files_in_dev(self) -> bool:
         """When QA already wrote tests, dev phase should not recreate them."""
@@ -3856,8 +4529,6 @@ class SoftwareDevWorkflow:
         agent_factory=None,
     ) -> int:
         """Run file tasks then DevAgent for a single BDD feature."""
-        from ..tools.file_tools import set_allowed_file_paths
-
         label = feature.get("name") or "feature"
         count = 0
         if file_task_ids:
@@ -3867,18 +4538,34 @@ class SoftwareDevWorkflow:
                 agent_factory=agent_factory,
             )
 
-        set_allowed_file_paths(None, workspace=str(self.workspace_path))
+        # Keep write allowlist active — free-form feature passes must not invent
+        # paths outside the creation manifest.
         feat_label = feature.get("description") or feature.get("name") or label
+        feat_id = f"feature_{feature.get('name', label)}"
         try:
             result = dev_agent.run([feat_label], self.tech_stack or "", self.user_stories)
             self.task_manager.update_task_status_by_output(result)
         except Exception as e:
             logger.error("Feature %s implementation failed: %s", label, e)
-            feat_id = f"feature_{feature.get('name', label)}"
             self.task_manager.mark_task_executed(feat_id, TaskStatus.FAILED, str(e)[:500])
             return count
 
-        feat_id = f"feature_{feature.get('name', label)}"
+        # Only mark complete when linked file tasks succeeded.
+        linked_failed = False
+        if file_task_ids:
+            for tid in file_task_ids:
+                task = self.task_manager.get_task_by_id(tid)
+                status = getattr(task, "status", None) if task else None
+                if status in (TaskStatus.FAILED.value, "failed"):
+                    linked_failed = True
+                    break
+        if linked_failed:
+            self.task_manager.update_task_status(
+                feat_id, TaskStatus.FAILED.value,
+                f"Feature incomplete: linked file task(s) failed for {feat_label}",
+            )
+            return count
+
         self.task_manager.update_task_status(
             feat_id, TaskStatus.COMPLETED.value,
             f"Feature implemented: {feat_label}",
@@ -4027,13 +4714,23 @@ class SoftwareDevWorkflow:
         from ..tools.file_tools import set_allowed_file_paths
         from ..utils.manifest_guard import dev_phase_write_guard_enabled, dev_phase_write_allowlist
 
+        allowed = None
         if dev_phase_write_guard_enabled():
             allowed = dev_phase_write_allowlist(
                 self.task_manager.get_registered_file_paths()
             )
+
+        wiring_allowed = self._build_wiring_allowlist()
+        if wiring_allowed:
+            if allowed:
+                allowed.update(wiring_allowed)
+            else:
+                allowed = wiring_allowed
+
+        if allowed:
             set_allowed_file_paths(allowed, workspace=str(self.workspace_path))
             logger.info(
-                "🔒 file_writer allowlist enabled (strict): %d paths workspace=%s",
+                "🔒 file_writer allowlist enabled (wiring/strict): %d paths workspace=%s",
                 len(allowed),
                 self.workspace_path,
             )
@@ -4058,7 +4755,25 @@ class SoftwareDevWorkflow:
         completed_files: dict = {}
         export_registry: dict = {}
         lock = _threading.Lock()
-        feature_by_feature = self._is_feature_by_feature() and bool(features)
+        # When a creation manifest exists, per-file tasks own development.
+        # Feature slices as primary driver only when there are no file tasks
+        # (legacy / seed path) — otherwise they thrash without a file tree.
+        has_file_tasks = any(
+            t.task_type == "file_creation"
+            for t in self.task_manager.get_all_tasks()
+        )
+        feature_by_feature = (
+            self._is_feature_by_feature()
+            and bool(features)
+            and not has_file_tasks
+        )
+        if self._is_feature_by_feature() and bool(features) and has_file_tasks:
+            logger.info(
+                "Skipping feature-by-feature primary driver — %d file_creation "
+                "task(s) from creation manifest will drive development "
+                "(BDD features remain as acceptance context on file tasks)",
+                sum(1 for t in self.task_manager.get_all_tasks() if t.task_type == "file_creation"),
+            )
 
         if feature_by_feature:
             logger.info(
@@ -4134,30 +4849,44 @@ class SoftwareDevWorkflow:
         # Feature test bed — opt-in via SMOKE_TEST_BACKEND != syntax_only
         self._run_feature_test_bed_loop()
 
-        # Batch feature tasks only when not using feature-by-feature slices
+        # Batch feature tasks only when not using feature-by-feature slices.
+        # With a creation manifest, mark features complete from file-task outcomes
+        # — do NOT clear the allowlist and free-form rewrite the tree.
         if not feature_by_feature:
             feature_tasks = [t for t in self.task_manager.get_incomplete_tasks() if t.task_type == "feature"]
             if feature_tasks:
-                from ..tools.file_tools import set_allowed_file_paths
-                set_allowed_file_paths(None, workspace=str(self.workspace_path))
-                feature_names = [t.description for t in feature_tasks]
-                try:
-                    result = self.dev_agent.run(feature_names, self.tech_stack or "", self.user_stories)
-                    self.task_manager.update_task_status_by_output(result)
+                if has_file_tasks:
+                    logger.info(
+                        "Marking %d feature task(s) complete after file-manifest development "
+                        "(skipping free-form feature batch)",
+                        len(feature_tasks),
+                    )
                     for t in feature_tasks:
                         if t.status not in (TaskStatus.COMPLETED.value, TaskStatus.SKIPPED.value):
                             self.task_manager.update_task_status(
                                 t.task_id,
                                 "completed",
-                                f"Feature batch implemented: {t.description or t.task_id}",
+                                f"Covered by file_creation manifest tasks: {t.description or t.task_id}",
                             )
-                except Exception as e:
-                    logger.error("Feature implementation failed: %s", e)
-                    for t in feature_tasks:
-                        if t.status not in (TaskStatus.COMPLETED.value, TaskStatus.SKIPPED.value):
-                            self.task_manager.mark_task_executed(
-                                t.task_id, TaskStatus.FAILED, str(e)[:500],
-                            )
+                else:
+                    feature_names = [t.description for t in feature_tasks]
+                    try:
+                        result = self.dev_agent.run(feature_names, self.tech_stack or "", self.user_stories)
+                        self.task_manager.update_task_status_by_output(result)
+                        for t in feature_tasks:
+                            if t.status not in (TaskStatus.COMPLETED.value, TaskStatus.SKIPPED.value):
+                                self.task_manager.update_task_status(
+                                    t.task_id,
+                                    "completed",
+                                    f"Feature batch implemented: {t.description or t.task_id}",
+                                )
+                    except Exception as e:
+                        logger.error("Feature implementation failed: %s", e)
+                        for t in feature_tasks:
+                            if t.status not in (TaskStatus.COMPLETED.value, TaskStatus.SKIPPED.value):
+                                self.task_manager.mark_task_executed(
+                                    t.task_id, TaskStatus.FAILED, str(e)[:500],
+                                )
         
         # ── Post-development completeness check ──
         try:
@@ -4481,6 +5210,7 @@ class SoftwareDevWorkflow:
                     interface_contract=self._export_registry if self._export_registry else None,
                     api_contract=self.api_contract,
                     rag_context=file_rag,
+                    wiring_contract=self._wiring_contract,
                 )
                 try:
                     self.frontend_agent.agent.reset_chat()
@@ -4492,6 +5222,7 @@ class SoftwareDevWorkflow:
                 full_path = self.workspace_path / file_path if file_path else None
                 if full_path and full_path.exists():
                     self.task_manager.update_task_status(task.task_id, "completed", f"File created: {file_path}")
+                    self._enrich_wiring_after_file(file_path)
         else:
             # All file tasks done — run frontend agent for general UI polish
             result = self.frontend_agent.run(
@@ -4722,41 +5453,30 @@ class SoftwareDevWorkflow:
         return "QA phase completed"
 
     def _seed_prompt(self, active_str: str, *, strict: bool = False, tdd: bool = False) -> str:
-        """Build the seed prompt. *strict* adds an explicit tree example and forbids bullet lists."""
+        """Build the seed prompt — supplementary JSON (not unicode trees)."""
         tdd_rules = ""
         if tdd:
             tdd_rules = """
-TDD PIPELINE — include a mirrored tests/ tree in the file structure:
-- Add tests/conftest.py and test modules under tests/ mirroring source packages
-  (e.g. agents/place_search/agent.py → tests/agents/test_place_search.py).
-- List every test file in the unicode tree with a real extension (.py, .ts, etc.).
+TDD PIPELINE — include test modules in supplementary JSON:
+- tests/conftest.py and mirrored test paths (e.g. tests/agents/test_place_search.py).
 """
-        tree_rules = """
-CRITICAL — PROJECT FILE TREE (required, machine-parsed):
-- Inside <tech_stack>, include a markdown fenced code block with a unicode directory tree.
-- Use ONLY tree characters: ├── └── │
-- Every deliverable MUST be a real file with an extension (e.g. index.html, main.css, hello.py).
-- Do NOT use bullet lists (`- \`file\``), plain prose, or directory-only entries without files.
-- Keep the tree minimal — only files needed for the vision.
-""" + tdd_rules + """
-Required shape (adapt names to the vision):
-```
-project/
-├── index.html
-├── styles/
-│   └── main.css
-└── README.md
-```
-"""
+        json_rules = """
+CRITICAL — SUPPLEMENTARY FILE LIST (required, machine-parsed):
+- Inside <tech_stack>, include stack prose (language, frameworks) only — NO unicode file tree.
+- Also emit <supplementary_files>[...]</supplementary_files> with a JSON array:
+  [{"path": "index.html", "description": "..."}, {"path": "go.mod", "description": "..."}]
+- List manifests, docs, static assets, tests, and build config — contract source files are added separately.
+- Do NOT use bullet lists or unicode tree characters (├└│─).
+""" + tdd_rules
         if strict:
-            tree_rules += """
-STRICT RETRY: Your previous tech_stack had ZERO extractable file paths.
-Re-emit <tech_stack> with a valid unicode tree ONLY — no bullet lists, no backticks around paths.
+            json_rules += """
+STRICT RETRY: Your previous response had ZERO valid supplementary JSON paths.
+Re-emit <supplementary_files> with a non-empty JSON array only.
 """
         return f"""You are an AI architect. Based on the vision, write a minimal tech stack and user stories.
 You must explicitly include requirements necessary for the following downstream execution phases: {active_str}.
 If 'devops' is present, include explicit requirements for Containerfile, docker-compose, and CI/CD pipelines.
-{tree_rules}
+{json_rules}
 Vision:
 {self.vision}
 
@@ -4764,14 +5484,12 @@ Return your response exactly in this format using XML tags:
 <tech_stack>
 ## Stack
 - language / runtime / frameworks (minimal)
-
-## Repository Layout
-```
-project/
-├── <file with extension>
-└── ...
-```
 </tech_stack>
+<supplementary_files>
+[
+  {{"path": "README.md", "description": "Project overview"}}
+]
+</supplementary_files>
 <user_stories>
 markdown content here
 </user_stories>
@@ -4798,12 +5516,14 @@ markdown content here
             budget_tracker=self.budget_tracker
         )
 
-        def _parse_seed(response: str) -> tuple[str, str]:
+        def _parse_seed(response: str) -> tuple[str, str, list]:
+            from ..utils.wiring_contract import parse_supplementary_file_entries
             ts_match = re.search(r"<tech_stack>(.*?)</tech_stack>", response, re.DOTALL)
             us_match = re.search(r"<user_stories>(.*?)</user_stories>", response, re.DOTALL)
             ts = ts_match.group(1).strip() if ts_match else ""
             us = us_match.group(1).strip() if us_match else ""
-            return ts, us
+            supplementary = parse_supplementary_file_entries(response)
+            return ts, us, supplementary
 
         def _write_seed(ts: str, us: str) -> None:
             Path(self.workspace_path / "tech_stack.md").write_text(ts)
@@ -4811,10 +5531,10 @@ markdown content here
             self.tech_stack = ts
             self.user_stories = us
 
-        ts, us = "", ""
+        ts, us, supplementary = "", "", []
         try:
             res = agent.chat(self._seed_prompt(active_str, strict=False, tdd=tdd_seed))
-            ts, us = _parse_seed(res)
+            ts, us, supplementary = _parse_seed(res)
             if not ts:
                 ts = "No tech stack generated."
             if not us:
@@ -4829,41 +5549,41 @@ markdown content here
                 ts += "\n\n## DevOps Requirements\nMust include Containerfile, docker-compose.yaml, and standard CI/CD pipelines."
             _write_seed(ts, us)
 
-        # If the seeder wrote an unparseable tree (bullet lists, etc.), retry once
-        # with a stricter prompt so fast-mode still gets file_creation tasks.
-        extracted = self.task_manager._extract_files_with_descriptions(self.tech_stack or "")
-        if not extracted:
-            logger.warning("Seed: tech_stack has 0 extractable files — retrying with strict tree prompt")
+        manifest_result = self._build_and_register_creation_manifest(
+            supplementary,
+            design_spec=self.design_spec or "",
+            tdd=self._is_tdd_enabled(),
+        )
+        if not manifest_result.get("valid"):
+            logger.warning("Seed: manifest incomplete — retrying with strict JSON prompt")
             try:
                 res = agent.chat(self._seed_prompt(active_str, strict=True, tdd=tdd_seed))
-                ts2, us2 = _parse_seed(res)
+                ts2, us2, supp2 = _parse_seed(res)
                 if ts2:
                     ts = ts2
                 if us2:
                     us = us2
+                if supp2:
+                    supplementary = supp2
                 _write_seed(ts, us)
-                extracted = self.task_manager._extract_files_with_descriptions(self.tech_stack or "")
+                manifest_result = self._build_and_register_creation_manifest(
+                    supplementary,
+                    design_spec=self.design_spec or "",
+                    tdd=self._is_tdd_enabled(),
+                )
             except Exception as e:
                 logger.error("Strict seed retry failed: %s", e)
 
-        if not extracted:
+        if not manifest_result.get("valid"):
             logger.error(
-                "Seed: still 0 extractable files after retry — development will have nothing to build"
+                "Seed: manifest still invalid after retry — development may have nothing to build: %s",
+                "; ".join(manifest_result.get("issues") or []),
             )
 
-        # Register file creation tasks so dev/frontend agents have work to do.
-        # In the full pipeline this happens inside tech_architect, but fast skips it.
-        self.task_manager.register_granular_tasks(
-            self.design_spec or "",
-            self.tech_stack,
-            tdd=self._is_tdd_enabled(),
-        )
-        self.task_manager.scaffold_directories_from_tech_stack(
-            self.tech_stack,
-            self.workspace_path,
-        )
-        logger.info("Seed: registered %d tasks from tech_stack",
-                     len(self.task_manager.get_incomplete_tasks()))
+        self._ensure_wiring_contract_locked(skip_tech_stack_reseed=True)
+        self._repair_wiring_planned_emit()
+        logger.info("Seed: registered %d manifest entries",
+                     len(self.task_manager.get_manifest_entries()))
         return "Seeding completed"
 
     def _run_phase_with_retry(self, phase_name: str, phase_fn: Callable[[], Any]) -> Any:
@@ -5080,7 +5800,7 @@ markdown content here
             )
 
             return {
-                "status": "completed",
+                "status": self._resolve_final_job_status(),
                 "project_id": self.project_id,
                 "budget_report": self.budget_tracker.get_report(self.project_id),
                 "task_validation": completed_check,

@@ -1,0 +1,5 @@
+{
+  "vision": "Create a simple Java command-line calculator. Provide a Calculator class with add(int a, int b) and subtract(int a, int b) methods. Include a Main class with a main method that prints the results of add(2, 3) and subtract(10, 4). Use plain Java (JDK) only — no Spring, no Maven plugins beyond a minimal pom.xml if needed to compile. No web framework, no database.",
+  "auto_approve_plan": true,
+  "auto_approve_solution": true
+}

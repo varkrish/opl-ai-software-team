@@ -95,7 +95,7 @@ class TestResolveEffectiveSolutioningPath:
         wf = _make_workflow(
             workspace, job_db, config=_make_config(solutioning_enabled=True)
         )
-        assert wf._resolve_effective_solutioning_path() == "full"
+        assert wf._resolve_effective_solutioning_path() == "fast"
 
     def test_no_capability_profile_disabled_skips(self, workspace, job_db):
         wf = _make_workflow(
@@ -122,7 +122,9 @@ class TestWorkflowStackRouting:
             wf,
             "_pause_for_plan_review",
             return_value={"status": "pending_review", "project_id": wf.project_id},
-        ), patch.object(wf, "_plan_review_enabled", return_value=True):
+        ), patch.object(wf, "_plan_review_enabled", return_value=True), patch.object(
+            wf.state_machine, "transition"
+        ):
             result = wf.run()
 
         fast_fn.assert_called_once()
@@ -169,7 +171,9 @@ class TestWorkflowStackRouting:
             wf,
             "_pause_for_plan_review",
             return_value={"status": "pending_review", "project_id": wf.project_id},
-        ), patch.object(wf, "_plan_review_enabled", return_value=True):
+        ), patch.object(wf, "_plan_review_enabled", return_value=True), patch.object(
+            wf.state_machine, "transition"
+        ):
             wf.run()
 
         fast_fn.assert_called_once()

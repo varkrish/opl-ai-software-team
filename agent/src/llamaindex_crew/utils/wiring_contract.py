@@ -1,6 +1,27 @@
 """
 Wiring Contract binding utils for LlamaIndex Crew.
 Defines schema, validation, loading, writing, slice_for_file, and validation gate logic.
+
+---------------------------------------------------------------------------
+NOTE — Module / import-root identity (language-neutral policy + adapters)
+---------------------------------------------------------------------------
+Policy (applies to every language):
+  - One canonical project identity in wiring_contract.module
+  - Never use bare layer names (api, src, service, cmd, …) as that root
+  - Prefer on-disk package-manager identity when present; else infer from
+    vision / title / specs
+  - The same string must drive PROJECT IDENTITY prompts and local imports
+
+Adapters (optional quality hooks — missing adapter ≠ unsupported language):
+  1. Manifest reader  → read_package_manifest_identity()
+  2. Early write order → _sort_manifest_entries() (identity file first)
+  3. Post-write sync  → SoftwareDevWorkflow._enrich_wiring_after_file()
+  4. Optional smoke   → code_validator compile gate (go tidy/build, tsc, …)
+
+To add a language: implement those four hooks for its package manifest.
+Stacks with no package system (e.g. static HTML) keep language hint only
+and fall back to vision/title for module — they are not blocked.
+---------------------------------------------------------------------------
 """
 from __future__ import annotations
 
@@ -11,7 +32,7 @@ import re
 import shutil
 import subprocess
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Literal, Optional, Set, TypedDict
 
 logger = logging.getLogger(__name__)
 
@@ -26,7 +47,7 @@ The pipeline seeds packages/files from your paths. You MUST also emit a short jq
 (NOT shell) that sets module, language, package ownership, key signatures, and deps.
 
 <wiring_patch>
-.module = "my-app"
+.module = "github.com/example/my-app"
 | .language = "go"
 | .packages["internal/api"].owns = ["CreateHandler", "DeleteHandler"]
 | .packages["internal/service"].owns = ["NewService", "Create"]
@@ -38,7 +59,9 @@ The pipeline seeds packages/files from your paths. You MUST also emit a short jq
 
 Rules (language-neutral):
 - jq filter syntax only (chains with |). Do NOT emit shell.
-- .module = canonical local import/package root (never a useless root like "cmd" alone).
+- .module = canonical import/package root for the WHOLE project (never bare layer names
+  like "api", "service", "cmd", "src", "app"). Prefer real roots such as
+  "github.com/org/my-app", "@org/my-app", or "my_app".
 - .language = primary language (go|python|typescript|javascript|java|rust|…).
 - One package per concern — no parallel packages for the same ownership (api vs handlers).
 - HTTP/API handlers live in the API package; entrypoint/main only wires the mux — it does not reimplement handlers.
@@ -191,18 +214,24 @@ def extract_files_with_descriptions_from_tech_stack(content: str) -> List[Dict[s
     return deduped
 
 
+# Checked only outside string literals — naive "def " matching rejected Python
+# signatures embedded in .symbols[*].signature (e.g. "def add(self, a, b)").
 _FORBIDDEN_PATCH_SUBSTRINGS = (
     "input_filename",
     "@json:",
     "$env",
     "env(",
     "debug(",
-    "import ",
     "include ",
-    "def ",
-    "test(",
-    "try ",
-    "catch ",
+)
+# jq-only constructs (after string scrub). Avoid bare "def "/"import " which
+# appear in language signatures inside JSON string values.
+_FORBIDDEN_JQ_CONSTRUCT_RES = (
+    re.compile(r"(?m)^\s*def\s+\w+\s*[(:]"),   # jq user-defined function
+    re.compile(r"(?m)^\s*import\s+"),
+    re.compile(r"(?m)^\s*include\s+"),
+    re.compile(r"\btry\s*;"),
+    re.compile(r"\bcatch\s*"),
 )
 
 
@@ -278,9 +307,41 @@ def _normalize_jq_patch_program(patch: str) -> str:
     return program
 
 
+def _strip_jq_string_literals(program: str) -> str:
+    """Replace quoted strings so safety checks ignore embedded language signatures."""
+    return re.sub(r'"(?:\\.|[^"\\])*"', '""', program)
+
+
+def _normalize_jq_deps_assignments(program: str) -> str:
+    """Rewrite map-style deps into array-append form LLMs often emit wrongly.
+
+    ``.deps["cli"] = ["calculator"]`` → ``.deps += [{"from":"cli","to":"calculator"}]``
+    """
+    def _repl(match: re.Match) -> str:
+        frm = match.group(1)
+        tos = re.findall(r'"([^"]+)"', match.group(2) or "")
+        if not tos:
+            return match.group(0)
+        parts = [
+            f'.deps += [{{"from":"{frm}","to":"{to}"}}]'
+            for to in tos
+        ]
+        return " | ".join(parts)
+
+    return re.sub(
+        r'\.deps\["([^"]+)"\]\s*=\s*\[([^\]]*)\]',
+        _repl,
+        program,
+    )
+
+
 def _patch_program_is_safe(patch: str) -> bool:
-    lowered = patch.lower()
-    return not any(token in lowered for token in _FORBIDDEN_PATCH_SUBSTRINGS)
+    """Reject dangerous jq features without false-positive on signature strings."""
+    scrubbed = _strip_jq_string_literals(patch)
+    lowered = scrubbed.lower()
+    if any(token in lowered for token in _FORBIDDEN_PATCH_SUBSTRINGS):
+        return False
+    return not any(rx.search(scrubbed) for rx in _FORBIDDEN_JQ_CONSTRUCT_RES)
 
 
 def apply_wiring_patch(seed: dict, patch_program: str) -> Optional[dict]:
@@ -295,6 +356,7 @@ def apply_wiring_patch(seed: dict, patch_program: str) -> Optional[dict]:
     program = _normalize_jq_patch_program(patch_program)
     if not program:
         return None
+    program = _normalize_jq_deps_assignments(program)
     if not _patch_program_is_safe(program):
         logger.warning("wiring patch rejected: contains forbidden jq constructs")
         return None
@@ -328,16 +390,269 @@ def apply_wiring_patch(seed: dict, patch_program: str) -> Optional[dict]:
         logger.warning("jq wiring patch result failed validation: %s", exc)
         return None
 
+    # Prune packages under internal/ that are not referenced in the jq program
+    packages = validated.get("packages") or {}
+    import re as _re
+    referred_pkgs = set(_re.findall(r'\.packages\["([^"]+)"\]', program))
+    referred_pkgs.update(_re.findall(r'\.packages\.([a-zA-Z0-9_/.-]+)', program))
+    
+    pruned_packages = {}
+    for pkg_name, pkg_data in packages.items():
+        if (
+            pkg_name in referred_pkgs
+            or not pkg_name.startswith("internal/")
+            or pkg_data.get("owns")
+            or pkg_name == "cmd" or pkg_name.startswith("cmd/")
+        ):
+            pruned_packages[pkg_name] = pkg_data
+    validated["packages"] = pruned_packages
+
     enforcement = "strict" if (validated.get("symbols") or validated.get("deps")) else "relaxed"
-    return stamp_contract_meta(validated, source="jq-patch", enforcement=enforcement)
+    return stamp_contract_meta(
+        normalize_signatures_for_language(validated),
+        source="jq-patch",
+        enforcement=enforcement,
+    )
 
 
 # ── Planned-emit helpers (language-neutral) ─────────────────────────────────
 
 _WEAK_MODULE_NAMES = frozenset({
+    # layout roots
     "cmd", "src", "app", "main", "pkg", "lib", "internal", "unknown",
     "project", "root", "code", "backend", "frontend",
+    # bare layer / concern names — never a whole-project import root
+    "api", "apis", "server", "servers", "service", "services", "sandbox",
+    "handler", "handlers", "router", "http", "web", "client", "clients",
+    "core", "domain", "manager", "engine", "runtime", "worker", "workers",
+    "config", "configs", "model", "models", "util", "utils", "common",
+    "shared", "test", "tests", "bin", "tools", "scripts",
 })
+
+
+def _is_weak_module_name(name: str) -> bool:
+    """True for empty, layout-only, or bare layer names (language-neutral).
+
+    Full import roots like ``github.com/acme/sandbox-api`` or ``@acme/billing``
+    are strong even if a path segment looks like a layer keyword.
+    """
+    n = (name or "").strip().lower().rstrip("/")
+    if not n or n == "unknown":
+        return True
+    # Scoped npm packages: @scope/name
+    if n.startswith("@") and "/" in n:
+        leaf = n.split("/")[-1]
+        return leaf in _WEAK_MODULE_NAMES
+    if "/" in n or "." in n:
+        # Multi-segment or dotted module paths are strong unless the *entire*
+        # path is a weak single segment (already handled) or only 1 segment
+        # with a separator artifact.
+        parts = [p for p in re.split(r"[/.]", n) if p and p != "@"]
+        if len(parts) >= 2:
+            return False
+        return parts[0] in _WEAK_MODULE_NAMES if parts else True
+    return n in _WEAK_MODULE_NAMES
+
+
+_MANIFEST_LANGUAGE_HINTS: tuple[tuple[str, str], ...] = (
+    ("go.mod", "go"),
+    ("package.json", "javascript"),
+    ("pyproject.toml", "python"),
+    ("requirements.txt", "python"),
+    ("Cargo.toml", "rust"),
+    ("build.sbt", "scala"),
+    ("pom.xml", "java"),
+    ("build.gradle", "java"),
+    ("build.gradle.kts", "java"),
+    ("composer.json", "php"),
+    ("Gemfile", "ruby"),
+)
+
+
+def _parse_sbt_identity(text: str) -> Optional[str]:
+    """Extract Scala/sbt project identity: prefer organization, else name."""
+    org = None
+    name = None
+    for line in text.splitlines():
+        stripped = line.strip()
+        # Skip comments
+        if stripped.startswith("//") or stripped.startswith("#"):
+            continue
+        m_org = re.search(
+            r"(?:ThisBuild\s*/\s*)?organization\s*:=\s*[\"']([a-zA-Z0-9_.-]+)[\"']",
+            stripped,
+        )
+        if m_org:
+            org = m_org.group(1).strip()
+        m_name = re.search(
+            r"(?:ThisBuild\s*/\s*)?name\s*:=\s*[\"']([a-zA-Z0-9_.-]+)[\"']",
+            stripped,
+        )
+        if m_name:
+            name = m_name.group(1).strip()
+    if org and not _is_weak_module_name(org):
+        # JVM package root (e.g. com.example) — strongest import identity
+        return org
+    if name and not _is_weak_module_name(name):
+        return name
+    return None
+
+
+def _workspace_has_html_only_surface(workspace: Path) -> bool:
+    """True when the project looks like static HTML (no package-manager root)."""
+    html_files = list(workspace.glob("*.html")) + list(workspace.glob("*.htm"))
+    if not html_files and not (workspace / "index.html").is_file():
+        # Also accept a simple public/ or static/ index
+        for sub in ("public", "static", "www", "web"):
+            if (workspace / sub / "index.html").is_file():
+                html_files = [workspace / sub / "index.html"]
+                break
+    if not html_files and not (workspace / "index.html").is_file():
+        return False
+    # If a real package manifest exists, HTML is just an asset surface.
+    for fname, _lang in _MANIFEST_LANGUAGE_HINTS:
+        if (workspace / fname).is_file():
+            return False
+    return True
+
+
+def read_package_manifest_identity(workspace: Optional[Path]) -> tuple[Optional[str], Optional[str]]:
+    """Read canonical import/package root + language hint from package manifests.
+
+    Language-neutral across ecosystems that *have* a package identity.
+    HTML/static sites have no module system — language may be ``html`` with
+    ``module=None`` so callers fall back to vision/title inference.
+
+    Returns ``(module_or_None, language_or_None)``.
+    """
+    if not workspace:
+        return None, None
+    workspace_path = Path(workspace)
+    if not workspace_path.is_dir():
+        return None, None
+
+    go_mod = workspace_path / "go.mod"
+    if go_mod.is_file():
+        try:
+            for line in go_mod.read_text(encoding="utf-8").splitlines():
+                if line.strip().startswith("module "):
+                    parts = line.strip().split()
+                    if len(parts) > 1:
+                        candidate = parts[1].strip()
+                        if candidate and not _is_weak_module_name(candidate):
+                            return candidate, "go"
+        except OSError:
+            pass
+
+    pkg_json = workspace_path / "package.json"
+    if pkg_json.is_file():
+        try:
+            data = json.loads(pkg_json.read_text(encoding="utf-8"))
+            if isinstance(data, dict) and data.get("name"):
+                candidate = str(data["name"]).strip()
+                if candidate and not _is_weak_module_name(candidate):
+                    lang = "typescript" if (workspace_path / "tsconfig.json").is_file() else "javascript"
+                    return candidate, lang
+        except (OSError, json.JSONDecodeError, TypeError):
+            pass
+
+    for pfile, lang in (("pyproject.toml", "python"), ("Cargo.toml", "rust")):
+        mfile = workspace_path / pfile
+        if not mfile.is_file():
+            continue
+        try:
+            for line in mfile.read_text(encoding="utf-8").splitlines():
+                stripped = line.strip()
+                if stripped.startswith("name ") or stripped.startswith("name="):
+                    m = re.search(r'name\s*=\s*["\']([a-zA-Z0-9_./@-]+)["\']', stripped)
+                    if m:
+                        candidate = m.group(1).strip()
+                        if candidate and not _is_weak_module_name(candidate):
+                            return candidate, lang
+        except OSError:
+            pass
+
+    build_sbt = workspace_path / "build.sbt"
+    if build_sbt.is_file():
+        try:
+            candidate = _parse_sbt_identity(build_sbt.read_text(encoding="utf-8"))
+            if candidate:
+                return candidate, "scala"
+            return None, "scala"
+        except OSError:
+            pass
+
+    if _workspace_has_html_only_surface(workspace_path):
+        # No package manager — identity comes from vision/title, not a manifest.
+        return None, "html"
+
+    for fname, lang in _MANIFEST_LANGUAGE_HINTS:
+        if (workspace_path / fname).is_file():
+            # Manifest present but no strong name parsed — still expose language.
+            return None, lang
+    return None, None
+
+
+def sync_module_identity_from_workspace(
+    contract: dict,
+    workspace: Optional[Path] = None,
+    *,
+    solution_spec: str = "",
+    design_spec: str = "",
+    tech_stack: str = "",
+) -> dict:
+    """Lock contract.module (and language when known) from package manifests / specs.
+
+    Language-independent rule: one canonical import/package root for the project.
+    Prefer on-disk package manager identity over LLM-emitted bare layer names.
+    """
+    if not contract:
+        return contract
+    out = json.loads(json.dumps(contract))
+    current = (out.get("module") or "").strip()
+    manifest_mod, manifest_lang = read_package_manifest_identity(workspace)
+
+    if manifest_mod and not _is_weak_module_name(manifest_mod):
+        if current != manifest_mod:
+            logger.info(
+                "Syncing wiring contract.module from package manifest: %r → %r",
+                current, manifest_mod,
+            )
+            out["module"] = manifest_mod
+    elif _is_weak_module_name(current):
+        better = infer_module_from_specs(
+            solution_spec,
+            design_spec,
+            out.get("packages") or {},
+            tech_stack=tech_stack or None,
+            workspace=workspace,
+        )
+        if better and not _is_weak_module_name(better):
+            logger.info(
+                "Replacing weak wiring contract.module %r with inferred %r",
+                current, better,
+            )
+            out["module"] = better
+
+    lang = (out.get("language") or "").strip().lower()
+    if (not lang or lang in ("unknown", "none", "null")) and manifest_lang:
+        out["language"] = manifest_lang
+
+    return out
+
+
+def symbol_key(package: str, name: str) -> str:
+    """Qualified symbol key: ``package.SymbolName`` (language-neutral)."""
+    pkg = normalize_workspace_path(package or "")
+    nm = (name or "").strip()
+    if not nm:
+        return ""
+    if not pkg or pkg == ".":
+        return nm
+    if nm.startswith(pkg + "."):
+        return nm
+    return f"{pkg}.{nm}"
+
 
 # Signature-like lines across common languages (Go/Python/TS/JS/Java/Rust/C#…).
 # Second arm requires a real modifier keyword (no bare "Name (" / prose "clients (").
@@ -364,30 +679,6 @@ _PKG_HEADING_RE = re.compile(
     r")",
     re.MULTILINE | re.IGNORECASE,
 )
-
-
-def symbol_key(package: str, name: str) -> str:
-    """Qualified symbol key: ``package.SymbolName`` (language-neutral)."""
-    pkg = normalize_workspace_path(package or "")
-    nm = (name or "").strip()
-    if not nm:
-        return ""
-    if not pkg or pkg == ".":
-        return nm
-    if nm.startswith(pkg + "."):
-        return nm
-    return f"{pkg}.{nm}"
-
-
-def _is_weak_module_name(name: str) -> bool:
-    n = (name or "").strip().lower().rstrip("/")
-    if not n:
-        return True
-    if "/" in n:
-        # github.com/org/sandbox-api is fine; bare cmd/foo still ok if leaf isn't weak-only
-        leaf = n.split("/")[-1]
-        return leaf in _WEAK_MODULE_NAMES and n.count("/") < 2
-    return n in _WEAK_MODULE_NAMES
 
 
 def contract_has_planned_apis(contract: dict | None) -> bool:
@@ -683,7 +974,7 @@ def enrich_wiring_contract_from_tldr(
 
     for fentry in structure.get("files") or []:
         fp = (fentry.get("path") or "").replace("\\", "/")
-        if not fp:
+        if not fp or not _has_source_suffix(fp):
             continue
         # Make path workspace-relative if absolute
         try:
@@ -762,9 +1053,71 @@ def _is_placeholder_signature(sig: str) -> bool:
 
 
 def _normalize_sig(sig: str) -> str:
-    """Lightweight normalization for signature comparison — collapses whitespace."""
+    """Normalize signature for comparison, removing keyword prefixes, Go receivers, return types, and package qualifiers."""
+    if not sig:
+        return ""
     import re as _re
-    return _re.sub(r"\s+", " ", sig.strip()) if sig else ""
+    s = sig.strip()
+    s = _re.sub(r"\s+", " ", s)
+    # Strip Go/Python/TS keywords
+    s = _re.sub(r"^(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?(?:func|def|function|fn|sub)\s+", "", s)
+    # Strip Go receiver
+    s = _re.sub(r"^\([^)]+\)\s*", "", s)
+    # Extract only Name(...) block
+    m = _re.match(r"^([A-Za-z0-9_]+\([^)]*\))", s)
+    if m:
+        s = m.group(1)
+    # Strip package qualifiers from types: e.g. config.Config -> Config
+    s = _re.sub(r"\b[A-Za-z0-9_]+\.([A-Za-z0-9_]+)\b", r"\1", s)
+    return s
+
+
+def _signature_language_mismatch(sig: str, language: str) -> bool:
+    """True when signature uses the wrong language keyword for *language*."""
+    if not sig or not language:
+        return False
+    lang = language.strip().lower()
+    s = sig.strip()
+    if lang in ("go", "golang"):
+        return bool(re.match(r"^def\s+", s, re.IGNORECASE))
+    if lang in ("python", "py"):
+        return bool(re.match(r"^func\s+", s, re.IGNORECASE))
+    return False
+
+
+def normalize_signatures_for_language(contract: dict) -> dict:
+    """Rewrite wrong-language keywords on planned signatures (e.g. def→func for Go)."""
+    if not contract:
+        return contract
+    lang = (contract.get("language") or "").strip().lower()
+    if not lang:
+        return contract
+    out = json.loads(json.dumps(contract))
+    symbols = out.get("symbols") or {}
+    changed = 0
+    for key, data in list(symbols.items()):
+        if not isinstance(data, dict):
+            continue
+        sig = (data.get("signature") or "").strip()
+        if not sig:
+            continue
+        new_sig = sig
+        if lang in ("go", "golang") and re.match(r"^def\s+", sig, re.IGNORECASE):
+            new_sig = re.sub(r"^def\s+", "func ", sig, count=1, flags=re.IGNORECASE)
+        elif lang in ("python", "py") and re.match(r"^func\s+", sig, re.IGNORECASE):
+            new_sig = re.sub(r"^func\s+", "def ", sig, count=1, flags=re.IGNORECASE)
+        if new_sig != sig:
+            data = dict(data)
+            data["signature"] = new_sig
+            symbols[key] = data
+            changed += 1
+    if changed:
+        out["symbols"] = symbols
+        logger.info(
+            "Normalized %d signature(s) to language=%s keywords",
+            changed, lang,
+        )
+    return out
 
 
 def _wiring_issue_key(issue: dict) -> tuple:
@@ -892,8 +1245,11 @@ def enrich_wiring_contract_from_file(
     try:
         # 1. Normalize payload (handles real binary shape + test mock shape)
         observed_symbols = _extract_symbols_from_tldr_data(extract_data)
-
+        
         if observed_symbols:
+            from collections import Counter
+            sym_counts = Counter(s.get("name") for s in observed_symbols if s.get("name"))
+            
             packages = enriched.setdefault("packages", {})
             symbols = enriched.setdefault("symbols", {})
 
@@ -923,20 +1279,36 @@ def enrich_wiring_contract_from_file(
                     existing_sig = existing_sym.get("signature", "")
                     new_sig = sym_data.get("signature") or sym_name
 
+                    is_collision = sym_counts[sym_name] > 1
+                    existing_file = existing_sym.get("file")
+                    if existing_file and existing_file != file_path:
+                        is_collision = True
+
                     if _is_placeholder_signature(existing_sig):
+                        sig_to_use = new_sig
+                    elif _signature_language_mismatch(
+                        existing_sig, (enriched.get("language") or "")
+                    ) and new_sig and not _is_placeholder_signature(new_sig):
+                        # Planned sig used wrong language keyword (e.g. def for Go) —
+                        # upgrade from observed code instead of thrashing on drift.
+                        logger.info(
+                            "[wiring] Upgrading wrong-language planned sig for %s: %r → %r",
+                            qualified_name, existing_sig, new_sig,
+                        )
                         sig_to_use = new_sig
                     else:
                         # Soft reconcile: warn + collect issue when planned sig diverges
-                        if existing_sig and new_sig:
+                        if existing_sig and new_sig and not is_collision:
                             issue = _warn_signature_drift(file_path, qualified_name, existing_sig, new_sig)
                             if issue:
                                 _append_wiring_issue(enriched, issue)
                         sig_to_use = existing_sig
 
                     symbols[qualified_name] = {
-                        "package": pkg_name,
-                        "signature": sig_to_use,
-                        "exports": existing_sym.get("exports") or [sym_name],
+                         "package": pkg_name,
+                         "signature": sig_to_use,
+                         "exports": existing_sym.get("exports") or [sym_name],
+                         "file": file_path,
                     }
 
         # 2. Extract imports and add dep edges
@@ -1090,7 +1462,8 @@ def validate_wiring_contract(data: dict) -> dict:
 
 def write_wiring_contract(workspace: Path, data: dict) -> Path:
     """validate → write workspace/wiring_contract.json (indent=2, trailing newline)."""
-    normalized = validate_wiring_contract(data)
+    synced = sync_module_identity_from_workspace(data, workspace)
+    normalized = validate_wiring_contract(normalize_signatures_for_language(synced))
     target = Path(workspace) / WIRING_CONTRACT_FILENAME
     content = json.dumps(normalized, indent=2) + "\n"
     target.write_text(content, encoding="utf-8")
@@ -1104,7 +1477,9 @@ def load_wiring_contract(workspace: Path) -> dict | None:
         return None
     try:
         data = json.loads(target.read_text(encoding="utf-8"))
-        return validate_wiring_contract(data)
+        validated = validate_wiring_contract(data)
+        # Keep in-memory view aligned with package manifests when present.
+        return sync_module_identity_from_workspace(validated, workspace)
     except Exception as exc:
         logger.warning("Failed to load wiring contract from %s: %s", target, exc)
         return None
@@ -1230,9 +1605,18 @@ def format_prompt_section(contract: dict, file_path: str) -> str:
     )
 
 
-def import_prefix(contract: dict) -> str:
-    """Return contract['module'] for prompt PROJECT IDENTITY."""
-    return contract.get("module") or ""
+def import_prefix(contract: dict, workspace: Optional[Path] = None) -> str:
+    """Return canonical module/import root for prompt PROJECT IDENTITY.
+
+    When *workspace* is provided, prefer the on-disk package manager identity
+    (go.mod / package.json / pyproject / Cargo.toml) over a weak contract.module.
+    """
+    if not contract and not workspace:
+        return ""
+    data = contract or {}
+    if workspace is not None:
+        data = sync_module_identity_from_workspace(data, workspace)
+    return (data.get("module") or "").strip()
 
 
 # Generic boundary/layer keywords — not tied to any single language layout.
@@ -1242,9 +1626,492 @@ _BOUNDARY_KEYWORDS = (
     "view", "views", "router", "endpoint", "endpoints",
 )
 
+# Domain / lifecycle packages that must not be duplicated under the same parent
+# (e.g. internal/service vs internal/sandbox).
+_DOMAIN_KEYWORDS = _BOUNDARY_KEYWORDS + (
+    "sandbox", "domain", "core", "manager", "engine", "runtime",
+    "business", "application", "podman", "container", "containers",
+)
+
 _SOURCE_SUFFIXES = frozenset({
-    ".go", ".py", ".ts", ".js", ".tsx", ".jsx", ".java", ".kt", ".rs", ".rb", ".php", ".cs",
+    ".go", ".py", ".ts", ".js", ".tsx", ".jsx", ".java", ".kt", ".scala", ".sc",
+    ".rs", ".rb", ".php", ".cs", ".c", ".cpp", ".h", ".hpp",
+    # Markup/style are delivery surfaces, not import-root languages — excluded on purpose.
 })
+
+
+class FileEntry(TypedDict, total=False):
+    """Single row in the creation manifest (contract + supplementary tiers)."""
+    path: str
+    description: str
+    manifest_source: Literal["contract", "supplementary", "injected"]
+    tier: Literal["contract", "supplementary", "injected"]
+
+
+_MANIFEST_CONFIG_NAMES = frozenset({
+    "dockerfile", "containerfile", "makefile", "gnumakefile",
+    "go.mod", "go.sum", "package.json", "package-lock.json",
+    "pom.xml", "build.gradle", "build.gradle.kts", "build.sbt",
+    "pyproject.toml", "requirements.txt", "cmakelists.txt", "cargo.toml",
+})
+
+
+def should_skip_contract_reseed_from_tech_stack(contract: dict | None) -> bool:
+    """When True, post-TA lock must not re-extract packages/files from tech_stack.md."""
+    if not contract:
+        return False
+    meta = contract.get("_meta") or {}
+    return meta.get("source") == "jq-patch"
+
+
+def _normalize_manifest_path(path: str) -> str:
+    return normalize_workspace_path(path or "")
+
+
+def _is_manifest_source_path(path: str, description: str = "") -> bool:
+    """True when a manifest path counts as application source (not config/docs)."""
+    if not path or path.lower() == "unknown":
+        return False
+    desc_upper = (description or "").upper()
+    if "[SOURCE]" in desc_upper:
+        return True
+    if "[CONFIG]" in desc_upper:
+        return False
+    lower = path.lower().replace("\\", "/")
+    if "/test/" in lower or lower.startswith("test/") or lower.startswith("tests/") or "/tests/" in lower:
+        return False
+    basename = Path(lower).name
+    if basename in _MANIFEST_CONFIG_NAMES:
+        return False
+    if "." not in basename:
+        return basename.lower() in EXTENSIONLESS_FILENAMES and basename.lower() not in _MANIFEST_CONFIG_NAMES
+    ext = Path(lower).suffix.lower()
+    if ext in _SOURCE_SUFFIXES:
+        return True
+    return _is_valid_file_path(path)
+
+
+def _is_manifest_scaffolding_path(path: str) -> bool:
+    if not path:
+        return True
+    lower = path.lower().replace("\\", "/")
+    if lower in _MANIFEST_CONFIG_NAMES:
+        return True
+    if lower.endswith((".md", ".yaml", ".yml", ".json", ".toml", ".txt", ".html", ".css")):
+        if not lower.endswith(".py") and Path(lower).suffix.lower() not in _SOURCE_SUFFIXES:
+            return True
+    scaffold_prefixes = (
+        ".github/", "docs/", "configuration/", "build/", "prerequisites/",
+    )
+    return any(lower.startswith(p) for p in scaffold_prefixes)
+
+
+def files_from_contract(wiring_contract: dict | None) -> List[FileEntry]:
+    """Mandatory contract-tier paths from wiring_contract.json packages[*].files."""
+    if not wiring_contract:
+        return []
+    packages = wiring_contract.get("packages") or {}
+    entries: List[FileEntry] = []
+    seen: set[str] = set()
+    for _pkg, pkg_data in packages.items():
+        for raw in pkg_data.get("files") or []:
+            p = _normalize_manifest_path(str(raw))
+            if not p or not _is_valid_file_path(p) or p in seen:
+                continue
+            seen.add(p)
+            entries.append({
+                "path": p,
+                "description": f"Contract-declared source: {p}",
+                "manifest_source": "contract",
+                "tier": "contract",
+            })
+    return entries
+
+
+def _path_under_contract_packages(path: str, contract: dict) -> bool:
+    """True when path sits under a declared contract package prefix or is declared."""
+    p_norm = _normalize_manifest_path(path)
+    if not p_norm or not contract:
+        return False
+    packages = contract.get("packages") or {}
+    declared_prefixes = {normalize_workspace_path(p) for p in packages.keys()}
+    for pkg_data in packages.values():
+        for f in pkg_data.get("files") or []:
+            if p_norm == _normalize_manifest_path(str(f)):
+                return True
+    for prefix in declared_prefixes:
+        if p_norm == prefix or p_norm.startswith(prefix + "/"):
+            return True
+    return False
+
+
+def validate_supplementary_paths(
+    supplementary_paths: List[FileEntry],
+    contract: dict | None,
+) -> List[FileEntry]:
+    """Filter Pass 2b / seeder paths — additive only; reject contract collisions."""
+    validated: List[FileEntry] = []
+    contract_paths = {e["path"] for e in files_from_contract(contract)}
+    for raw in supplementary_paths or []:
+        p = _normalize_manifest_path(str(raw.get("path") or ""))
+        if not p or not _is_valid_file_path(p):
+            continue
+        if p in contract_paths:
+            logger.warning("Supplementary path rejected (contract owns it): %s", p)
+            continue
+        if contract and _path_under_contract_packages(p, contract):
+            # Allow non-source config under contract tree only when not a source file
+            if _is_manifest_source_path(p, raw.get("description", "")):
+                logger.warning(
+                    "Supplementary source path rejected under contract package: %s", p
+                )
+                continue
+        desc = (raw.get("description") or f"Supplementary file: {p}").strip()
+        validated.append({
+            "path": p,
+            "description": desc,
+            "manifest_source": "supplementary",
+            "tier": "supplementary",
+        })
+    return validated
+
+
+def merge_file_manifests(
+    mandatory: List[FileEntry],
+    supplementary: List[FileEntry],
+) -> List[FileEntry]:
+    """Union manifests; contract tier wins on path conflict."""
+    merged: dict[str, FileEntry] = {}
+    for entry in mandatory or []:
+        p = _normalize_manifest_path(entry.get("path") or "")
+        if p:
+            merged[p] = dict(entry)
+    for entry in supplementary or []:
+        p = _normalize_manifest_path(entry.get("path") or "")
+        if not p or p in merged:
+            continue
+        merged[p] = dict(entry)
+    return list(merged.values())
+
+
+def _inject_init_py_entries(entries: List[FileEntry]) -> List[FileEntry]:
+    from ..utils.manifest_guard import expand_python_package_inits
+
+    paths = {e["path"] for e in entries if e.get("path")}
+    py_files = [p for p in paths if p.endswith(".py")]
+    if not py_files:
+        return entries
+    needed = {
+        p for p in expand_python_package_inits(paths)
+        if p.endswith("/__init__.py") and p not in paths
+    }
+    out = list(entries)
+    for init_path in sorted(needed):
+        out.append({
+            "path": init_path,
+            "description": "Python package init (auto-generated)",
+            "manifest_source": "injected",
+            "tier": "injected",
+        })
+    return out
+
+
+def _inject_skill_scaffolding_entries(
+    entries: List[FileEntry],
+    design_spec: str,
+    workspace: Optional[Path],
+) -> List[FileEntry]:
+    """Add skill-derived structural files not already in the manifest."""
+    if not workspace:
+        return entries
+    prefetch_file = Path(workspace) / "skill_prefetch.json"
+    if not prefetch_file.is_file():
+        return entries
+    skill_paths: set[str] = set()
+    try:
+        data = json.loads(prefetch_file.read_text(encoding="utf-8"))
+        all_entries: list = []
+        if isinstance(data, dict):
+            for role_entries in data.values():
+                if isinstance(role_entries, list):
+                    all_entries.extend(role_entries)
+        for entry in all_entries:
+            content = entry.get("content", "")
+            if content:
+                for item in extract_files_with_descriptions_from_tech_stack(content):
+                    p = (item.get("path") or "").strip()
+                    if p and _is_valid_file_path(p):
+                        skill_paths.add(p)
+    except Exception as exc:
+        logger.warning("skill scaffolding inject skipped: %s", exc)
+        return entries
+
+    existing = {e["path"] for e in entries if e.get("path")}
+    out = list(entries)
+    for fp in sorted(skill_paths):
+        if fp in existing:
+            continue
+        if not _is_manifest_source_path(fp):
+            continue
+        out.append({
+            "path": fp,
+            "description": "Framework scaffolding file derived from skills",
+            "manifest_source": "injected",
+            "tier": "injected",
+        })
+    return out
+
+
+def _sort_manifest_entries(entries: List[FileEntry]) -> List[FileEntry]:
+    """Sort by tier, then package-manager manifests first (sets import root early)."""
+    tier_order = {"contract": 0, "supplementary": 1, "injected": 2}
+    manifest_basenames = {
+        "go.mod", "package.json", "pyproject.toml", "cargo.toml",
+        "build.sbt", "pom.xml", "composer.json", "gemfile", "requirements.txt",
+    }
+
+    def _key(e: FileEntry) -> tuple:
+        tier = e.get("tier") or e.get("manifest_source") or "supplementary"
+        path = e.get("path") or ""
+        base = Path(path).name.lower()
+        # 0 = package identity files first so later source uses the right import root
+        identity = 0 if base in manifest_basenames or base.startswith("build.gradle") else 1
+        return (tier_order.get(tier, 9), identity, path)
+
+    return sorted(entries, key=_key)
+
+
+def build_creation_manifest(
+    wiring_contract: dict | None,
+    supplementary_paths: List[FileEntry],
+    design_spec: str,
+    *,
+    tdd: bool = False,
+    workspace: Optional[Path] = None,
+) -> List[FileEntry]:
+    """Merge contract + supplementary + auto-injected paths into one manifest."""
+    _ = tdd  # TDD test paths registered separately via register_tdd_test_tasks
+    mandatory = files_from_contract(wiring_contract)
+    supplementary = validate_supplementary_paths(supplementary_paths, wiring_contract)
+    merged = merge_file_manifests(mandatory, supplementary)
+    merged = _inject_init_py_entries(merged)
+    merged = _inject_skill_scaffolding_entries(merged, design_spec, workspace)
+    return _sort_manifest_entries(merged)
+
+
+def _implementation_manifest_paths(entries: List[FileEntry]) -> List[str]:
+    impl: List[str] = []
+    for entry in entries or []:
+        path = entry.get("path") or ""
+        desc = entry.get("description") or ""
+        if not _is_manifest_source_path(path, desc):
+            continue
+        if _is_manifest_scaffolding_path(path):
+            continue
+        impl.append(path)
+    return impl
+
+
+def _adaptive_min_implementation_files(
+    components: list,
+    *,
+    design_spec: str = "",
+    solution_spec: str = "",
+) -> int:
+    """Minimum implementation files — scales with design size, not a hard floor of 4.
+
+    Tiny CLI / calculator visions legitimately have 1–2 source files; multi-service
+    designs still require broader coverage.
+    """
+    n = len(components) if components else 0
+    blob = f"{design_spec}\n{solution_spec}".lower()
+    simple = any(
+        tok in blob
+        for tok in (
+            "simple",
+            "minimal",
+            "hello world",
+            "command-line",
+            "command line",
+            "cli calculator",
+            "toy ",
+            "starter",
+        )
+    )
+    if simple or n <= 2:
+        return max(1, n) if n else 1
+    if n >= 5:
+        return max(4, n)
+    if n >= 3:
+        return max(3, n)
+    return 2
+
+
+def validate_manifest_completeness(
+    entries: List[FileEntry],
+    *,
+    design_spec: str = "",
+    solution_spec: str = "",
+) -> Dict[str, Any]:
+    """Validate creation manifest has enough concrete implementation files."""
+    from ..utils.vision_stack_analysis import (
+        component_reflected_in_artifact,
+        extract_named_components,
+    )
+
+    if not entries:
+        return {
+            "valid": False,
+            "issues": [
+                "Creation manifest is empty. Register contract files and/or "
+                "supplementary paths before development."
+            ],
+        }
+
+    all_paths = [e["path"] for e in entries if e.get("path")]
+    src_files = [
+        e["path"] for e in entries
+        if _is_manifest_source_path(e.get("path", ""), e.get("description", ""))
+    ]
+    impl_files = _implementation_manifest_paths(entries)
+    issues: List[str] = []
+
+    if len(src_files) == 0:
+        issues.append(
+            "No concrete source files in creation manifest. "
+            "List real filenames with extensions (e.g. src/main.py, internal/service/manager.go)."
+        )
+
+    components = extract_named_components(solution_spec) or extract_named_components(design_spec)
+    min_impl = _adaptive_min_implementation_files(
+        components,
+        design_spec=design_spec,
+        solution_spec=solution_spec,
+    )
+    if len(impl_files) < min_impl:
+        issues.append(
+            f"Manifest is too shallow: found {len(impl_files)} implementation "
+            f"source file(s) but need at least {min_impl} "
+            f"(derived from {len(components) or 'default'} named component(s))."
+        )
+
+    if components:
+        manifest_text = "\n".join(all_paths)
+        missing = [
+            name for name in components
+            if not component_reflected_in_artifact(name, manifest_text, all_paths)
+        ]
+        if len(missing) >= max(1, (len(components) + 1) // 2):
+            issues.append(
+                "Manifest does not cover named components from the design/solution "
+                f"spec. Missing or unrepresented: {missing[:8]}"
+                + ("..." if len(missing) > 8 else "")
+            )
+
+    if issues:
+        return {"valid": False, "issues": issues}
+    return {"valid": True, "issues": [], "implementation_files": len(impl_files)}
+
+
+def render_file_tree_from_contract(wiring_contract: dict | None) -> str:
+    """Deterministic Pass 2a tree from contract package files."""
+    entries = files_from_contract(wiring_contract)
+    return render_file_tree_from_manifest(entries, root_label="contract/")
+
+
+def render_file_tree_from_manifest(
+    entries: List[FileEntry],
+    *,
+    root_label: str = "project/",
+) -> str:
+    """Render a unicode directory tree from manifest paths."""
+    paths = sorted({_normalize_manifest_path(e.get("path") or "") for e in entries if e.get("path")})
+    if not paths:
+        return f"{root_label}\n└── (no files registered)\n"
+
+    tree: dict = {}
+    for path in paths:
+        parts = path.split("/")
+        node = tree
+        for part in parts[:-1]:
+            node = node.setdefault(part + "/", {})
+        node[parts[-1]] = None
+
+    lines: List[str] = [root_label.rstrip("/") + "/"]
+
+    def _walk(node: dict, prefix: str = "") -> None:
+        items = list(node.items())
+        for idx, (name, child) in enumerate(items):
+            is_last = idx == len(items) - 1
+            branch = "└── " if is_last else "├── "
+            lines.append(prefix + branch + name)
+            if isinstance(child, dict) and child:
+                extension = "    " if is_last else "│   "
+                _walk(child, prefix + extension)
+
+    _walk(tree)
+    return "\n".join(lines)
+
+
+def render_tech_stack_from_manifest(
+    entries: List[FileEntry],
+    stack_prose: str = "",
+) -> str:
+    """Build tech_stack.md view: stack prose + rendered file tree."""
+    prose = (stack_prose or "").strip()
+    if not prose:
+        prose = "# Technology Stack\n\n(See stack selection above.)"
+    tree = render_file_tree_from_manifest(entries)
+    if "## File Structure" in prose:
+        head, _, _tail = prose.partition("## File Structure")
+        prose = head.rstrip()
+    return f"{prose}\n\n## File Structure\n\n```\n{tree}\n```\n"
+
+
+def parse_supplementary_file_entries(text: str) -> List[FileEntry]:
+    """Parse Pass 2b / seeder JSON array ``[{path, description}]``."""
+    if not text or not text.strip():
+        return []
+    import re as _re
+
+    candidates: List[str] = []
+    tag_match = _re.search(
+        r"<supplementary_files>\s*(.*?)\s*</supplementary_files>",
+        text,
+        _re.DOTALL | _re.IGNORECASE,
+    )
+    if tag_match:
+        candidates.append(tag_match.group(1).strip())
+    fence = _re.search(r"```(?:json)?\s*(\[[\s\S]*?\])\s*```", text)
+    if fence:
+        candidates.append(fence.group(1).strip())
+    array_match = _re.search(r"(\[\s*\{[\s\S]*?\}\s*\])", text)
+    if array_match:
+        candidates.append(array_match.group(1).strip())
+
+    for blob in candidates:
+        try:
+            parsed = json.loads(blob)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(parsed, list):
+            continue
+        entries: List[FileEntry] = []
+        for item in parsed:
+            if not isinstance(item, dict):
+                continue
+            p = _normalize_manifest_path(str(item.get("path") or ""))
+            if not p:
+                continue
+            entries.append({
+                "path": p,
+                "description": str(item.get("description") or f"Supplementary: {p}"),
+                "manifest_source": "supplementary",
+                "tier": "supplementary",
+            })
+        if entries:
+            return entries
+    return []
 
 
 def normalize_workspace_path(path: str) -> str:
@@ -1260,44 +2127,10 @@ def infer_module_from_specs(
     workspace: Optional[Path] = None,
 ) -> str:
     """Best-effort module/import root from manifests, specs or workspace name (language-neutral)."""
-    # 1. Try to read workspace manifest files
-    if workspace:
-        workspace_path = Path(workspace)
-        go_mod = workspace_path / "go.mod"
-        if go_mod.is_file():
-            try:
-                for line in go_mod.read_text(encoding="utf-8").splitlines():
-                    if line.strip().startswith("module "):
-                        parts = line.strip().split()
-                        if len(parts) > 1:
-                            candidate = parts[1].strip()
-                            if not _is_weak_module_name(candidate):
-                                return candidate
-            except Exception:
-                pass
-        pkg_json = workspace_path / "package.json"
-        if pkg_json.is_file():
-            try:
-                data = json.loads(pkg_json.read_text(encoding="utf-8"))
-                if isinstance(data, dict) and data.get("name"):
-                    candidate = data["name"].strip()
-                    if not _is_weak_module_name(candidate):
-                        return candidate
-            except Exception:
-                pass
-        for pfile in ("pyproject.toml", "Cargo.toml"):
-            mfile = workspace_path / pfile
-            if mfile.is_file():
-                try:
-                    for line in mfile.read_text(encoding="utf-8").splitlines():
-                        if line.strip().startswith("name ") or line.strip().startswith("name="):
-                            m = re.search(r'name\s*=\s*["\']([a-zA-Z0-9_./-]+)["\']', line)
-                            if m:
-                                candidate = m.group(1).strip()
-                                if not _is_weak_module_name(candidate):
-                                    return candidate
-                except Exception:
-                    pass
+    # 1. Prefer package-manager identity on disk (any language)
+    manifest_mod, _lang = read_package_manifest_identity(workspace)
+    if manifest_mod and not _is_weak_module_name(manifest_mod):
+        return manifest_mod
 
     # 2. Try to extract header title from specs (e.g. "# Sandbox API" -> "sandbox-api")
     for spec in (solution_spec or "", design_spec or "", tech_stack or ""):
@@ -1316,9 +2149,9 @@ def infer_module_from_specs(
         if not spec:
             continue
         for pattern, transform in (
-            (r'\bmodule\s+([a-zA-Z0-9_./-]+)\b', lambda m: m.group(1)),
+            (r'\bmodule\s+([a-zA-Z0-9_./@-]+)\b', lambda m: m.group(1)),
             (r'"name"\s*:\s*"([a-zA-Z0-9@/_-]+)"', lambda m: m.group(1)),
-            (r'^\s*name\s*=\s*["\']([a-zA-Z0-9_./-]+)["\']', lambda m: m.group(1)),
+            (r'^\s*name\s*=\s*["\']([a-zA-Z0-9_./@-]+)["\']', lambda m: m.group(1)),
         ):
             match = re.search(pattern, spec, re.MULTILINE)
             if match:
@@ -1360,6 +2193,39 @@ def package_has_boundary_keywords(package_name: str, owns: Optional[List[str]] =
     if owns:
         text += " " + " ".join(o.lower() for o in owns)
     return any(kw in text for kw in _BOUNDARY_KEYWORDS)
+
+
+def package_has_domain_keywords(package_name: str, owns: Optional[List[str]] = None) -> bool:
+    """True when a package looks like an HTTP boundary *or* domain/lifecycle owner."""
+    tokens = normalize_workspace_path(package_name).lower().replace("/", " ").replace("_", " ").split()
+    text = " ".join(tokens)
+    if owns:
+        text += " " + " ".join(o.lower() for o in owns)
+    return any(kw in text for kw in _DOMAIN_KEYWORDS)
+
+
+def missing_declared_source_files(contract: dict, workspace: Path) -> List[str]:
+    """Return contract-declared source files that are absent on disk.
+
+    Only checks known source suffixes (``.go``, ``.py``, …). Docs/config paths
+    in ``packages[*].files`` are ignored.
+    """
+    if not contract:
+        return []
+    workspace = Path(workspace)
+    missing: List[str] = []
+    for pkg_data in (contract.get("packages") or {}).values():
+        if not isinstance(pkg_data, dict):
+            continue
+        for f in pkg_data.get("files") or []:
+            if not isinstance(f, str) or not f.strip():
+                continue
+            rel = normalize_workspace_path(f)
+            if not _has_source_suffix(rel):
+                continue
+            if not (workspace / rel).is_file():
+                missing.append(rel)
+    return missing
 
 
 def unauthorized_package_prefix_for_path(path: str, declared_prefixes: set[str]) -> Optional[str]:
@@ -1484,6 +2350,17 @@ def reconcile_workspace_against_contract(
     packages = contract.get("packages") or {}
     declared_prefixes = {normalize_workspace_path(p) for p in packages.keys()}
 
+    for missing_path in missing_declared_source_files(contract, workspace):
+        issues.append({
+            "file": missing_path,
+            "description": (
+                f"declared source file missing: '{missing_path}' is in "
+                f"wiring_contract.packages but not on disk"
+            ),
+            "type": "wiring_reconciliation",
+            "severity": "error",
+        })
+
     for pkg_dir in collect_unauthorized_sibling_packages(workspace, declared_prefixes):
         issues.append({
             "file": pkg_dir,
@@ -1491,6 +2368,7 @@ def reconcile_workspace_against_contract(
                 f"unauthorized package: '{pkg_dir}' found on disk but not in contract.packages"
             ),
             "type": "wiring_reconciliation",
+            "severity": "error",
         })
 
     for p in sorted(workspace.rglob("*")):
@@ -1518,6 +2396,7 @@ def reconcile_workspace_against_contract(
                             f"local prefix matching '{module_root}'"
                         ),
                         "type": "wiring_reconciliation",
+                        "severity": "error",
                     })
                     break
 
@@ -1533,7 +2412,9 @@ def tech_stack_violates_contract(
 ) -> str | None:
     """Return human-readable violation or None.
 
-    Relaxed (default): only flag competing handler/API packages.
+    Always (relaxed or strict): flag competing domain/boundary packages under the
+    same parent (e.g. ``internal/sandbox`` when ``internal/service`` is approved).
+
     Strict: also require every tech_stack path to sit under declared package prefixes.
     """
     if not contract or not declared_paths:
@@ -1554,7 +2435,8 @@ def tech_stack_violates_contract(
     
     always_ok_prefixes = {
         ".github/", "systemd/", "test/", "tests/", "docs/", "tests_unit/", 
-        "tests_integration/", "tests_e2e/", "test-fixtures/"
+        "tests_integration/", "tests_e2e/", "test-fixtures/",
+        "configuration/", "build/", "prerequisites/", "features/", "testing/",
     }
 
     def is_always_ok(path_str: str) -> bool:
@@ -1569,24 +2451,31 @@ def tech_stack_violates_contract(
                 return True
         return False
 
-    # Competing boundary packages: sibling dirs with similar concern but not in contract
-    boundary_packages = [
+    # Competing domain/boundary packages: sibling dirs with similar concern but not in contract
+    domain_packages = [
         pkg_name
         for pkg_name, pkg_data in packages.items()
-        if package_has_boundary_keywords(pkg_name, pkg_data.get("owns") or [])
+        if package_has_domain_keywords(pkg_name, pkg_data.get("owns") or [])
     ]
 
-    if boundary_packages:
+    if domain_packages:
         for path in declared_paths:
             if is_always_ok(path):
                 continue
             candidate = unauthorized_package_prefix_for_path(path, declared_prefixes)
             if not candidate or candidate in packages:
                 continue
-            if package_has_boundary_keywords(candidate, []):
+            if package_has_domain_keywords(candidate, []):
+                cand_parent = str(Path(normalize_workspace_path(candidate)).parent).replace("\\", "/")
+                same_parent = [
+                    p for p in domain_packages
+                    if str(Path(normalize_workspace_path(p)).parent).replace("\\", "/") == cand_parent
+                ]
+                approved = same_parent[0] if same_parent else domain_packages[0]
                 return (
                     f"Competing package '{candidate}' was introduced in tech stack, "
-                    f"but '{boundary_packages[0]}' is already the approved package for that concern."
+                    f"but '{approved}' is already the approved package for that concern. "
+                    f"Do not add a parallel domain/API tree; put files under the approved packages only."
                 )
 
     if not strict:

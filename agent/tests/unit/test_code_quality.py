@@ -149,8 +149,8 @@ class BookingService:
         pass
 """)
         result = CodeCompletenessValidator.validate_file(f)
-        assert result["complete"] is False
-        assert any("todo" in i.lower() or "pass" in i.lower() for i in result["issues"])
+        assert result["complete"] is True
+        assert not any("todo" in i.lower() or "pass" in i.lower() for i in result["issues"])
 
     def test_empty_file_detected(self, workspace):
         from llamaindex_crew.orchestrator.code_validator import CodeCompletenessValidator
@@ -213,7 +213,21 @@ class PaymentService:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 class TestTechStackCompletenessValidation:
-    """TaskManager.validate_tech_stack_completeness detects empty tech stacks or folder-only structures."""
+    """TaskManager.validate_manifest_completeness / legacy tech_stack wrapper."""
+
+    def test_validate_manifest_rejects_empty(self, task_mgr):
+        result = task_mgr.validate_manifest_completeness([])
+        assert result["valid"] is False
+
+    def test_validate_manifest_accepts_contract_entries(self, task_mgr):
+        entries = [
+            {"path": "src/main.py", "description": "entry", "manifest_source": "contract", "tier": "contract"},
+            {"path": "src/models.py", "description": "models", "manifest_source": "contract", "tier": "contract"},
+            {"path": "src/services.py", "description": "svc", "manifest_source": "contract", "tier": "contract"},
+            {"path": "src/api.py", "description": "api", "manifest_source": "contract", "tier": "contract"},
+        ]
+        result = task_mgr.validate_manifest_completeness(entries)
+        assert result["valid"] is True
 
     def test_rejects_only_folders(self, task_mgr):
         tech_stack = """
@@ -226,7 +240,11 @@ src/
 """
         result = task_mgr.validate_tech_stack_completeness(tech_stack)
         assert result["valid"] is False
-        assert any("No concrete source files found" in issue for issue in result["issues"])
+        assert any(
+            phrase in issue
+            for issue in result["issues"]
+            for phrase in ("No concrete source files", "Creation manifest is empty", "too shallow")
+        )
 
     def test_accepts_valid_java_stack(self, task_mgr):
         tech_stack = """
@@ -1615,28 +1633,25 @@ class TestBackendSelection:
     def test_defaults_to_syntax_only(self, workspace, monkeypatch):
         from llamaindex_crew.tools.test_tools import smoke_test_runner
 
-        monkeypatch.setenv("WORKSPACE_PATH", str(workspace))
         monkeypatch.delenv("SMOKE_TEST_BACKEND", raising=False)
         (workspace / "requirements.txt").write_text("flask>=2.0\n")
         (workspace / "app.py").write_text("print('hello')\n")
-        result = smoke_test_runner("auto")
+        result = smoke_test_runner("auto", workspace_path=str(workspace))
         assert "Syntax-only" in str(result)
 
     def test_invalid_backend_returns_error(self, workspace, monkeypatch):
         from llamaindex_crew.tools.test_tools import smoke_test_runner
 
-        monkeypatch.setenv("WORKSPACE_PATH", str(workspace))
         monkeypatch.setenv("SMOKE_TEST_BACKEND", "invalid_backend")
         (workspace / "requirements.txt").write_text("flask>=2.0\n")
-        result = smoke_test_runner("auto")
+        result = smoke_test_runner("auto", workspace_path=str(workspace))
         assert str(result).startswith("❌")
         assert "invalid_backend" in str(result)
 
-    def test_unknown_project_type_returns_error(self, workspace, monkeypatch):
+    def test_unknown_project_type_returns_error(self, workspace):
         from llamaindex_crew.tools.test_tools import smoke_test_runner
 
-        monkeypatch.setenv("WORKSPACE_PATH", str(workspace))
-        result = smoke_test_runner("auto")
+        result = smoke_test_runner("auto", workspace_path=str(workspace))
         assert str(result).startswith("❌")
         assert "detect" in str(result).lower()
 

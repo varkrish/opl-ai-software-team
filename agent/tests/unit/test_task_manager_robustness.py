@@ -82,7 +82,7 @@ class TestTaskManagerRobustness(unittest.TestCase):
         # Physically create the files
         (self.workspace_path / "README.md").write_text("# Test")
         (self.workspace_path / "src").mkdir(parents=True, exist_ok=True)
-        (self.workspace_path / "src" / "App.js").write_text("// Test")
+        (self.workspace_path / "src" / "App.js").write_text("import React from 'react';\n\nfunction App() {\n  return (\n    <div>\n      <h1>Real app logic</h1>\n    </div>\n  );\n}\nexport default App;\n")
         
         # Reconcile
         self.manager.reconcile_with_filesystem(self.workspace_path)
@@ -104,7 +104,7 @@ class TestTaskManagerRobustness(unittest.TestCase):
         # Create it in a different directory (suffix match, not ambiguous basename)
         moved_dir = self.workspace_path / "backend" / "src"
         moved_dir.mkdir(parents=True, exist_ok=True)
-        (moved_dir / "main.py").write_text("print('hello')")
+        (moved_dir / "main.py").write_text("import sys\n\ndef main():\n    print('hello world')\n    print('this is a real script')\n    return 0\n\nif __name__ == '__main__':\n    sys.exit(main())\n")
 
         self.manager.reconcile_with_filesystem(self.workspace_path)
 

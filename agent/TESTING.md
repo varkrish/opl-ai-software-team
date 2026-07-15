@@ -4,6 +4,32 @@
 
 This project has a comprehensive test suite organized by test type and purpose.
 
+## Note — Module identity (multi-language)
+
+Wiring contracts use a **language-neutral** rule: one canonical import/package root
+(`wiring_contract.module`), never bare layer names (`api`, `src`, `service`, …).
+
+Package-manager parsers and compile smoke checks are **optional adapters** (Go,
+npm, Python, Rust, Scala/`build.sbt`, …). Missing an adapter does not block a
+language — identity falls back to vision/title inference. To add a language, extend:
+
+1. `read_package_manifest_identity()` in `llamaindex_crew/utils/wiring_contract.py`
+2. Manifest-first sort in `_sort_manifest_entries()`
+3. Post-write sync basenames in `SoftwareDevWorkflow._enrich_wiring_after_file()`
+4. Optional compile gate in `code_validator`
+
+See the module docstring at the top of `wiring_contract.py` for the full note.
+
+Sandbox API fast E2E (quote the node id for zsh):
+
+```bash
+cd opl-ai-software-team
+rm -rf agent/src/llamaindex_crew/web && ln -sfn "$(pwd)/crew_studio" agent/src/llamaindex_crew/web
+export PYTHONPATH="$(pwd):$(pwd)/agent:$(pwd)/agent/src"
+export CONFIG_FILE_PATH="$HOME/.crew-ai/config.yaml" AUTH_ENABLED=false SKIP_DELIVERY_MODE_TRIAGE=1
+cd agent && python3.10 -m pytest 'tests/e2e/test_sandbox_api_standalone.py::test_sandbox_api_standalone_e2e[fast]' -v -s
+```
+
 ## Quick Start
 
 ```bash

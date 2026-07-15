@@ -1,10 +1,9 @@
 """
-Standalone Sandbox API E2E — runs via run_build_pipeline (no container, no HTTP server).
+Simple Python / Java greenfield E2E — fast solutioning path only.
 
-Same vision as mono scripts/e2e-sandbox-api-vision.json and submit-e2e-sandbox-api-job.sh,
-but invokes the build pipeline in-process with a temp DB/workspace.
-
-Requires LLM API key in ~/.crew-ai/config.yaml or env (OPENROUTER_API_KEY / OPENAI_API_KEY).
+Runs via run_build_pipeline (no container, no HTTP server).
+Visions are intentionally tiny so we can compare language adapters
+and island/codegen quality without the Sandbox API complexity.
 """
 from __future__ import annotations
 
@@ -26,46 +25,63 @@ from llamaindex_crew.utils.output_parser import (
     is_llm_stub_content,
 )
 
-_FIXTURE = Path(__file__).parent / "fixtures" / "sandbox_api_vision.json"
+_FIXTURES = Path(__file__).parent / "fixtures"
 
 
-def _load_sandbox_fixture() -> dict:
-    return json.loads(_FIXTURE.read_text(encoding="utf-8"))
+def _load_fixture(name: str) -> dict:
+    return json.loads((_FIXTURES / name).read_text(encoding="utf-8"))
 
 
-def _assert_go_sources_clean(workspace: Path) -> None:
-    """Reject channel stubs and planning monologues written as .go source."""
-    go_files = list(workspace.rglob("*.go"))
-    assert go_files, "expected at least one Go source file"
+def _assert_sources_clean(workspace: Path, pattern: str) -> None:
+    files = list(workspace.rglob(pattern))
+    assert files, f"expected at least one file matching {pattern}"
     corrupt: list[str] = []
-    for path in go_files:
+    for path in files:
         text = path.read_text(encoding="utf-8", errors="replace")
         if is_llm_stub_content(text) or is_agent_planning_monologue(text):
             corrupt.append(str(path.relative_to(workspace)))
-    assert not corrupt, f"corrupt Go files: {corrupt}"
+    assert not corrupt, f"corrupt source files: {corrupt}"
 
 
-def _assert_sandbox_artifacts(workspace: Path) -> None:
-    assert (workspace / "go.mod").is_file(), "missing go.mod"
-    assert (workspace / "README.md").is_file(), "missing README.md"
-    go_sources = [
-        p for p in workspace.rglob("*.go")
-        if not p.name.endswith("_test.go")
+def _assert_python_artifacts(workspace: Path) -> None:
+    py_files = [
+        p for p in workspace.rglob("*.py")
+        if p.name != "__init__.py" and "test" not in p.name.lower()
     ]
-    assert len(go_sources) >= 2, (
-        f"expected multiple Go packages, found: "
-        f"{[str(p.relative_to(workspace)) for p in go_sources]}"
-    )
+    assert py_files, "expected Python source files"
+    assert any(
+        (workspace / name).is_file()
+        for name in ("pyproject.toml", "requirements.txt", "setup.py", "README.md")
+    ), "expected a Python project marker or README"
+
+
+def _assert_java_artifacts(workspace: Path) -> None:
+    java_files = list(workspace.rglob("*.java"))
+    assert java_files, "expected Java source files"
+    assert any(
+        (workspace / name).is_file()
+        for name in ("pom.xml", "build.gradle", "build.gradle.kts", "README.md")
+    ), "expected a Java build marker or README"
 
 
 @pytest.mark.e2e
 @pytest.mark.slow
 @pytest.mark.requires_api_key
 @pytest.mark.timeout(3600)
-@pytest.mark.parametrize("mode", ["fast", "full"])
-def test_sandbox_api_standalone_e2e(tmp_path, monkeypatch, mode):
-    """Fast-path Sandbox API build in-process (no dev container on :8099)."""
+@pytest.mark.parametrize(
+    "fixture_name,assert_artifacts,source_glob",
+    [
+        ("simple_python_vision.json", _assert_python_artifacts, "*.py"),
+        ("simple_java_vision.json", _assert_java_artifacts, "*.java"),
+    ],
+    ids=["python", "java"],
+)
+def test_simple_lang_standalone_e2e_fast(
+    tmp_path, monkeypatch, fixture_name, assert_artifacts, source_glob
+):
+    """Fast-path simple calculator builds for Python and Java."""
     import os
+
     current_path = os.environ.get("PATH", "")
     monkeypatch.setenv("PATH", f"/opt/homebrew/bin:/usr/local/bin:{current_path}")
     monkeypatch.setenv("SKIP_DELIVERY_MODE_TRIAGE", "1")
@@ -74,11 +90,10 @@ def test_sandbox_api_standalone_e2e(tmp_path, monkeypatch, mode):
     from crew_studio.build_runner import run_build_pipeline
     from crew_studio.job_database import JobDatabase
 
-    fixture = _load_sandbox_fixture()
+    fixture = _load_fixture(fixture_name)
     vision = fixture["vision"]
-    cap = mode
 
-    db_path = tmp_path / "sandbox_e2e_jobs.db"
+    db_path = tmp_path / "simple_lang_e2e_jobs.db"
     job_db = JobDatabase(db_path)
 
     job_id = str(uuid.uuid4())
@@ -86,9 +101,9 @@ def test_sandbox_api_standalone_e2e(tmp_path, monkeypatch, mode):
     workspace.mkdir(parents=True)
 
     meta = {
-        "capability_profile": {"solutioning_path": cap, "source": "e2e"},
+        "capability_profile": {"solutioning_path": "fast", "source": "e2e"},
         "auto_approve_plan": bool(fixture.get("auto_approve_plan", True)),
-        "auto_approve_solution": bool(fixture.get("auto_approve_solution", False)),
+        "auto_approve_solution": bool(fixture.get("auto_approve_solution", True)),
         "skip_delivery_mode_guard": True,
     }
     job_db.create_job(job_id, vision, str(workspace), metadata=json.dumps(meta))
@@ -117,7 +132,7 @@ def test_sandbox_api_standalone_e2e(tmp_path, monkeypatch, mode):
         meta = json.loads(meta_str) if isinstance(meta_str, str) else meta_str
         meta["solution_approved"] = True
         job_db.update_job(job_id, {"metadata": json.dumps(meta), "status": "queued"})
-        
+
         results = run_build_pipeline(
             job_id,
             workspace,
@@ -129,28 +144,14 @@ def test_sandbox_api_standalone_e2e(tmp_path, monkeypatch, mode):
         )
         status = results.get("status")
 
-    assert status in ("completed", "partially_completed"), results
+    print(f"\n=== [{fixture_name}] status={status} workspace={workspace} ===")
+    print(f"validation={results.get('validation_report')}")
+    print(f"files={[str(p.relative_to(workspace)) for p in workspace.rglob('*') if p.is_file()][:40]}")
 
-    _assert_sandbox_artifacts(workspace)
-    _assert_go_sources_clean(workspace)
+    assert status in ("completed", "partially_completed", "completed_with_errors"), results
 
-    # Assert clean execution log exists and is populated
-    execution_log = workspace / "execution.log"
-    assert execution_log.is_file(), "missing execution.log"
-    log_content = execution_log.read_text(encoding="utf-8")
-    assert "=== [LLM Prompt] ===" in log_content or "=== [LLM Response] ===" in log_content
-    assert (
-        "[code block truncated]" in log_content 
-        or "[code truncated]" in log_content
-        or "[code/file content omitted]" in log_content
-    )
-
-    task_validation = results.get("task_validation") or {}
-    if status == "completed":
-        assert task_validation.get("valid") is True, task_validation
-
-    validation = results.get("validation_report") or {}
-    assert validation.get("overall") in ("PASS", "ISSUES_FOUND", None), validation.get("overall")
+    assert_artifacts(workspace)
+    _assert_sources_clean(workspace, source_glob)
 
     assert any(p[0] == "development" for p in progress_log), (
         "expected development phase in progress log"

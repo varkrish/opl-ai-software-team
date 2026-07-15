@@ -163,7 +163,10 @@ def is_tdd_pipeline(pipeline: Pipeline) -> bool:
 
 def is_feature_by_feature_pipeline(pipeline: Pipeline) -> bool:
     """
-    True when the pipeline includes PO/BDD planning — dev should work feature-by-feature.
+    True when the pipeline includes PO/BDD planning.
+
+    Note: development may still prefer per-file creation-manifest tasks when
+    those are registered — see SoftwareDevWorkflow.run_development_phase.
     """
     flat = flatten_pipeline(pipeline)
     return "product_owner" in flat

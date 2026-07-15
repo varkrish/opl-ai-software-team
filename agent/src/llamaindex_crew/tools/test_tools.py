@@ -260,6 +260,7 @@ CONTAINER_IMAGES = {
     "python": "registry.access.redhat.com/ubi9/python-311:latest",
     "java_maven": "registry.access.redhat.com/ubi9/openjdk-21:latest",
     "java_gradle": "registry.access.redhat.com/ubi9/openjdk-21:latest",
+    "go": "registry.access.redhat.com/ubi9/go-toolset:latest",
 }
 
 CONTAINER_COMMANDS = {
@@ -267,6 +268,7 @@ CONTAINER_COMMANDS = {
     "python": "cd /app && python -m py_compile *.py 2>&1 || true",
     "java_maven": "cd /app && mvn compile -q 2>&1",
     "java_gradle": "cd /app && gradle build -x test -q 2>&1",
+    "go": "cd /app && go build ./... 2>&1",
 }
 
 
@@ -280,10 +282,14 @@ def _detect_project_type(workspace: Path) -> str:
         return "node"
     if (workspace / "requirements.txt").exists() or (workspace / "pyproject.toml").exists():
         return "python"
+    if (workspace / "go.mod").exists():
+        return "go"
     if list(workspace.rglob("*.java")):
         return "java_maven"
     if list(workspace.rglob("*.py")):
         return "python"
+    if list(workspace.rglob("*.go")):
+        return "go"
     return "unknown"
 
 
@@ -337,6 +343,10 @@ class SyntaxOnlyBackend(SmokeTestBackend):
             issues.append(
                 f"[{entry['ecosystem']}] undeclared dependency '{entry['package']}'"
             )
+
+        compile_result = CodeCompletenessValidator.run_workspace_compile_gate(workspace)
+        for msg in compile_result.get("issues") or []:
+            issues.append(f"[compile] {msg}")
 
         if issues:
             detail = "\n".join(f"  - {i}" for i in issues[:15])

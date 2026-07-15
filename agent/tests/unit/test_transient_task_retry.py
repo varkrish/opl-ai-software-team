@@ -29,6 +29,7 @@ def _make_workflow(tmp_path):
     wf.config = None
     wf._tldr_structure_cache = {}
     wf._export_registry = {}
+    wf._wiring_contract = None
     wf.document_indexer = MagicMock()
     wf.document_indexer.query.return_value = ""
     wf.budget_tracker = None

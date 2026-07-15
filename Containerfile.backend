@@ -20,6 +20,7 @@ RUN dnf install -y --nodocs \
         gcc \
         gcc-c++ \
         make \
+        jq \
         nodejs \
         npm \
     && dnf clean all \

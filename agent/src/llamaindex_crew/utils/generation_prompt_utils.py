@@ -38,6 +38,12 @@ _CRITICAL_ISSUE_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"Only \d+ chars of content", re.I),
     re.compile(r"Placeholder/stub", re.I),
     re.compile(r"pass-only method", re.I),
+    re.compile(r"Wiring issue", re.I),
+    re.compile(r"Wiring error", re.I),
+    re.compile(r"unparsed LLM", re.I),
+    re.compile(r"unparsed markdown", re.I),
+    re.compile(r"multiple package declarations", re.I),
+    re.compile(r"duplicate package declarations", re.I),
 )
 
 

@@ -84,9 +84,9 @@ class TestDecideSolutioningPath:
     def test_adaptive_spring_is_full(self):
         assert decide_solutioning_path(SPRING_VISION, solutioning_path="adaptive") == "full"
 
-    def test_default_missing_path_is_full(self):
-        assert decide_solutioning_path(MAP_VISION, solutioning_path=None) == "full"
-        assert decide_solutioning_path(MAP_VISION) == "full"
+    def test_default_missing_path_is_fast(self):
+        assert decide_solutioning_path(MAP_VISION, solutioning_path=None) == "fast"
+        assert decide_solutioning_path(MAP_VISION) == "fast"
 
 
 class TestManifestForbiddenTier:

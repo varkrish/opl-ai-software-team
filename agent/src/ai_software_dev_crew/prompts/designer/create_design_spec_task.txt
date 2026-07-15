@@ -28,7 +28,7 @@ TASK — Create design_spec.md
 1. Assess project complexity from user stories.
 2. For SIMPLE projects: describe main components/functions and UI if needed.
 3. For COMPLEX projects: Bounded Contexts, Data Flow, Domain Events, C4 diagrams.
-4. Define interface contracts.
+4. Define interface contracts (signatures for public APIs between packages).
 
 CRITICAL — Use the FRAMEWORK REFERENCE above only when the vision requires that framework:
 - Name components using the chosen stack's terminology.
@@ -51,3 +51,32 @@ The goal is a design that a developer familiar with the framework can immediatel
 Match the design complexity to the requirements. A simple utility doesn't need complex architecture.
 
 Call file_writer(file_path='design_spec.md', content='<your design>')
+
+In the design body, include an "Interface contracts" section with package headings
+(e.g. `## internal/api`) and language-real signatures for every public cross-package API.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+REQUIRED — WIRING PATCH (jq program, token-efficient)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+After writing design_spec.md, you MUST also emit a wiring patch (append it to the
+design file or include it in the same write). The pipeline seeds packages/files from
+paths; this patch locks module identity, ownership, and signatures before codegen.
+
+<wiring_patch>
+.module = "github.com/example/my-app"
+| .language = "go"
+| .packages["internal/api"].owns = ["CreateHandler"]
+| .packages["internal/service"].owns = ["NewService", "Create"]
+| .symbols["internal/service.Create"] = {{"package":"internal/service","signature":"func (s *Service) Create(ctx context.Context, name string) (string, error)","exports":["Create"]}}
+| .deps += [{{"from":"internal/api","to":"internal/service"}}]
+| .deps += [{{"from":"cmd/my-app","to":"internal/api"}}]
+</wiring_patch>
+
+Rules:
+- jq filter only (not shell). Symbol keys MUST be "package.SymbolName".
+- .module = canonical import/package root for the WHOLE project (never bare layer
+  names like "api", "service", "cmd", "src", "app"). Prefer real roots such as
+  "github.com/org/my-app", "@org/my-app", or "my_app".
+- .language = primary language (go|python|typescript|javascript|java|rust|…).
+- One package per concern; HTTP handlers only in the API package; entrypoint/main only wires the mux.
+- Interface contracts in the prose MUST align with .packages[*].owns and .symbols.
