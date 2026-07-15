@@ -3,42 +3,29 @@
 All notable changes to **OPL Crew Backend** (`opl-ai-software-team`) are documented here.
 
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).  
-Version tags match container releases (`v2.x.y` → `quay.io/varkrish/crew-backend`).
+Version tags match container releases (`v2.x.y` → `quay.io/varkrish/crew-backend` / `ghcr.io/varkrish/crew-backend`).
 
 ## [Unreleased]
 
-### Added
-- **Frappe app generation E2E** — `simple_frappe_vision.json` in `test_simple_lang_standalone.py` asserts Frappe stack lock, real app slug wiring (not Go/`app_name`), and on-disk `hooks.py` / `modules.txt`.
-- **Spring Boot simple fast E2E** — `simple_spring_vision.json` asserts Boot entrypoint + Maven/Gradle spring-boot deps and rejects Go/Frappe drift; tighten Go/Java artifact checks.
-- **Multi-language simple fast E2E** — extend `test_simple_lang_standalone.py` with Go, HTML, and Node.js calculator fixtures alongside Python/Java.
-- **Wiring contract / creation manifest pipeline** — contract-driven file manifests, language-neutral module identity sync from package manifests (`go.mod`, `package.json`, `pyproject.toml`, `Cargo.toml`, `build.sbt`, …), per-file TLDR enrich, and soft-register of concrete paths when completeness checks soft-fail.
-- **`workflow_resolver`** — single pipeline resolver for YAML `workflows`, persisted `selected_workflow_phases`, and `smart_router` (adaptive only on first run). Plan-approve resume walks the resolved pipeline (`qa` before dev on full/TDD paths).
-- **TDD QA phase** — QA materializes test `file_creation` tasks when pipeline places `qa` before build phases; dev skips those files after `qa_phase_completed`.
-- **Feature-by-feature development** — when pipeline includes `product_owner`, dev runs one BDD feature slice at a time (related files, then feature implementation) instead of batching all features at the end.
-- **Solutioning E2E** — `test_solutioning_e2e.py` runs the live research → architect → critique loop (`solution_approved=False`) and a second test that approves then resumes the full pipeline.
+## [2.5.0] - 2026-07-16
+
+### Module integrity and code quality
+- Wiring contract + creation manifests with language-neutral module identity from package manifests
+- Harden import roots, stub/codegen integrity, and stack-lock coherence (ignore negated tech tokens)
+- Multi-language fast E2E: Python, Java, Go, HTML, Node.js, Spring Boot
+
+### Configurable workflows
+- `workflow_resolver` for YAML / smart_router pipelines; plan-approve resumes on the resolved path
+- TDD QA before build; feature-by-feature development when PO is in pipeline
+- Consistent auto-approve gates; solutioning critique cannot approve with open `must_fix`
+
+### Skill preferences
+- Skills are authoritative for layout/wiring; neutral fallback only when none match
+- Exclusive skill-family gating from locked `chosen_stack`
+- Prefetch via `SKILLS_SERVICE_URL` + `skill_prefetch.json` debug artifact
 
 ### Fixed
-- **Skills own wiring layout** — Designer/TA/solution architect prompts no longer inject hardcoded Go/Frappe/Java wiring trees; FRAMEWORK SKILLS are authoritative, with a language-neutral fallback only when no skill matches.
-- **Exclusive skill-family gating** — locked ``chosen_stack`` drops foreign framework skills (e.g. Frappe skills on Go/Java/Spring jobs).
-- **Negated vision tech tokens** — ``no Go, no Flask, no FastAPI`` no longer pollutes ``chosen_stack`` / ``skills_query``.
-- **Frappe flat↔nested reconciliation** — flat ``{app}/hooks.py`` satisfies nested contract declarations (and normalize no longer forces nested on top of flat).
-- **Skills prefetch honors ``SKILLS_SERVICE_URL``** — Designer/TA `prefetch_skills` and solution research tools fall back to the compose env when YAML `skills.service_url` is unset; always write `skill_prefetch.json` (including skip/empty `_meta`) for workspace debugging.
-- **Auto-approve skips solution review** — `_should_skip_solution_review()` honors `auto_approve_plan` / `auto_approve_solution`; job create mirrors plan auto-approve onto solution so Fast + auto-approve no longer pauses at solution review.
-- **On-demand GitHub push** — detect GitPython rejected pushes; create-or-reuse the requested repo name and retarget `origin`; reuse existing repos on 422; native FastAPI `POST /api/jobs/{id}/push` with clear errors.
-- **Stack wiring override** — skills/stack inject an authoritative STACK WIRING EXAMPLE that overrides generic wiring samples; normalize placeholder module/paths when they conflict with the locked stack.
-- **Empty / island Python trees** — coerce string wiring symbols to structured objects; synthesize package `.files` from owns; re-lock wiring from `<wiring_patch>` before creation-manifest registration; soft-fail hardens when contract sources are missing (HTML/CSS count as implementation).
-- **Python `src/`-layout import validation** — `PythonStrategy` also searches `src/`, `lib/`, and pyproject `where = [...]` so `from package import` no longer false-fails under src layout.
-- **Tiny-project empty codegen** — adaptive `min_impl` (no hard floor of 4 files); soft-register any concrete source paths, not only contract-tier; wiring jq safety no longer rejects Python `def` inside signature strings; normalize map-style `.deps["x"] = ["y"]` to array-append form.
-- **Module identity drift** — reject bare layer names (`api`, `src`, `service`, …) as import roots; sync `wiring_contract.module` / language from on-disk package manifests; `go mod tidy` before `go build` in compile smoke.
-- **File-task / stub integrity** — prefer `file_creation` over feature-by-feature when a manifest exists; reject channel stubs on replace/patch writes; normalize wrong-language planned signatures (e.g. `def`→`func` for Go).
-- **Solution critique approval** — a critique with non-empty `must_fix` can no longer count as approved; the loop continues until blockers are cleared or `max_passes` is reached. Saved critique JSON normalizes `approved` to `false` when `must_fix` is present. Shared `run_architect_critique_passes()` drives both initial solutioning and user refinement; pass stats persisted in job metadata.
-- **TDD test task registration** — when `tech_stack.md` omits a `tests/` tree, derive test `file_creation` tasks from mirrored source paths and paths referenced in `test_plan.md`; QA materializes them per-file instead of a single chat fallback. `qa_phase_completed` is set only when no test file tasks remain pending.
-- **LLM rate-limit (HTTP 429) resilience** — exponential backoff with `Retry-After` and provider reset timestamps; up to 15 retries (15 min wait) on `chat`/`achat`/`complete`/`acomplete` instead of failing file-creation tasks immediately.
-- **Plan-approve resume** — no longer hardcodes `current_phase: development`; uses `resume_phase_after_plan_review()` from job metadata and config.
-- **Resume checkpoint** — artifact inference and job-DB `current_phase` sync route through QA when TDD pipeline has not completed QA yet.
-
-### Changed
-- Designer / solutioning prompts — wiring patch examples use real import roots; language-neutral module identity rules documented in `wiring_contract.py` and `TESTING.md`.
+- GitHub push reliability; LLM 429 backoff; plan-approve / QA resume checkpoints
 
 ## [2.4.5] - 2026-07-13
 
