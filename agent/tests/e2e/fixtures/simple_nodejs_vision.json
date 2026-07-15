@@ -1,0 +1,5 @@
+{
+  "vision": "Create a simple Node.js command-line calculator. Provide a calculator.js module exporting add(a, b) and subtract(a, b). Include an index.js entrypoint that prints add(2, 3) and subtract(10, 4). Use plain Node.js (CommonJS or ESM) with a minimal package.json. No Express, no database, no frontend framework.",
+  "auto_approve_plan": true,
+  "auto_approve_solution": true
+}

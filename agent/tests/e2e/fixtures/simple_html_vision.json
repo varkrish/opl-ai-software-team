@@ -1,0 +1,5 @@
+{
+  "vision": "Create a simple static HTML calculator page. Provide index.html with two number inputs, Add and Subtract buttons, and a result area. Include styles.css for basic layout and app.js that performs the arithmetic in the browser. Vanilla HTML/CSS/JS only — no React, no build tools, no backend.",
+  "auto_approve_plan": true,
+  "auto_approve_solution": true
+}

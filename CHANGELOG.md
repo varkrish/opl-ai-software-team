@@ -8,14 +8,17 @@ Version tags match container releases (`v2.x.y` → `quay.io/varkrish/crew-backe
 ## [Unreleased]
 
 ### Added
+- **Multi-language simple fast E2E** — extend `test_simple_lang_standalone.py` with Go, HTML, and Node.js calculator fixtures alongside Python/Java.
 - **Wiring contract / creation manifest pipeline** — contract-driven file manifests, language-neutral module identity sync from package manifests (`go.mod`, `package.json`, `pyproject.toml`, `Cargo.toml`, `build.sbt`, …), per-file TLDR enrich, and soft-register of concrete paths when completeness checks soft-fail.
-- **Simple Python / Java fast E2E** — `test_simple_lang_standalone.py` with calculator visions for multi-language smoke coverage.
 - **`workflow_resolver`** — single pipeline resolver for YAML `workflows`, persisted `selected_workflow_phases`, and `smart_router` (adaptive only on first run). Plan-approve resume walks the resolved pipeline (`qa` before dev on full/TDD paths).
 - **TDD QA phase** — QA materializes test `file_creation` tasks when pipeline places `qa` before build phases; dev skips those files after `qa_phase_completed`.
 - **Feature-by-feature development** — when pipeline includes `product_owner`, dev runs one BDD feature slice at a time (related files, then feature implementation) instead of batching all features at the end.
 - **Solutioning E2E** — `test_solutioning_e2e.py` runs the live research → architect → critique loop (`solution_approved=False`) and a second test that approves then resumes the full pipeline.
 
 ### Fixed
+- **Auto-approve skips solution review** — `_should_skip_solution_review()` honors `auto_approve_plan` / `auto_approve_solution`; job create mirrors plan auto-approve onto solution so Fast + auto-approve no longer pauses at solution review.
+- **Empty / island Python trees** — coerce string wiring symbols to structured objects; synthesize package `.files` from owns; re-lock wiring from `<wiring_patch>` before creation-manifest registration; soft-fail hardens when contract sources are missing (HTML/CSS count as implementation).
+- **Python `src/`-layout import validation** — `PythonStrategy` also searches `src/`, `lib/`, and pyproject `where = [...]` so `from package import` no longer false-fails under src layout.
 - **Tiny-project empty codegen** — adaptive `min_impl` (no hard floor of 4 files); soft-register any concrete source paths, not only contract-tier; wiring jq safety no longer rejects Python `def` inside signature strings; normalize map-style `.deps["x"] = ["y"]` to array-append form.
 - **Module identity drift** — reject bare layer names (`api`, `src`, `service`, …) as import roots; sync `wiring_contract.module` / language from on-disk package manifests; `go mod tidy` before `go build` in compile smoke.
 - **File-task / stub integrity** — prefer `file_creation` over feature-by-feature when a manifest exists; reject channel stubs on replace/patch writes; normalize wrong-language planned signatures (e.g. `def`→`func` for Go).

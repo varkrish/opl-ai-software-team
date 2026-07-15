@@ -137,6 +137,223 @@ class TestCreationManifestBuilder:
         assert result["valid"] is True
         assert result["implementation_files"] >= 2
 
+    def test_scaffolding_only_manifest_rejected(self):
+        """Dockerfile/tests without app source must not soft-pass completeness."""
+        entries = [
+            {"path": "pyproject.toml", "description": "meta", "tier": "supplementary"},
+            {"path": "Dockerfile", "description": "container", "tier": "supplementary"},
+            {"path": "README.md", "description": "docs", "tier": "supplementary"},
+            {"path": "tests/test_auth.py", "description": "tests", "tier": "supplementary"},
+            {"path": "tests/__init__.py", "description": "init", "tier": "injected"},
+        ]
+        result = validate_manifest_completeness(
+            entries,
+            design_spec="Task management REST API with Keycloak",
+            solution_spec="FastAPI service with OpenTelemetry and Keycloak auth",
+        )
+        assert result["valid"] is False
+        from llamaindex_crew.utils.wiring_contract import implementation_manifest_paths
+        assert implementation_manifest_paths(entries) == []
+
+    def test_ensure_package_file_paths_from_python_owns(self):
+        """Owns-only wiring_patch must synthesize concrete .py paths under module."""
+        from llamaindex_crew.utils.wiring_contract import (
+            ensure_package_file_paths,
+            files_from_contract,
+            build_creation_manifest,
+            implementation_manifest_paths,
+        )
+
+        contract = {
+            "version": 1,
+            "module": "project",
+            "language": "python",
+            "packages": {
+                "project": {"files": [], "owns": ["project.main"]},
+                "project.api": {"files": [], "owns": ["project.api.handlers"]},
+                "project.service": {"files": [], "owns": ["project.service.task_service"]},
+                "project.domain": {"files": [], "owns": ["project.domain.models"]},
+            },
+            "symbols": {},
+            "deps": [],
+            "_meta": {"source": "jq-patch", "enforcement": "relaxed"},
+        }
+        filled = ensure_package_file_paths(contract)
+        assert "project/main.py" in filled["packages"]["project"]["files"]
+        assert any(p.endswith(".py") for p in filled["packages"]["project.api"]["files"])
+        paths = {e["path"] for e in files_from_contract(filled)}
+        assert "project/main.py" in paths
+        manifest = build_creation_manifest(
+            filled,
+            [
+                {"path": "pyproject.toml", "description": "meta"},
+                {"path": "tests/test_tasks.py", "description": "tests"},
+            ],
+            design_spec="Task management REST API",
+        )
+        impl = implementation_manifest_paths(manifest)
+        assert "project/main.py" in impl
+        assert len(impl) >= 3
+        assert validate_manifest_completeness(
+            manifest,
+            design_spec="Task management REST API with auth",
+            solution_spec="FastAPI Keycloak OpenTelemetry",
+        )["valid"] is True
+
+    def test_string_symbol_wiring_patch_is_accepted(self):
+        """Bare string symbol values must coerce — not discard the whole patch."""
+        from llamaindex_crew.utils.wiring_contract import (
+            extract_wiring_contract_from_specs,
+            files_from_contract,
+        )
+
+        tech = """
+## File Structure
+```
+project/
+├── main.py
+└── tests/test_calc.py
+```
+<wiring_patch>
+.module = "project"
+| .language = "python"
+| .packages["project.api"].files = ["project/api/handlers.py"]
+| .packages["project.api"].owns = ["project.api.calculate"]
+| .packages["project.service"].files = ["project/service/calculator.py"]
+| .packages["project.service"].owns = ["project.service.add"]
+| .packages["project.entrypoint"].files = ["main.py"]
+| .symbols["project.service.add"] = "(int, int) -> int"
+| .symbols["project.api.calculate"] = "(int, int, string) -> int|float"
+| .deps["project.api"] = ["project.service"]
+| .deps["project.entrypoint"] = ["project.api"]
+</wiring_patch>
+"""
+        contract = extract_wiring_contract_from_specs(
+            "", "", language_hint="python", tech_stack=tech
+        )
+        assert (contract.get("_meta") or {}).get("source") == "jq-patch"
+        assert contract.get("module") == "project"
+        assert isinstance(contract["symbols"]["project.service.add"], dict)
+        assert "signature" in contract["symbols"]["project.service.add"]
+        paths = {e["path"] for e in files_from_contract(contract)}
+        assert "project/api/handlers.py" in paths
+        assert "project/service/calculator.py" in paths
+        assert "main.py" in paths
+
+    def test_owns_only_wiring_patch_is_accepted(self):
+        """jq patch with owns but no .files must synthesize and keep source=jq-patch."""
+        from llamaindex_crew.utils.wiring_contract import (
+            extract_wiring_contract_from_specs,
+            implementation_manifest_paths,
+            build_creation_manifest,
+        )
+
+        tech = """
+## File Structure
+```
+project/
+└── tests/test_tasks.py
+```
+<wiring_patch>
+.module = "project"
+| .language = "python"
+| .packages["project"].owns = ["project.main"]
+| .packages["project.api"].owns = ["handlers"]
+| .packages["project.service"].owns = ["task_service"]
+</wiring_patch>
+"""
+        contract = extract_wiring_contract_from_specs(
+            "", "", language_hint="python", tech_stack=tech
+        )
+        assert (contract.get("_meta") or {}).get("source") == "jq-patch"
+        assert "project/main.py" in (contract["packages"]["project"]["files"] or [])
+        impl = implementation_manifest_paths(build_creation_manifest(contract, [], "API"))
+        assert "project/main.py" in impl
+        assert any("api" in p for p in impl)
+
+    @pytest.mark.parametrize(
+        "language,module,packages,must_contain",
+        [
+            (
+                "python",
+                "calc",
+                {"calc": {"files": [], "owns": ["calc.main", "Calculator"]}},
+                ["calc/main.py"],
+            ),
+            (
+                "java",
+                "com.example.calc",
+                {
+                    "com.example.calc": {
+                        "files": [],
+                        "owns": ["Calculator", "Main"],
+                    }
+                },
+                ["com/example/calc/Calculator.java"],
+            ),
+            (
+                "go",
+                "github.com/example/calc",
+                {
+                    "internal/calculator": {
+                        "files": [],
+                        "owns": ["Add", "Subtract"],
+                    },
+                    "cmd/calc": {"files": [], "owns": ["main"]},
+                },
+                ["internal/calculator/add.go"],
+            ),
+            (
+                "html",
+                "calculator-page",
+                {"web": {"files": [], "owns": ["index", "appScript"]}},
+                ["index.html", "styles.css", "app.js"],
+            ),
+            (
+                "javascript",
+                "calc-cli",
+                {"src": {"files": [], "owns": ["main", "add"]}},
+                ["src/index.js"],
+            ),
+        ],
+        ids=["python", "java", "golang", "html", "nodejs"],
+    )
+    def test_ensure_package_file_paths_multi_language(
+        self, language, module, packages, must_contain
+    ):
+        from llamaindex_crew.utils.wiring_contract import (
+            ensure_package_file_paths,
+            files_from_contract,
+            implementation_manifest_paths,
+            build_creation_manifest,
+        )
+
+        contract = {
+            "version": 1,
+            "module": module,
+            "language": language,
+            "packages": packages,
+            "symbols": {},
+            "deps": [],
+            "_meta": {"source": "jq-patch", "enforcement": "relaxed"},
+        }
+        filled = ensure_package_file_paths(contract)
+        paths = {e["path"] for e in files_from_contract(filled)}
+        for expected in must_contain:
+            assert expected in paths, f"{language}: missing {expected} in {sorted(paths)}"
+        impl = implementation_manifest_paths(build_creation_manifest(filled, [], "calc"))
+        for expected in must_contain:
+            # HTML helpers like styles.css count as impl via web delivery suffixes
+            assert expected in impl or expected.endswith((".css",)), (
+                f"{language}: {expected} not in impl {impl}"
+            )
+        result = validate_manifest_completeness(
+            build_creation_manifest(filled, [], "Simple calculator"),
+            design_spec="Simple minimal calculator",
+            solution_spec="Minimal calculator",
+        )
+        assert result["valid"] is True, result
+
 
 class TestManifestDbRoundTrip:
     def test_register_and_query_manifest(self, tmp_path, sample_contract):

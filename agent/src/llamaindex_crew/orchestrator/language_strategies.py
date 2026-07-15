@@ -465,23 +465,68 @@ class PythonStrategy(LanguageStrategy):
         return names
 
     @staticmethod
+    def _python_search_roots(workspace: Path) -> List[Path]:
+        """Workspace roots where bare imports may resolve (src-layout aware).
+
+        Standard setuptools/poetry layout places importable modules under ``src/``
+        while code does ``from calculator import add``. Also honor
+        ``[tool.setuptools.packages.find] where = [...]`` when present.
+        """
+        roots: List[Path] = [workspace]
+        for name in ("src", "lib"):
+            candidate = workspace / name
+            if candidate.is_dir():
+                roots.append(candidate)
+
+        pyproject = workspace / "pyproject.toml"
+        if pyproject.is_file():
+            try:
+                text = pyproject.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                text = ""
+            # Minimal parse — avoid requiring tomllib for this hot path
+            in_find = False
+            for line in text.splitlines():
+                stripped = line.strip()
+                if stripped.startswith("[") and "packages.find" in stripped.replace(" ", ""):
+                    in_find = True
+                    continue
+                if in_find and stripped.startswith("["):
+                    break
+                if in_find and stripped.startswith("where"):
+                    for m in re.findall(r'["\']([^"\']+)["\']', stripped):
+                        d = workspace / m
+                        if d.is_dir():
+                            roots.append(d)
+
+        seen: set[str] = set()
+        out: List[Path] = []
+        for root in roots:
+            key = str(root)
+            if key not in seen:
+                seen.add(key)
+                out.append(root)
+        return out
+
+    @staticmethod
     def _module_exists(module_path: str, workspace: Path) -> bool:
         parts = module_path.split(".")
-        for depth in range(len(parts), 0, -1):
-            sub = parts[:depth]
-            if len(sub) > 1:
-                candidate = workspace / "/".join(sub[:-1]) / (sub[-1] + ".py")
-            else:
-                candidate = workspace / (sub[0] + ".py")
-            if candidate.exists():
-                if not PythonStrategy._intermediate_packages_valid(sub[:-1], workspace):
-                    return False
-                return True
-            pkg_dir = workspace / "/".join(sub)
-            if pkg_dir.is_dir() and (pkg_dir / "__init__.py").exists():
-                if not PythonStrategy._intermediate_packages_valid(sub[:-1], workspace):
-                    return False
-                return True
+        for root in PythonStrategy._python_search_roots(workspace):
+            for depth in range(len(parts), 0, -1):
+                sub = parts[:depth]
+                if len(sub) > 1:
+                    candidate = root / "/".join(sub[:-1]) / (sub[-1] + ".py")
+                else:
+                    candidate = root / (sub[0] + ".py")
+                if candidate.exists():
+                    if not PythonStrategy._intermediate_packages_valid(sub[:-1], root):
+                        continue
+                    return True
+                pkg_dir = root / "/".join(sub)
+                if pkg_dir.is_dir() and (pkg_dir / "__init__.py").exists():
+                    if not PythonStrategy._intermediate_packages_valid(sub[:-1], root):
+                        continue
+                    return True
         return False
 
     @staticmethod

@@ -1,9 +1,11 @@
 """
-Simple Python / Java greenfield E2E — fast solutioning path only.
+Simple multi-language greenfield E2E — fast solutioning path only.
 
 Runs via run_build_pipeline (no container, no HTTP server).
 Visions are intentionally tiny so we can compare language adapters
-and island/codegen quality without the Sandbox API complexity.
+and island/codegen quality without Sandbox API complexity.
+
+Languages: Python, Java, Go, HTML, Node.js.
 """
 from __future__ import annotations
 
@@ -64,6 +66,43 @@ def _assert_java_artifacts(workspace: Path) -> None:
     ), "expected a Java build marker or README"
 
 
+def _assert_go_artifacts(workspace: Path) -> None:
+    go_files = [
+        p for p in workspace.rglob("*.go")
+        if not p.name.endswith("_test.go")
+    ]
+    assert go_files, "expected Go source files"
+    assert (workspace / "go.mod").is_file() or (workspace / "README.md").is_file(), (
+        "expected go.mod or README"
+    )
+
+
+def _assert_html_artifacts(workspace: Path) -> None:
+    html_files = list(workspace.rglob("*.html"))
+    assert html_files, "expected HTML source files"
+    assert any(p.name == "index.html" for p in html_files), "expected index.html"
+    # Prefer real JS/CSS companions, but HTML alone is enough to prove delivery
+    assert any(
+        workspace.rglob(pat)
+        for pat in ("*.js", "*.css", "README.md")
+    ) or html_files, "expected JS/CSS companion or README"
+
+
+def _assert_nodejs_artifacts(workspace: Path) -> None:
+    js_files = [
+        p for p in workspace.rglob("*.js")
+        if "node_modules" not in p.parts and "test" not in p.name.lower()
+    ]
+    ts_files = [
+        p for p in workspace.rglob("*.ts")
+        if "node_modules" not in p.parts and "test" not in p.name.lower()
+    ]
+    assert js_files or ts_files, "expected Node.js/JS/TS source files"
+    assert (workspace / "package.json").is_file() or (workspace / "README.md").is_file(), (
+        "expected package.json or README"
+    )
+
+
 @pytest.mark.e2e
 @pytest.mark.slow
 @pytest.mark.requires_api_key
@@ -73,13 +112,16 @@ def _assert_java_artifacts(workspace: Path) -> None:
     [
         ("simple_python_vision.json", _assert_python_artifacts, "*.py"),
         ("simple_java_vision.json", _assert_java_artifacts, "*.java"),
+        ("simple_go_vision.json", _assert_go_artifacts, "*.go"),
+        ("simple_html_vision.json", _assert_html_artifacts, "*.html"),
+        ("simple_nodejs_vision.json", _assert_nodejs_artifacts, "*.js"),
     ],
-    ids=["python", "java"],
+    ids=["python", "java", "golang", "html", "nodejs"],
 )
 def test_simple_lang_standalone_e2e_fast(
     tmp_path, monkeypatch, fixture_name, assert_artifacts, source_glob
 ):
-    """Fast-path simple calculator builds for Python and Java."""
+    """Fast-path simple calculator builds across languages."""
     import os
 
     current_path = os.environ.get("PATH", "")

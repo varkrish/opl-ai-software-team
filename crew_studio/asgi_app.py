@@ -411,6 +411,11 @@ async def create_job(request: Request, user: CurrentUser = Depends(get_current_u
 
     meta = dict(body.metadata) if body.metadata else {}
     meta["auto_approve_plan"] = bool(body.auto_approve_plan)
+    # Same Landing toggle: skip solution review as well as plan review.
+    if body.auto_approve_plan:
+        meta["auto_approve_solution"] = True
+    elif "auto_approve_solution" in (body.metadata or {}):
+        meta["auto_approve_solution"] = bool((body.metadata or {}).get("auto_approve_solution"))
     if body.jira_issue_key:
         meta["jira_issue_key"] = body.jira_issue_key
     if body.jira_issue_url:

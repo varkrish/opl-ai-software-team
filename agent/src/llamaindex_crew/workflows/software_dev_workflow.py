@@ -963,6 +963,19 @@ class SoftwareDevWorkflow:
                 pass
         return allowed
 
+    def _should_skip_solution_review(self) -> bool:
+        """True when the job should not pause for human solution approval.
+
+        The Landing UI toggle is labeled auto-approve plan today, but users expect
+        it to skip *all* human review gates (solution + plan). Honor both flags.
+        """
+        metadata = self._load_job_metadata()
+        if metadata.get("auto_approve_solution") is True:
+            return True
+        if metadata.get("auto_approve_plan") is True:
+            return True
+        return False
+
     def _run_stack_contract_phase(self):
         """
         After Meta: run Fast lock or Full solutioning based on capability_profile.
@@ -982,8 +995,25 @@ class SoftwareDevWorkflow:
             self._run_fast_stack_decision()
             return None
 
-        # Full solutioning loop then pause for review
+        # Full / adaptive→full solutioning loop
         self._run_solutioning_loop()
+        if self._should_skip_solution_review():
+            metadata = self._load_job_metadata()
+            metadata["solution_approved"] = True
+            metadata["solution_pending_review"] = False
+            metadata["solution_auto_approved"] = True
+            self._update_job_metadata(metadata)
+            self._ensure_solution_contract_locked()
+            self._report_progress(
+                "solutioning",
+                30,
+                "Solution auto-approved — continuing pipeline",
+            )
+            logger.info(
+                "Skipping solution review (auto_approve_plan/solution) for job %s",
+                self.project_id,
+            )
+            return None
         return self._pause_for_solution_review()
 
     def _enrich_project_context_for_solutioning(self) -> str:
@@ -3045,6 +3075,62 @@ class SoftwareDevWorkflow:
             return text.split("## File Structure", 1)[0].strip()
         return text
 
+    def _refresh_wiring_contract_from_tech_stack(self) -> None:
+        """Re-extract/apply wiring_patch from the current tech_stack.md before manifest.
+
+        Tech Architect emits ``<wiring_patch>`` in tech_stack.md. If we register the
+        creation manifest against a stale contract, package source files never become
+        file_creation tasks (main.py-only trees with broken imports).
+        """
+        from ..utils.wiring_contract import (
+            extract_wiring_contract_from_specs,
+            write_wiring_contract,
+        )
+
+        tech = self.tech_stack or ""
+        if not tech.strip():
+            return
+
+        solution_spec_text = ""
+        if self._solution_contract_active():
+            solution_spec_text = self._load_solution_spec_text()
+        design_spec_text = self.design_spec or ""
+        lang_hint = None
+        try:
+            manifest = _load_workspace_stack_manifest(self.workspace_path)
+            if manifest:
+                lang_hint = manifest.get("language") or (
+                    (manifest.get("chosen_stack") or [None])[0]
+                )
+        except Exception:
+            pass
+
+        try:
+            contract_data = extract_wiring_contract_from_specs(
+                solution_spec_text,
+                design_spec_text,
+                language_hint=lang_hint,
+                tech_stack=tech,
+                workspace=self.workspace_path,
+            )
+        except Exception as exc:
+            logger.warning("Could not refresh wiring contract from tech_stack: %s", exc)
+            return
+
+        if not contract_data or not contract_data.get("packages"):
+            return
+        try:
+            write_wiring_contract(self.workspace_path, contract_data)
+        except Exception as exc:
+            logger.debug("Could not persist refreshed wiring contract: %s", exc)
+        self._wiring_contract = contract_data
+        source = (contract_data.get("_meta") or {}).get("source", "unknown")
+        logger.info(
+            "Refreshed wiring_contract from tech_stack before manifest (source=%s, packages=%d)",
+            source,
+            len(contract_data.get("packages") or {}),
+        )
+
     def _build_and_register_creation_manifest(
         self,
         supplementary_paths: list,
@@ -3061,6 +3147,20 @@ class SoftwareDevWorkflow:
         )
 
         contract = self._wiring_contract or load_wiring_contract(self.workspace_path)
+        if contract:
+            from ..utils.wiring_contract import ensure_package_file_paths, write_wiring_contract
+
+            filled = ensure_package_file_paths(_json.loads(_json.dumps(contract)))
+            if filled and filled != contract:
+                try:
+                    write_wiring_contract(self.workspace_path, filled)
+                except Exception as exc:
+                    logger.debug("Could not persist synthesized package files: %s", exc)
+                self._wiring_contract = filled
+                contract = filled
+            elif filled:
+                self._wiring_contract = filled
+                contract = filled
         manifest = build_creation_manifest(
             contract,
             supplementary_paths,
@@ -3073,30 +3173,56 @@ class SoftwareDevWorkflow:
             design_spec=design_spec,
             solution_spec=solution_spec,
         )
-        contract_paths = [
-            e for e in (manifest or [])
-            if (e.get("tier") or e.get("manifest_source")) == "contract" and e.get("path")
-        ]
-        # Soft gate: register any concrete file paths even when "shallow" /
-        # component-coverage checks fail. Empty manifests still block.
-        registerable = contract_paths or [
-            e for e in (manifest or [])
-            if e.get("path") and Path(e["path"]).suffix
-        ]
+        from ..utils.wiring_contract import implementation_manifest_paths, files_from_contract
+        from ..utils.wiring_contract import (
+            _is_manifest_source_path,
+            _is_manifest_scaffolding_path,
+        )
+
+        impl_paths = set(implementation_manifest_paths(manifest))
+        manifest_paths = {e.get("path") for e in (manifest or []) if e.get("path")}
+        contract_declared_impl = {
+            e["path"] for e in files_from_contract(contract)
+            if e.get("path")
+            and _is_manifest_source_path(e["path"])
+            and not _is_manifest_scaffolding_path(e["path"])
+        }
+        missing_contract_impl = contract_declared_impl - manifest_paths
+
+        # Soft gate: allow shallow component-coverage failures ONLY when we still
+        # have real implementation source files AND no declared contract sources
+        # are missing from the manifest. A lone main.py must not paper over a
+        # missing handlers.py / package body.
         if not validation.get("valid"):
-            if not registerable:
-                return validation
+            if not impl_paths or missing_contract_impl:
+                logger.warning(
+                    "Manifest completeness hard-fail (impl=%d missing_contract=%s): %s",
+                    len(impl_paths),
+                    sorted(missing_contract_impl)[:8],
+                    "; ".join(validation.get("issues") or [])[:500],
+                )
+                return {
+                    "valid": False,
+                    "issues": (validation.get("issues") or []) + (
+                        [
+                            "Missing contract source files in manifest: "
+                            f"{sorted(missing_contract_impl)[:12]}"
+                        ]
+                        if missing_contract_impl
+                        else []
+                    ),
+                }
             logger.warning(
-                "Manifest completeness soft-fail with %d file(s) — "
+                "Manifest completeness soft-fail with %d implementation file(s) — "
                 "registering anyway: %s",
-                len(registerable),
+                len(impl_paths),
                 "; ".join(validation.get("issues") or [])[:500],
             )
             validation = {
                 "valid": True,
                 "issues": validation.get("issues") or [],
                 "soft_fail": True,
-                "implementation_files": len(registerable),
+                "implementation_files": len(impl_paths),
             }
 
         self.task_manager.register_granular_tasks_from_manifest(
@@ -3108,6 +3234,19 @@ class SoftwareDevWorkflow:
         entries = self.task_manager.get_manifest_entries()
         stack_prose = self._extract_tech_stack_prose()
         rendered = render_tech_stack_from_manifest(entries, stack_prose=stack_prose)
+        # Preserve wiring_patch so later locks / retries can still apply it
+        try:
+            from ..utils.wiring_contract import parse_emitted_wiring_patch
+            preserved_patch = parse_emitted_wiring_patch(self.tech_stack or "")
+            if preserved_patch and "<wiring_patch>" not in rendered:
+                rendered = (
+                    rendered.rstrip()
+                    + "\n\n<wiring_patch>\n"
+                    + preserved_patch
+                    + "\n</wiring_patch>\n"
+                )
+        except Exception:
+            pass
         (self.workspace_path / "tech_stack.md").write_text(rendered, encoding="utf-8")
         self.tech_stack = rendered
         self.task_manager.scaffold_directories_from_manifest(entries, self.workspace_path)
@@ -3183,6 +3322,9 @@ class SoftwareDevWorkflow:
             if tech_stack_file.exists():
                 with open(tech_stack_file, 'r', encoding='utf-8') as f:
                     self.tech_stack = f.read()
+
+                # Apply <wiring_patch> from this tech_stack BEFORE registering files
+                self._refresh_wiring_contract_from_tech_stack()
 
                 supplementary = (
                     self.tech_architect_agent.get_supplementary_entries()
@@ -3296,6 +3438,7 @@ class SoftwareDevWorkflow:
 
             # Manifest already registered in validation loop; ensure TDD + artifacts
             if not self.task_manager.get_manifest_entries():
+                self._refresh_wiring_contract_from_tech_stack()
                 supplementary = (
                     self.tech_architect_agent.get_supplementary_entries()
                     if self.tech_architect_agent

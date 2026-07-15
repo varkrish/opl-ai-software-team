@@ -1235,6 +1235,8 @@ def create_job():
         auto_approve_val = request.form.get('auto_approve_plan')
         if auto_approve_val is not None:
             metadata['auto_approve_plan'] = auto_approve_val.lower() == 'true'
+            if metadata['auto_approve_plan']:
+                metadata['auto_approve_solution'] = True
         target_repo_name = request.form.get('target_repo_name', '').strip()
         if target_repo_name:
             metadata['target_repo_name'] = target_repo_name
@@ -1262,6 +1264,10 @@ def create_job():
         metadata = data.get('metadata', {})
         if 'auto_approve_plan' in data:
             metadata['auto_approve_plan'] = bool(data['auto_approve_plan'])
+            if metadata['auto_approve_plan']:
+                metadata['auto_approve_solution'] = True
+        if 'auto_approve_solution' in data:
+            metadata['auto_approve_solution'] = bool(data['auto_approve_solution'])
         target_repo_name = str(data.get('target_repo_name', '') or '').strip()
         if target_repo_name:
             metadata['target_repo_name'] = target_repo_name

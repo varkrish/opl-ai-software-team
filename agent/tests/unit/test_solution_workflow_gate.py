@@ -111,14 +111,59 @@ class TestPauseForSolutionReview:
 
 
 class TestRunSolutionGate:
+    """run() gate tests — pin pipeline so smart_router cannot skip tech_architect."""
+
+    _PIPELINE = [
+        "meta",
+        "stack_contract",
+        "product_owner",
+        "designer",
+        "tech_architect",
+        {"parallel": ["development", "frontend"]},
+        "devops",
+    ]
+
     def test_run_pauses_at_solution_gate(self, workspace, job_db):
         wf = _make_workflow(workspace, job_db, config=_make_config(solutioning_enabled=True))
         with patch.object(wf, "run_meta_phase"), patch.object(
             wf, "_run_solutioning_loop"
-        ), patch.object(wf, "_run_phase_with_retry") as run_phase:
+        ), patch.object(wf, "_get_active_phases", return_value=list(self._PIPELINE)), patch.object(
+            wf, "_run_incomplete_file_task_pass"
+        ), patch.object(wf, "_run_post_build_fix_iteration"), patch.object(
+            wf, "_run_phase_with_retry"
+        ) as run_phase:
             result = wf.run()
         assert result["status"] == "pending_solution_review"
         run_phase.assert_not_called()
+
+    def test_run_skips_solution_gate_when_auto_approve_plan(self, workspace, job_db):
+        """Landing 'auto-approve reviews' sets auto_approve_plan — must not pause for solution."""
+        wf = _make_workflow(
+            workspace,
+            job_db,
+            config=_make_config(solutioning_enabled=True),
+            metadata={
+                "auto_approve_plan": True,
+                "capability_profile": {"solutioning_path": "full", "source": "user"},
+            },
+        )
+        with patch.object(wf, "run_meta_phase"), patch.object(
+            wf, "_run_solutioning_loop"
+        ) as sol_loop, patch.object(
+            wf, "_ensure_solution_contract_locked"
+        ), patch.object(wf, "_get_active_phases", return_value=list(self._PIPELINE)), patch.object(
+            wf, "_run_incomplete_file_task_pass"
+        ), patch.object(wf, "_run_post_build_fix_iteration"), patch.object(
+            wf, "_run_phase_with_retry"
+        ) as run_phase, patch.object(
+            wf, "_plan_review_enabled", return_value=False
+        ), patch.object(wf.state_machine, "transition"):
+            result = wf.run()
+        sol_loop.assert_called_once()
+        assert result["status"] != "pending_solution_review"
+        meta = _parse_meta(job_db.get_job(wf.project_id))
+        assert meta.get("solution_approved") is True
+        assert run_phase.call_count >= 1
 
     def test_run_skips_solution_gate_when_approved(self, workspace, job_db):
         wf = _make_workflow(
@@ -129,7 +174,11 @@ class TestRunSolutionGate:
         )
         with patch.object(wf, "run_meta_phase"), patch.object(
             wf, "_run_solutioning_loop"
-        ) as sol_loop, patch.object(wf, "_run_phase_with_retry") as run_phase, patch.object(
+        ) as sol_loop, patch.object(
+            wf, "_get_active_phases", return_value=list(self._PIPELINE)
+        ), patch.object(wf, "_run_incomplete_file_task_pass"), patch.object(
+            wf, "_run_post_build_fix_iteration"
+        ), patch.object(wf, "_run_phase_with_retry") as run_phase, patch.object(
             wf, "_plan_review_enabled", return_value=True
         ), patch.object(
             wf, "_pause_for_plan_review",
@@ -144,7 +193,11 @@ class TestRunSolutionGate:
         wf = _make_workflow(workspace, job_db, config=_make_config(solutioning_enabled=False))
         with patch.object(wf, "run_meta_phase"), patch.object(
             wf, "_run_solutioning_loop"
-        ) as sol_loop, patch.object(wf, "_run_phase_with_retry") as run_phase, patch.object(
+        ) as sol_loop, patch.object(
+            wf, "_get_active_phases", return_value=list(self._PIPELINE)
+        ), patch.object(wf, "_run_incomplete_file_task_pass"), patch.object(
+            wf, "_run_post_build_fix_iteration"
+        ), patch.object(wf, "_run_phase_with_retry") as run_phase, patch.object(
             wf, "_plan_review_enabled", return_value=True
         ), patch.object(
             wf, "_pause_for_plan_review",
@@ -164,6 +217,10 @@ class TestRunSolutionGate:
         )
         with patch.object(wf, "run_meta_phase"), patch.object(
             wf, "_run_solutioning_loop"
+        ), patch.object(
+            wf, "_get_active_phases", return_value=list(self._PIPELINE)
+        ), patch.object(wf, "_run_incomplete_file_task_pass"), patch.object(
+            wf, "_run_post_build_fix_iteration"
         ), patch.object(wf, "run_product_owner_phase", return_value="stories"), patch.object(
             wf, "run_designer_phase", return_value="design"
         ), patch.object(wf, "run_tech_architect_phase", return_value="stack"), patch.object(

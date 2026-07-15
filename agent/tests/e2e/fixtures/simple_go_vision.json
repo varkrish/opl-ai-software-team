@@ -1,0 +1,5 @@
+{
+  "vision": "Create a simple Go command-line calculator. Provide a Calculator type in an internal/calculator package with Add(a, b int) int and Subtract(a, b int) int methods. Include a main package that prints Add(2, 3) and Subtract(10, 4). Use only the Go standard library. No web framework, no database.",
+  "auto_approve_plan": true,
+  "auto_approve_solution": true
+}

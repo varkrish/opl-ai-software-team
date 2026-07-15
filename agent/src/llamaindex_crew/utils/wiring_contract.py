@@ -49,7 +49,9 @@ The pipeline seeds packages/files from your paths. You MUST also emit a short jq
 <wiring_patch>
 .module = "github.com/example/my-app"
 | .language = "go"
+| .packages["internal/api"].files = ["internal/api/handler.go"]
 | .packages["internal/api"].owns = ["CreateHandler", "DeleteHandler"]
+| .packages["internal/service"].files = ["internal/service/manager.go"]
 | .packages["internal/service"].owns = ["NewService", "Create"]
 | .symbols["internal/service.Create"] = {"package":"internal/service","signature":"func (s *Service) Create(ctx context.Context, name string) (string, error)","exports":["Create"]}
 | .symbols["internal/api.CreateHandler"] = {"package":"internal/api","signature":"func CreateHandler(svc *service.Service) http.HandlerFunc","exports":["CreateHandler"]}
@@ -63,6 +65,8 @@ Rules (language-neutral):
   like "api", "service", "cmd", "src", "app"). Prefer real roots such as
   "github.com/org/my-app", "@org/my-app", or "my_app".
 - .language = primary language (go|python|typescript|javascript|java|rust|…).
+- Always set .packages["<pkg>"].files to concrete source paths (with extensions). Owns alone
+  are not enough — the pipeline registers file_creation tasks from .files.
 - One package per concern — no parallel packages for the same ownership (api vs handlers).
 - HTTP/API handlers live in the API package; entrypoint/main only wires the mux — it does not reimplement handlers.
 - Symbol keys MUST be "package.SymbolName" (qualified). Signatures use the project's language.
@@ -83,6 +87,7 @@ Your previous design is missing a usable wiring contract (module + package owns 
 Emit ONLY a <wiring_patch>...</wiring_patch> jq program (no prose) that sets:
 - .module (real import root, not bare "cmd")
 - .language
+- .packages["<pkg>"].files for each important package (concrete paths with extensions)
 - .packages["<pkg>"].owns for each important package
 - .symbols["<pkg>.<Name>"] with language-real signatures for public cross-package APIs
 - .deps between packages (api → service/domain; entrypoint → api)
@@ -295,16 +300,61 @@ def parse_emitted_wiring_patch(*texts: str) -> Optional[str]:
 
 
 def _normalize_jq_patch_program(patch: str) -> str:
-    """Strip fences and ensure the program is a jq filter starting with '.'"""
+    """Strip fences, dedent lines, and ensure the program is a jq filter starting with '.'"""
     program = patch.strip()
     program = re.sub(r"^```(?:jq)?\s*", "", program, flags=re.IGNORECASE)
     program = re.sub(r"\s*```$", "", program)
+    # LLMs often indent continuation lines; jq tolerates whitespace but keep it tidy
+    program = "\n".join(line.strip() for line in program.splitlines() if line.strip())
     program = program.strip()
     if not program:
         return program
     if not program.startswith("."):
         program = "." + program
     return program
+
+
+def _coerce_wiring_symbol_entries(contract: dict) -> dict:
+    """Normalize LLM symbol values to {package, signature, exports} dicts.
+
+    Models often emit ``.symbols["pkg.Name"] = "(int) -> int"`` (a string) instead
+    of an object. Without coercion the whole wiring_patch is discarded.
+    """
+    if not isinstance(contract, dict):
+        return contract
+    symbols = contract.get("symbols")
+    if not isinstance(symbols, dict):
+        return contract
+
+    coerced: Dict[str, Any] = {}
+    for key, val in symbols.items():
+        key_s = str(key).strip()
+        if not key_s:
+            continue
+        if isinstance(val, str):
+            pkg = key_s.rsplit(".", 1)[0] if "." in key_s else ""
+            leaf = key_s.rsplit(".", 1)[-1]
+            coerced[key_s] = {
+                "package": pkg,
+                "signature": val.strip(),
+                "exports": [leaf] if leaf else [],
+            }
+            continue
+        if isinstance(val, dict):
+            entry = dict(val)
+            if not entry.get("package"):
+                entry["package"] = key_s.rsplit(".", 1)[0] if "." in key_s else ""
+            if "signature" in entry and not isinstance(entry["signature"], str):
+                entry["signature"] = str(entry["signature"])
+            if "exports" not in entry:
+                leaf = key_s.rsplit(".", 1)[-1]
+                entry["exports"] = [leaf] if leaf else []
+            coerced[key_s] = entry
+            continue
+        # Unsupported shape — drop rather than fail the whole patch
+        logger.debug("Dropping non-object wiring symbol %r (%s)", key_s, type(val).__name__)
+    contract["symbols"] = coerced
+    return contract
 
 
 def _strip_jq_string_literals(program: str) -> str:
@@ -383,6 +433,17 @@ def apply_wiring_patch(seed: dict, patch_program: str) -> Optional[dict]:
     except json.JSONDecodeError as exc:
         logger.warning("jq wiring patch produced invalid JSON: %s", exc)
         return None
+
+    # Owns-only patches are common; default missing files=[] then synthesize paths
+    # before schema validation so the patch is not discarded.
+    if isinstance(parsed, dict):
+        packages = parsed.get("packages")
+        if isinstance(packages, dict):
+            for _pkg, pkg_data in packages.items():
+                if isinstance(pkg_data, dict) and "files" not in pkg_data:
+                    pkg_data["files"] = []
+        parsed = _coerce_wiring_symbol_entries(parsed)
+        parsed = ensure_package_file_paths(parsed) or parsed
 
     try:
         validated = validate_wiring_contract(parsed)
@@ -1373,7 +1434,8 @@ def validate_wiring_contract(data: dict) -> dict:
         if not isinstance(pkg_data, dict):
             raise WiringContractError(f"Package '{pkg_name}' details must be a dictionary.")
         if "files" not in pkg_data:
-            raise WiringContractError(f"Package '{pkg_name}' is missing required field: 'files'")
+            # Owns-only LLM patches omit files; default empty and let synthesis fill.
+            pkg_data["files"] = []
         if not isinstance(pkg_data["files"], list):
             raise WiringContractError(f"Package '{pkg_name}' field 'files' must be a list of strings.")
         for f in pkg_data["files"]:
@@ -1636,8 +1698,10 @@ _DOMAIN_KEYWORDS = _BOUNDARY_KEYWORDS + (
 _SOURCE_SUFFIXES = frozenset({
     ".go", ".py", ".ts", ".js", ".tsx", ".jsx", ".java", ".kt", ".scala", ".sc",
     ".rs", ".rb", ".php", ".cs", ".c", ".cpp", ".h", ".hpp",
-    # Markup/style are delivery surfaces, not import-root languages — excluded on purpose.
 })
+
+# Web delivery surfaces count as implementation for HTML/CSS (and static) projects.
+_WEB_DELIVERY_SUFFIXES = frozenset({".html", ".css", ".svg"})
 
 
 class FileEntry(TypedDict, total=False):
@@ -1686,7 +1750,7 @@ def _is_manifest_source_path(path: str, description: str = "") -> bool:
     if "." not in basename:
         return basename.lower() in EXTENSIONLESS_FILENAMES and basename.lower() not in _MANIFEST_CONFIG_NAMES
     ext = Path(lower).suffix.lower()
-    if ext in _SOURCE_SUFFIXES:
+    if ext in _SOURCE_SUFFIXES or ext in _WEB_DELIVERY_SUFFIXES:
         return True
     return _is_valid_file_path(path)
 
@@ -1697,19 +1761,297 @@ def _is_manifest_scaffolding_path(path: str) -> bool:
     lower = path.lower().replace("\\", "/")
     if lower in _MANIFEST_CONFIG_NAMES:
         return True
-    if lower.endswith((".md", ".yaml", ".yml", ".json", ".toml", ".txt", ".html", ".css")):
-        if not lower.endswith(".py") and Path(lower).suffix.lower() not in _SOURCE_SUFFIXES:
+    base = Path(lower).name
+    if base.startswith(".env") or base in (".gitignore", ".dockerignore", ".editorconfig"):
+        return True
+    # Docs/config prose — not app HTML/CSS deliverables
+    if lower.endswith((".md", ".yaml", ".yml", ".json", ".toml", ".txt", ".example")):
+        if Path(lower).suffix.lower() not in _SOURCE_SUFFIXES:
             return True
+    # HTML/CSS under docs/ are scaffolding; otherwise they are delivery sources
+    if lower.endswith((".html", ".css", ".svg")) and (
+        lower.startswith("docs/") or "/docs/" in lower
+    ):
+        return True
     scaffold_prefixes = (
         ".github/", "docs/", "configuration/", "build/", "prerequisites/",
     )
     return any(lower.startswith(p) for p in scaffold_prefixes)
 
 
+def _camel_to_snake(name: str) -> str:
+    """Convert CamelCase / mixed identifiers to snake_case file stems."""
+    s = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1_\2", name or "")
+    s = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", s)
+    s = s.replace("-", "_").replace(" ", "_")
+    return re.sub(r"_+", "_", s).strip("_").lower()
+
+
+def _package_dir_for_language(pkg: str, language: str) -> str:
+    """Map a package key to a workspace-relative directory."""
+    raw = (pkg or "").strip().strip("/")
+    if not raw or raw == ".":
+        return ""
+    lang = (language or "").lower()
+    if lang in ("python", "py", "java", "kotlin", "scala") or (
+        "." in raw and "/" not in raw
+    ):
+        # Dotted packages (Python/Java) → filesystem path
+        return raw.replace(".", "/")
+    return raw.replace("\\", "/")
+
+
+def _default_ext_for_language(language: str) -> str:
+    lang = (language or "").lower()
+    return {
+        "python": ".py",
+        "py": ".py",
+        "go": ".go",
+        "java": ".java",
+        "kotlin": ".kt",
+        "scala": ".scala",
+        "rust": ".rs",
+        "typescript": ".ts",
+        "ts": ".ts",
+        "javascript": ".js",
+        "js": ".js",
+        "nodejs": ".js",
+        "node": ".js",
+        "tsx": ".tsx",
+        "jsx": ".jsx",
+        "html": ".html",
+        "css": ".css",
+        "csharp": ".cs",
+        "c#": ".cs",
+        "ruby": ".rb",
+        "php": ".php",
+    }.get(lang, ".py" if lang in ("", "unknown") else f".{lang}" if lang.isalpha() else ".txt")
+
+
+def _synthesize_files_for_empty_package(
+    pkg: str,
+    pkg_data: dict,
+    *,
+    language: str,
+    module: str,
+    symbols: dict,
+) -> List[str]:
+    """Invent concrete source paths when a package has owns/symbols but no files."""
+    owns = [str(o) for o in (pkg_data.get("owns") or []) if o]
+    dir_path = _package_dir_for_language(pkg, language)
+    if not dir_path:
+        mod_dir = _package_dir_for_language(module, language) if module else ""
+        dir_path = mod_dir or "app"
+
+    # Prefer explicit symbol.file annotations
+    out: List[str] = []
+    seen: set[str] = set()
+
+    def _add(path: str) -> None:
+        p = _normalize_manifest_path(path)
+        if p and _is_valid_file_path(p) and p not in seen:
+            seen.add(p)
+            out.append(p)
+
+    for sym in (symbols or {}).values():
+        if not isinstance(sym, dict):
+            continue
+        sym_pkg = sym.get("package") or ""
+        if sym_pkg and sym_pkg != pkg:
+            continue
+        f = sym.get("file")
+        if f:
+            _add(str(f))
+
+    lang = (language or "").lower()
+    ext = _default_ext_for_language(lang)
+    lower_pkg = pkg.lower().replace("\\", "/")
+
+    # Test packages: one file per test_* own, else a default test module
+    if (
+        lower_pkg == "tests"
+        or lower_pkg.endswith("/tests")
+        or lower_pkg.endswith(".tests")
+        or "/test" in lower_pkg
+    ):
+        test_owns = [o for o in owns if o.split(".")[-1].startswith("test_")]
+        if test_owns:
+            for own in test_owns[:6]:
+                leaf = _camel_to_snake(own.split(".")[-1])
+                _add(f"{dir_path}/{leaf}{ext}")
+        else:
+            _add(
+                f"{dir_path}/test_app{ext}"
+                if lang in ("python", "py", "", "unknown")
+                else f"{dir_path}/app_test{ext}"
+            )
+        if lang in ("python", "py", "", "unknown"):
+            _add(f"{dir_path}/__init__.py")
+        return out
+
+    if lang in ("python", "py", "", "unknown"):
+        _add(f"{dir_path}/__init__.py")
+        added_body = False
+        for own in owns:
+            leaf = own.split(".")[-1]
+            leaf_l = leaf.lower()
+            if leaf_l in ("main", "__init__", "init"):
+                _add(f"{dir_path}/main.py")
+                added_body = True
+                continue
+            stem = _camel_to_snake(leaf)
+            if not stem or stem.startswith("test_"):
+                continue
+            _add(f"{dir_path}/{stem}.py")
+            added_body = True
+            break
+        if not added_body:
+            base = Path(dir_path).name or "module"
+            _add(f"{dir_path}/{_camel_to_snake(base)}.py")
+        return out
+
+    if lang == "go":
+        base = Path(dir_path).name or "pkg"
+        for own in owns:
+            leaf = own.split(".")[-1]
+            if not leaf:
+                continue
+            go_stem = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", leaf).lower()
+            go_stem = go_stem.split("_")[0] if go_stem else base
+            _add(f"{dir_path}/{go_stem}.go")
+            break
+        if not out:
+            _add(f"{dir_path}/{base}.go")
+        return out
+
+    if lang in ("html", "css", "svg"):
+        rootish = lower_pkg in {
+            ".", "web", "static", "public", "frontend", "site", "www",
+            (module or "").lower(),
+        }
+        prefix = "" if rootish else f"{dir_path}/"
+        _add(f"{prefix}index.html")
+        _add(f"{prefix}styles.css")
+        for own in owns:
+            leaf = own.split(".")[-1].lower()
+            if any(tok in leaf for tok in ("script", "app", "main", "js")):
+                _add(f"{prefix}app.js")
+                break
+        if not any(p.endswith(".js") for p in out):
+            _add(f"{prefix}app.js")
+        return out
+
+    if lang in ("javascript", "js", "typescript", "ts", "nodejs", "node"):
+        use_ext = ".ts" if lang in ("typescript", "ts") else ".js"
+        added = False
+        for own in owns:
+            leaf = own.split(".")[-1]
+            leaf_l = leaf.lower()
+            stem = "index" if leaf_l in ("main", "index", "app", "server") else _camel_to_snake(leaf)
+            if not stem:
+                continue
+            target = f"{stem}{use_ext}" if dir_path in ("", ".") else f"{dir_path}/{stem}{use_ext}"
+            _add(target)
+            added = True
+            break
+        if not added:
+            target = f"index{use_ext}" if dir_path in ("", ".") else f"{dir_path}/index{use_ext}"
+            _add(target)
+        return out
+
+    if lang == "java":
+        class_name = None
+        for own in owns:
+            leaf = own.split(".")[-1]
+            if not leaf:
+                continue
+            if leaf.lower() == "main":
+                class_name = "Main"
+            elif leaf[0].isupper():
+                class_name = leaf
+            else:
+                class_name = "".join(p.title() for p in _camel_to_snake(leaf).split("_")) or "App"
+            break
+        if not class_name:
+            base = Path(dir_path).name or "App"
+            class_name = "".join(p.title() for p in base.replace("-", "_").split("_")) or "App"
+        _add(f"{dir_path}/{class_name}.java")
+        return out
+
+    # Generic languages: one module file
+    base = Path(dir_path).name or "module"
+    for own in owns[:1]:
+        stem = _camel_to_snake(own.split(".")[-1]) or base
+        _add(f"{dir_path}/{stem}{ext}")
+    if not out:
+        _add(f"{dir_path}/{base}{ext}")
+    return out
+
+
+def ensure_package_file_paths(contract: dict | None) -> dict | None:
+    """Fill empty packages[*].files from owns/symbols so manifests get real source paths.
+
+    LLMs often emit wiring_patch owns/symbols without .files. Without files,
+    creation-manifest registration only keeps scaffolding/tests and Python/Go
+    trees ship empty.
+    """
+    if not contract or not isinstance(contract, dict):
+        return contract
+    packages = contract.get("packages")
+    if not isinstance(packages, dict) or not packages:
+        return contract
+
+    language = str(contract.get("language") or "")
+    module = str(contract.get("module") or "")
+    symbols = contract.get("symbols") if isinstance(contract.get("symbols"), dict) else {}
+
+    for pkg, pkg_data in list(packages.items()):
+        if not isinstance(pkg_data, dict):
+            continue
+        files = pkg_data.get("files")
+        if not isinstance(files, list):
+            files = []
+            pkg_data["files"] = files
+        concrete = [
+            _normalize_manifest_path(str(f))
+            for f in files
+            if f and _is_valid_file_path(_normalize_manifest_path(str(f)))
+        ]
+        if concrete:
+            if concrete != [str(f) for f in files]:
+                pkg_data["files"] = concrete
+            continue
+        owns = pkg_data.get("owns") or []
+        has_syms = any(
+            isinstance(s, dict) and s.get("package") == pkg
+            for s in symbols.values()
+        )
+        if not owns and not has_syms:
+            continue
+        synthesized = _synthesize_files_for_empty_package(
+            str(pkg),
+            pkg_data,
+            language=language,
+            module=module,
+            symbols=symbols,
+        )
+        if synthesized:
+            pkg_data["files"] = synthesized
+            logger.info(
+                "Synthesized %d file path(s) for empty package %r: %s",
+                len(synthesized),
+                pkg,
+                synthesized[:6],
+            )
+
+    return contract
+
+
 def files_from_contract(wiring_contract: dict | None) -> List[FileEntry]:
     """Mandatory contract-tier paths from wiring_contract.json packages[*].files."""
     if not wiring_contract:
         return []
+    wiring_contract = ensure_package_file_paths(wiring_contract) or wiring_contract
     packages = wiring_contract.get("packages") or {}
     entries: List[FileEntry] = []
     seen: set[str] = set()
@@ -1910,6 +2252,11 @@ def _implementation_manifest_paths(entries: List[FileEntry]) -> List[str]:
             continue
         impl.append(path)
     return impl
+
+
+def implementation_manifest_paths(entries: List[FileEntry]) -> List[str]:
+    """Public alias: concrete implementation source paths in a creation manifest."""
+    return _implementation_manifest_paths(entries)
 
 
 def _adaptive_min_implementation_files(
@@ -2603,7 +2950,7 @@ def extract_wiring_contract_from_specs(
     if emitted:
         if language_hint and not emitted.get("language"):
             emitted["language"] = language_hint
-        return normalize_symbol_keys(emitted)
+        return ensure_package_file_paths(normalize_symbol_keys(emitted)) or emitted
 
     seed = _build_path_only_contract_from_specs(
         solution_spec or "",
@@ -2619,12 +2966,13 @@ def extract_wiring_contract_from_specs(
         if patched:
             if language_hint and not patched.get("language"):
                 patched["language"] = language_hint
-            return normalize_symbol_keys(patched)
+            return ensure_package_file_paths(normalize_symbol_keys(patched)) or patched
         logger.warning("wiring jq patch invalid; strengthening path-only seed from prose")
 
-    return strengthen_contract_from_specs(
+    strengthened = strengthen_contract_from_specs(
         seed,
         design_spec or "",
         solution_spec or "",
         tech_stack or "",
     )
+    return ensure_package_file_paths(strengthened) or strengthened

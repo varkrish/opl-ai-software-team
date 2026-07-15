@@ -889,6 +889,37 @@ class TestIntegrationValidation:
         result = CodeCompletenessValidator.validate_imports(f, workspace)
         assert result["valid"] is True
 
+    def test_src_layout_bare_import_resolves(self, workspace):
+        """setuptools src-layout: src/calculator.py + `from calculator import …`."""
+        from llamaindex_crew.orchestrator.code_validator import CodeCompletenessValidator
+
+        src = workspace / "src"
+        src.mkdir()
+        (src / "calculator.py").write_text("def add(a, b):\n    return a + b\n")
+        (src / "main.py").write_text("from calculator import add\n")
+        (workspace / "pyproject.toml").write_text(
+            '[project]\nname = "project"\nversion = "0.1.0"\n'
+            "[tool.setuptools.packages.find]\nwhere = [\"src\"]\n",
+            encoding="utf-8",
+        )
+        result = CodeCompletenessValidator.validate_imports(src / "main.py", workspace)
+        assert result["valid"] is True, result
+        assert result["broken_imports"] == []
+
+        dep = CodeCompletenessValidator.validate_dependency_manifest(workspace)
+        assert dep["valid"] is True, dep
+        assert not any(m.get("package") == "calculator" for m in dep.get("missing") or [])
+
+    def test_src_layout_missing_module_still_broken(self, workspace):
+        from llamaindex_crew.orchestrator.code_validator import CodeCompletenessValidator
+
+        src = workspace / "src"
+        src.mkdir()
+        (src / "main.py").write_text("from calculator import add\n")
+        result = CodeCompletenessValidator.validate_imports(src / "main.py", workspace)
+        assert result["valid"] is False
+        assert any(b["module"] == "calculator" for b in result["broken_imports"])
+
     def test_validate_file_integration_combines_checks(self, workspace):
         from llamaindex_crew.orchestrator.code_validator import CodeCompletenessValidator
 
