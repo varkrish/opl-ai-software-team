@@ -1318,6 +1318,25 @@ def create_job():
         if backend_name != 'opl-ai-team':
             return jsonify({'error': f'Backend not available: {backend_name}'}), 400
         backend = None  # Will use old run_job_async path
+
+    # Reject before creating a Queued job when no LLM credentials exist.
+    owner_id_for_llm = request.headers.get("X-User-Id")
+    from crew_studio.auth import AUTH_ENABLED, MOCK_USER
+    if not owner_id_for_llm and not AUTH_ENABLED:
+        owner_id_for_llm = MOCK_USER.user_id
+    from crew_studio.llm_readiness import (
+        llm_not_configured_payload,
+        resolve_llm_readiness,
+    )
+    _llm_status = resolve_llm_readiness(job_db, owner_id_for_llm, config)
+    if not _llm_status.get("configured"):
+        payload = llm_not_configured_payload(_llm_status.get("hint"))
+        return jsonify({
+            "error": payload["message"],
+            "detail": payload,
+            "code": payload["code"],
+            "hint": payload["hint"],
+        }), 422
     
     job_id = str(uuid.uuid4())
     

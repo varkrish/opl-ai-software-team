@@ -7,6 +7,13 @@ Version tags match container releases (`v2.x.y` → `quay.io/varkrish/crew-backe
 
 ## [Unreleased]
 
+### Added
+- **LLM readiness gate on job create** — `POST /api/jobs` returns `422` with `code: llm_not_configured` when neither BYOK nor server fallback (`config.yaml` / `LLM_API_KEY`) is available, so jobs never sit forever in Queued
+- **`GET /api/llm/status`** — reports `{ configured, source: byok|server|none, hint? }` for UI/CLI preflight
+
+### Fixed
+- Flask multipart job create applies the same LLM credential check as the FastAPI path
+
 ## [2.5.0] - 2026-07-16
 
 ### Module integrity and code quality
@@ -26,7 +33,7 @@ Version tags match container releases (`v2.x.y` → `quay.io/varkrish/crew-backe
 
 ### Fixed
 - GitHub push reliability; LLM 429 backoff; plan-approve / QA resume checkpoints
-
+co
 ## [2.4.5] - 2026-07-13
 
 ### Fixed

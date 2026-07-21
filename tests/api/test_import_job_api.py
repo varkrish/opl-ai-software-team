@@ -54,11 +54,13 @@ def app(tmp_path):
     os.environ["MOUNT_FLASK_FALLBACK"] = "0"
     os.environ["SKIP_STARTUP_RESUME"] = "1"
     os.environ["CREW_TEST_NO_EXECUTOR"] = "1"
+    os.environ["AUTH_ENABLED"] = "false"
+    os.environ["LLM_API_KEY"] = "sk-test-import-job-api"
     (tmp_path / "workspace").mkdir(exist_ok=True)
 
     # Force re-import so env vars are picked up
     for mod in list(sys.modules.keys()):
-        if mod.startswith("crew_studio.asgi_app"):
+        if mod.startswith("crew_studio.asgi_app") or mod.startswith("crew_studio.auth"):
             del sys.modules[mod]
 
     from crew_studio.asgi_app import app as fastapi_app

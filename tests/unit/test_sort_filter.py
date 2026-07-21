@@ -52,10 +52,11 @@ def db_varied(db):
 
 
 @pytest.fixture
-def api_client():
+def api_client(monkeypatch):
     """Flask test client with a fresh temp DB."""
     import crew_studio.llamaindex_web_app as webapp
 
+    monkeypatch.setenv("LLM_API_KEY", "sk-test-sort-filter")
     tmp = tempfile.mkdtemp()
     fresh_db = JobDatabase(Path(tmp) / "test_api.db")
     original_db = webapp.job_db

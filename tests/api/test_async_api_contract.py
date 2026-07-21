@@ -52,7 +52,15 @@ def asgi_client(tmp_path, _patch_paths):
     """Synchronous fixture that creates an httpx AsyncClient backed by the ASGI app."""
     os.environ["WORKSPACE_PATH"] = str(tmp_path / "workspace")
     os.environ["JOB_DB_PATH"] = str(tmp_path / "test.db")
+    os.environ["AUTH_ENABLED"] = "false"
+    os.environ["LLM_API_KEY"] = "sk-test-async-contract"
+    os.environ["CREW_TEST_NO_EXECUTOR"] = "1"
+    os.environ["SKIP_STARTUP_RESUME"] = "1"
     (tmp_path / "workspace").mkdir(exist_ok=True)
+
+    for mod in list(sys.modules.keys()):
+        if mod.startswith("crew_studio.asgi_app") or mod.startswith("crew_studio.auth"):
+            del sys.modules[mod]
 
     from crew_studio.asgi_app import app
     # Reset the DB to point at the temp path

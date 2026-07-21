@@ -70,6 +70,21 @@ def _config_for_job(job_id: str):
     return config_for_job_owner(base, job_db, owner_id)
 
 
+def _require_llm_ready(user: CurrentUser) -> None:
+    """Reject job create when neither BYOK nor server LLM credentials exist."""
+    from crew_studio.llm_readiness import (
+        llm_not_configured_payload,
+        resolve_llm_readiness,
+    )
+
+    status = resolve_llm_readiness(job_db, user.user_id, _get_config())
+    if not status.get("configured"):
+        raise HTTPException(
+            status_code=422,
+            detail=llm_not_configured_payload(status.get("hint")),
+        )
+
+
 # ---------------------------------------------------------------------------
 # Job runner — imported lazily to avoid heavy imports at module level
 # ---------------------------------------------------------------------------
@@ -280,6 +295,9 @@ async def preview_capabilities(body: PreviewCapabilitiesRequest, user: CurrentUs
 @app.post("/api/jobs")
 async def create_job(request: Request, user: CurrentUser = Depends(get_current_user)):
     """Create a new job. JSON for greenfield; multipart is delegated to Flask (ZIP, import, migration, refactor)."""
+
+    # Fail before creating a Queued job when no LLM credentials are available.
+    _require_llm_ready(user)
 
     content_type = request.headers.get("content-type", "")
     forward_headers = _build_forward_headers(request)
@@ -1578,6 +1596,20 @@ class LLMConfigResponse(BaseModel):
     model_worker: Optional[str] = None
     model_reviewer: Optional[str] = None
     updated_at: Optional[str] = None
+
+
+class LLMStatusResponse(BaseModel):
+    configured: bool
+    source: str  # byok | server | none
+    hint: Optional[str] = None
+
+
+@app.get("/api/llm/status", response_model=LLMStatusResponse)
+async def get_llm_status(user: CurrentUser = Depends(get_current_user)):
+    """Whether the current user can create LLM jobs (BYOK or server fallback)."""
+    from crew_studio.llm_readiness import resolve_llm_readiness
+
+    return resolve_llm_readiness(job_db, user.user_id, _get_config())
 
 
 @app.get("/api/llm/config", response_model=LLMConfigResponse)
