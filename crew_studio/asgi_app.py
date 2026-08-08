@@ -460,6 +460,24 @@ async def create_job(request: Request, user: CurrentUser = Depends(get_current_u
         team_id=body.team_id,
     )
 
+    # Jira context → context memory plane. This is the primary job-creation
+    # route (the Flask handler has the same hook but only serves multipart
+    # posts), so the Jira connector's JSON posts land here. Fail-open.
+    try:
+        from crew_studio.memory_hooks import write_jira_context_memory
+        from src.llamaindex_crew.config import ConfigLoader
+
+        write_jira_context_memory(
+            job_id,
+            config=ConfigLoader.load(),
+            job=job_db.get_job(job_id),
+            workspace_path=job_workspace,
+        )
+    except Exception as mem_err:
+        logger.warning(
+            "Jira context memory hook raised (non-fatal) for job %s: %s", job_id, mem_err
+        )
+
     if effective_mode in ("migration", "refactor", "import"):
         if effective_mode == "import":
             meta["job_mode"] = "import"

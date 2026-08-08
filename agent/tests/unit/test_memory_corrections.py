@@ -629,3 +629,73 @@ def test_recall_block_keeps_relative_order_within_a_type():
     lines = [ln for ln in _render_block(episodes, max_chars=4000).splitlines() if ln.startswith("- ")]
 
     assert "first" in lines[0] and "second" in lines[1]
+
+
+# ── Idempotency across resume / retry ────────────────────────────────────────
+#
+# _run_job_async_impl runs again on resume and retry_failed, and each terminal
+# completion re-enters the post-job hook. Without a write-time guard the same
+# plan feedback is stored two or three times for one job, and recall fills with
+# duplicates of a single reviewer comment.
+
+
+class _MetaDB(_FakeDB):
+    """FakeDB that also round-trips job metadata, like JobDatabase does."""
+
+    def __init__(self, job, **kw):
+        super().__init__(**kw)
+        self._job = job
+
+    def get_job(self, job_id):
+        return self._job
+
+    def update_job(self, job_id, fields):
+        if "metadata" in fields:
+            self._job["metadata"] = json.loads(fields["metadata"])
+
+
+def test_second_run_does_not_rewrite_the_same_corrections(recorder):
+    job = {"team_id": "acme", "metadata": {
+        "framework": "frappe", "plan_feedback_history": [{"feedback": "no mongo"}],
+    }}
+    db = _MetaDB(job)
+
+    first = _hook()("job-1", config=_Cfg(), job=job, job_db=db)
+    second = _hook()("job-1", config=_Cfg(), job=db.get_job("job-1"), job_db=db)
+
+    assert first == 1
+    assert second == 0, "a retried job must not duplicate its corrections"
+    assert len(recorder.writes) == 1
+
+
+def test_new_corrections_on_a_retry_are_still_written(recorder):
+    job = {"team_id": "acme", "metadata": {
+        "framework": "frappe", "plan_feedback_history": [{"feedback": "no mongo"}],
+    }}
+    db = _MetaDB(job)
+    _hook()("job-1", config=_Cfg(), job=job, job_db=db)
+
+    # The retry produced a second round of review feedback.
+    db.get_job("job-1")["metadata"]["plan_feedback_history"].append({"feedback": "also no redis"})
+    written = _hook()("job-1", config=_Cfg(), job=db.get_job("job-1"), job_db=db)
+
+    assert written == 1
+    assert "also no redis" in recorder.writes[-1]["content"]
+
+
+def test_dedup_state_is_persisted_to_the_job_row(recorder):
+    job = {"team_id": "acme", "metadata": {
+        "framework": "frappe", "plan_feedback_history": [{"feedback": "no mongo"}],
+    }}
+    db = _MetaDB(job)
+    _hook()("job-1", config=_Cfg(), job=job, job_db=db)
+
+    assert db.get_job("job-1")["metadata"].get("memory_correction_keys")
+
+
+def test_without_a_db_dedup_degrades_to_writing(recorder):
+    # No job_db means no place to persist the guard. Writing a possible
+    # duplicate beats dropping a real correction.
+    job = {"metadata": {"plan_feedback_history": [{"feedback": "no mongo"}]}}
+    assert _hook()("job-1", config=_Cfg(), job=job) == 1
+    assert _hook()("job-1", config=_Cfg(), job=job) == 1

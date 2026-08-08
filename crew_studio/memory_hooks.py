@@ -14,6 +14,7 @@ filtered out before this point).
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 from pathlib import Path
@@ -28,8 +29,56 @@ _TEXTUAL_SUFFIXES = {
 }
 
 
+_CORRECTION_KEYS_FIELD = "memory_correction_keys"
+_MAX_TRACKED_KEYS = 200
+
+
 def _memory_enabled(config: Any) -> bool:
     return bool(getattr(getattr(config, "memory", None), "enabled", False))
+
+
+def _correction_key(correction: Any) -> str:
+    """Stable fingerprint for one correction, used to avoid re-writing it."""
+    raw = "|".join(
+        str(getattr(correction, attr, "") or "")
+        for attr in ("source", "instruction", "response", "file_path")
+    )
+    return hashlib.sha1(raw.encode("utf-8", "replace")).hexdigest()[:16]
+
+
+def _load_job_metadata(job: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    metadata = (job or {}).get("metadata") or {}
+    if isinstance(metadata, str):
+        try:
+            metadata = json.loads(metadata)
+        except json.JSONDecodeError:
+            return {}
+    return metadata if isinstance(metadata, dict) else {}
+
+
+def _record_correction_keys(
+    job_id: str, job_db: Any, job: Optional[Dict[str, Any]], keys: list
+) -> None:
+    """
+    Persist the fingerprints just written to ``jobs.metadata``.
+
+    Resume and retry re-enter the post-job hook for the same job, so without this
+    the same reviewer comment is stored two or three times and recall fills with
+    duplicates of one remark.
+    """
+    if job_db is None or not keys:
+        return
+    try:
+        current = job_db.get_job(job_id) or job or {}
+        metadata = _load_job_metadata(current)
+        existing = metadata.get(_CORRECTION_KEYS_FIELD) or []
+        if not isinstance(existing, list):
+            existing = []
+        merged = existing + [k for k in keys if k not in existing]
+        metadata[_CORRECTION_KEYS_FIELD] = merged[-_MAX_TRACKED_KEYS:]
+        job_db.update_job(job_id, {"metadata": json.dumps(metadata)})
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("Could not persist correction dedup keys for %s: %s", job_id, exc)
 
 
 def _scope_label(scope: Any) -> str:
@@ -273,6 +322,15 @@ def write_correction_memories(
         if not corrections:
             return 0
 
+        # Skip anything already written for this job. Resume/retry re-enter this
+        # hook; without the guard one reviewer comment is stored several times.
+        already = set(_load_job_metadata(job).get(_CORRECTION_KEYS_FIELD) or [])
+        pending = [(c, _correction_key(c)) for c in corrections]
+        pending = [(c, k) for c, k in pending if k not in already]
+        if not pending:
+            logger.debug("All corrections for job %s were already written", job_id)
+            return 0
+
         memory = get_context_memory(
             config, job=job, workspace_path=workspace_path, agent_id="correction_hook"
         )
@@ -280,7 +338,8 @@ def write_correction_memories(
             return 0
 
         written = 0
-        for correction in corrections:
+        written_keys = []
+        for correction, key in pending:
             text = render_correction(correction)
             if not text:
                 continue
@@ -299,8 +358,10 @@ def write_correction_memories(
                 },
             ):
                 written += 1
+                written_keys.append(key)
 
         memory.close()
+        _record_correction_keys(job_id, job_db, job, written_keys)
         if written:
             logger.info("Wrote %d correction memory episode(s) for job %s", written, job_id)
         return written
