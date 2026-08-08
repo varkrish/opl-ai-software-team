@@ -416,11 +416,14 @@ def _run_job_async_impl(
 
         if task_ok and val_ok:
             job_db.mark_completed(job_id, result_payload)
+            terminal_status = 'completed'
         elif task_ok and not val_ok:
             failed_issues = job_db.get_failed_validation_issues(job_id)
             warning = f"Code validation: {len(failed_issues)} unresolved issue(s)"
             job_db.mark_partially_completed(job_id, warning=warning, results=result_payload)
+            terminal_status = 'partially_completed'
         else:
+            terminal_status = 'failed'
             error_parts = []
             if not task_ok:
                 incomplete_tasks = task_validation.get('incomplete_tasks', [])
@@ -443,6 +446,26 @@ def _run_job_async_impl(
                     "Post-build GitHub push step raised (non-fatal) for job %s: %s",
                     job_id, push_err,
                 )
+
+        # ── Post-job hook: write outcome summary to the context memory plane ──
+        # Only fires for terminal states — pauses returned above. Fail-open:
+        # write_job_outcome_memory swallows its own errors.
+        try:
+            from crew_studio.memory_hooks import write_job_outcome_memory
+            write_job_outcome_memory(
+                job_id,
+                config=job_config,
+                job=job_db.get_job(job_id),
+                workspace_path=job_workspace,
+                results=results,
+                job_db=job_db,
+                final_status=terminal_status,
+            )
+        except Exception as mem_err:
+            logger.warning(
+                "Context memory post-job hook raised (non-fatal) for job %s: %s",
+                job_id, mem_err,
+            )
 
     except Exception as e:
         error_message = str(e)
@@ -1137,6 +1160,25 @@ def _save_uploaded_files(job_id: str, job_workspace: Path, files) -> list:
             stored_path=str(stored_path),
         )
         saved.append(doc)
+
+        # Cross-job recall: raw file stays here and is still RAG-indexed per job;
+        # this only records a searchable summary so a future job in the same
+        # domain knows the document exists without a re-upload. Fail-open.
+        try:
+            from crew_studio.memory_hooks import write_reference_doc_memory
+            write_reference_doc_memory(
+                job_id,
+                config=config,
+                original_name=f.filename,
+                stored_path=stored_path,
+                job=job_db.get_job(job_id),
+                workspace_path=job_workspace,
+            )
+        except Exception as mem_err:
+            logger.warning(
+                "Reference doc memory hook raised (non-fatal) for %s: %s",
+                f.filename, mem_err,
+            )
     return saved
 
 
@@ -1378,6 +1420,23 @@ def create_job():
     # Create job record in database
     job_db.create_job(job_id, vision, str(job_workspace), metadata=metadata,
                       owner_id=owner_id, owner_email=owner_email, team_id=team_id)
+
+    # Jira context → context memory plane. Written here, not in the Jira
+    # connector: the connector does not know owner_id, so a connector-side write
+    # would land under a different org scope than the rest of this job's
+    # memories. Fail-open.
+    try:
+        from crew_studio.memory_hooks import write_jira_context_memory
+        write_jira_context_memory(
+            job_id,
+            config=config,
+            job=job_db.get_job(job_id),
+            workspace_path=job_workspace,
+        )
+    except Exception as mem_err:
+        logger.warning(
+            "Jira context memory hook raised (non-fatal) for job %s: %s", job_id, mem_err
+        )
 
     # Save any uploaded documents (MTA reports end up here)
     uploaded_docs = []

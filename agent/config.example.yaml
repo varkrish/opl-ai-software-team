@@ -145,6 +145,58 @@ solutioning:
   max_passes: 3
   max_github_searches: 10
 
+# ── Context Memory Plane (MemMachine) ──────────────────────────────────────────
+# The P3 historical knowledge plane. Job outcomes, Jira issue context, and
+# reference-doc summaries are written at lifecycle hooks; past context is recalled
+# at the start of solutioning so a new job does not re-derive what earlier jobs
+# already learned.
+#
+# Requires the MemMachine stack:  podman compose -f dev-compose.yml --profile memory up -d
+# Every integration point is fail-open — with this disabled or the server down,
+# jobs run exactly as they do today.
+#
+# Env overrides (env wins over this file, so compose can toggle it):
+#   MEMORY_ENABLED, MEMMACHINE_BASE_URL, MEMMACHINE_API_KEY,
+#   MEMORY_SEARCH_LIMIT, MEMORY_TIMEOUT_SECONDS, MEMORY_MAX_RECALL_CHARS,
+#   MEMORY_SUMMARY_AGENT_TYPE, MEMORY_SHARED_PROJECT_ID, MEMORY_DEFAULT_ORG_ID
+memory:
+  enabled: false
+  base_url: http://memmachine-app:8080   # container-internal; host default is :8280
+  # api_key:                             # optional for local dev
+
+  # Scope hierarchy. MemMachine 0.3.x has only org_id + project_id as first-class
+  # levels, so domain rides in metadata (group_id) where it becomes an automatic
+  # search filter, and the storing agent rides in the episode's producer field.
+  #   org_id     = customer   ← jobs.team_id, else jobs.owner_id
+  #   project_id = framework  ← stack_manifest.json / tech_stack.md
+  #   group_id   = domain     ← jobs.metadata.domain, else Jira project key
+  default_org_id: default
+  default_project_id: unknown-framework
+
+  # Memories written before a stack is chosen (Jira context, reference docs) go
+  # here instead of a framework project. A Jira issue describes WHAT to build,
+  # not which framework — and parking them under 'unknown-framework' would strand
+  # them where later framework-scoped reads never look. Recall searches this
+  # project in addition to the framework project.
+  shared_project_id: shared-context
+
+  # Write points
+  write_job_outcome: true
+  write_reference_docs: true
+
+  # Read side
+  read_at_solutioning: true
+  search_limit: 5
+  # search_score_threshold: 0.5   # raise if recall injects weakly-related context
+  max_recall_chars: 4000
+
+  # Summaries are 2-3 sentence calls — point this at your smallest model by
+  # setting llm.model_reviewer to something cheap. Use 'none' to skip LLM
+  # summaries entirely and use deterministic templates.
+  summary_agent_type: reviewer
+  summary_max_chars: 1200
+  timeout_seconds: 15
+
 # ── Generation Performance ─────────────────────────────────────────────────────
 # Controls how many files are generated concurrently during the development phase.
 # Can also be set via the PARALLEL_FILE_WORKERS environment variable (env var wins).

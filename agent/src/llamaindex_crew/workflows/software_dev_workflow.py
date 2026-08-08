@@ -1077,6 +1077,7 @@ class SoftwareDevWorkflow:
             max_github = int(getattr(sol_cfg, "max_github_searches", 10) or 10)
 
         github_token = None
+        job = None
         if self.job_db:
             job = self.job_db.get_job(self.project_id)
             owner_id = job.get("owner_id") if job else None
@@ -1085,9 +1086,27 @@ class SoftwareDevWorkflow:
                 if gh_cfg:
                     github_token = gh_cfg.get("token")
 
+        # Context memory plane (P3): recall what past jobs on this stack/domain
+        # learned and prepend it to the research context. Returns "" when the
+        # plane is disabled or unreachable, so this is safe to concatenate.
+        project_context = self._enrich_project_context_for_solutioning()
+        try:
+            from ..memory.recall import recall_solutioning_context
+
+            recalled = recall_solutioning_context(
+                self.config,
+                vision=self.vision or "",
+                job=job,
+                workspace_path=self.workspace_path,
+            )
+            if recalled:
+                project_context = f"{recalled}\n{project_context}"
+        except Exception:
+            logger.warning("Context memory recall failed (non-fatal)", exc_info=True)
+
         result = run_solutioning_loop(
             vision=self.vision,
-            project_context=self._enrich_project_context_for_solutioning(),
+            project_context=project_context,
             workspace_path=self.workspace_path,
             config=self.config,
             budget_tracker=self.budget_tracker,
