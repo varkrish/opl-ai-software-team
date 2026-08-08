@@ -43,6 +43,7 @@ from ..utils.output_parser import (
     simple_mode_format_instruction,
     write_files_from_response,
 )
+from ..utils.sandbox_client import WORKSPACE_DIR as SANDBOX_WORKSPACE_DIR
 from ..utils.generation_prompt_utils import (
     filter_retry_issues,
     is_likely_large_file,
@@ -75,6 +76,15 @@ from .epic_story_loop import (
 )
 
 logger = logging.getLogger(__name__)
+
+# File references in build/runtime error output, by ecosystem:
+# Python tracebacks, Maven [ERROR] lines, and the generic path:line:col form
+# used by Go, Node, and TypeScript.
+_EXECUTION_ERROR_PATTERNS = (
+    re.compile(r'File "([^"]+)", line \d+'),
+    re.compile(r'\[ERROR\]\s+(\S+\.java):\[\d+,\d+\]'),
+    re.compile(r'(?:^|\s)(?:\./)?([^\s:()"\']+\.[A-Za-z][\w]*):\d+(?::\d+)?(?=[:\s]|$)'),
+)
 
 # Force local HuggingFace embeddings globally so LlamaIndex never falls back to OpenAI
 try:
@@ -2189,6 +2199,66 @@ class SoftwareDevWorkflow:
             "issues": issues,
         }
 
+    @staticmethod
+    def _normalize_execution_path(raw: str, workspace: Path) -> Optional[str]:
+        """Map a path from container error output to a workspace-relative path.
+
+        Returns None for anything not present in the workspace, which filters
+        out stdlib and dependency frames the agent must not try to edit.
+        """
+        path = raw.strip()
+        for prefix in (f"{SANDBOX_WORKSPACE_DIR}/", "/app/"):
+            if path.startswith(prefix):
+                path = path[len(prefix):]
+                break
+        else:
+            if path.startswith("./"):
+                path = path[2:]
+
+        if path.startswith("/"):
+            try:
+                path = str(Path(path).relative_to(workspace))
+            except ValueError:
+                return None
+
+        if not path or not (workspace / path).is_file():
+            return None
+        return path
+
+    @classmethod
+    def _extract_failing_files(cls, output: str, workspace: Path) -> Dict[str, List[str]]:
+        """Attribute build/runtime error output to the files it names.
+
+        Execution failures arrive as an unstructured compiler or interpreter
+        dump, but the fix loop dispatches per file — without this attribution
+        a runtime failure has nowhere to go.
+        """
+        by_file: Dict[str, List[str]] = {}
+        for line in output.splitlines():
+            for pattern in _EXECUTION_ERROR_PATTERNS:
+                match = pattern.search(line)
+                if not match:
+                    continue
+                rel = cls._normalize_execution_path(match.group(1), workspace)
+                if rel:
+                    messages = by_file.setdefault(rel, [])
+                    text = line.strip()
+                    if text and text not in messages and len(messages) < 10:
+                        messages.append(text)
+                break
+
+        # Interpreters put the actual error on the last line, separate from the
+        # frame that names the file — without it the agent sees a location but
+        # not what went wrong.
+        tail = next(
+            (ln.strip() for ln in reversed(output.splitlines()) if ln.strip()), ""
+        )
+        if tail:
+            for messages in by_file.values():
+                if tail not in messages:
+                    messages.append(tail)
+        return by_file
+
     def _collect_fixable_issues(self, report: Dict[str, Any]) -> List[Dict[str, Any]]:
         """Distil validation report into a list of actionable file-level issues."""
         issues: List[Dict[str, Any]] = []
@@ -2295,6 +2365,24 @@ class SoftwareDevWorkflow:
                     "file": affected_file,
                     "check": "pom_xml_completeness",
                     "description": f"Maven dependency '{group_id}:{artifact_id}' needed but not declared in pom.xml",
+                })
+
+        # Runtime/build failures: only actionable once attributed to a file, since
+        # the fix loop dispatches per file. Unattributable failures still block
+        # the job via the check's own pass=False.
+        smoke = report.get("checks", {}).get("smoke_test", {})
+        if not smoke.get("pass", True):
+            smoke_output = smoke.get("result", "")
+            for rel_path, messages in self._extract_failing_files(
+                smoke_output, self.workspace_path
+            ).items():
+                issues.append({
+                    "file": rel_path,
+                    "check": "smoke_test",
+                    "description": (
+                        "This file failed to build/run. Fix the code so the project "
+                        "compiles and starts cleanly:\n" + "\n".join(messages)
+                    ),
                 })
 
         for w in report.get("checks", {}).get("wiring_reconciliation", {}).get("issues", []):
@@ -2525,22 +2613,50 @@ class SoftwareDevWorkflow:
             return "completed_with_errors"
         return "completed"
 
+    @staticmethod
+    def _issue_signatures(issues: List[Dict[str, Any]]) -> set:
+        """Identity of an issue set, for detecting a genuinely stuck fix loop."""
+        return {
+            f"{i.get('check', '')}|{i.get('file', '')}|{i.get('description', '')}"
+            for i in issues
+        }
+
+    def _max_post_build_iterations(self) -> int:
+        """Iteration budget, raised when generated code is actually executed.
+
+        Compile/runtime errors cascade — a compiler aborts at the first failing
+        unit, so each fix reveals the next batch. Static checks see everything
+        at once and converge in fewer passes.
+        """
+        override = os.environ.get("MAX_POST_BUILD_ITERATIONS")
+        if override:
+            return int(override)
+        executes_code = os.getenv("SMOKE_TEST_BACKEND", "syntax_only") != "syntax_only"
+        return 6 if executes_code else 3
+
     def _run_post_build_fix_iteration(self) -> None:
         """After all phases complete, re-validate and iterate to fix issues.
 
-        Runs up to MAX_POST_BUILD_ITERATIONS (env var, default 3).
         Each iteration: auto-fix deterministic issues -> collect remaining
         fixable issues -> ask dev agent to fix per-file -> re-validate.
-        Stops early if no progress (convergence detection).
+        Runs up to MAX_POST_BUILD_ITERATIONS (see _max_post_build_iterations).
         Updates ``self._validation_report`` with the final result.
+
+        Stops when the issue set stops *changing*, not when its size stops
+        shrinking: fixing a compile error routinely lets the build advance and
+        surface more errors, so a rising count means progress, not failure.
         """
-        max_iterations = int(os.environ.get("MAX_POST_BUILD_ITERATIONS", "3"))
+        max_iterations = self._max_post_build_iterations()
         if max_iterations <= 0:
             return
 
         from ..tools.file_tools import set_allowed_file_paths
 
-        prev_issue_count = None
+        # One repeat is tolerated — an agent can flake a single pass — but a
+        # second identical round means nothing is moving.
+        max_stagnant_rounds = 2
+        prev_signatures = None
+        stagnant_rounds = 0
 
         for iteration in range(1, max_iterations + 1):
             report = self._run_validation_suite()
@@ -2557,14 +2673,25 @@ class SoftwareDevWorkflow:
                 )
                 break
 
-            current_count = len(fixable)
-            if prev_issue_count is not None and current_count >= prev_issue_count:
-                logger.info(
-                    "⏹️ Post-build fix converged: %d issues (was %d). Stopping early.",
-                    current_count, prev_issue_count,
-                )
-                break
-            prev_issue_count = current_count
+            signatures = self._issue_signatures(fixable)
+            if prev_signatures is not None and signatures == prev_signatures:
+                stagnant_rounds += 1
+                if stagnant_rounds >= max_stagnant_rounds:
+                    logger.info(
+                        "⏹️ Post-build fix stalled: identical %d issue(s) for %d rounds. Stopping.",
+                        len(fixable), stagnant_rounds,
+                    )
+                    break
+            else:
+                if prev_signatures is not None:
+                    resolved = len(prev_signatures - signatures)
+                    introduced = len(signatures - prev_signatures)
+                    logger.info(
+                        "Post-build fix progress: %d resolved, %d newly surfaced",
+                        resolved, introduced,
+                    )
+                stagnant_rounds = 0
+            prev_signatures = signatures
 
             logger.info(
                 "🔄 Post-build fix iteration %d/%d — %d fixable issue(s)",
@@ -2652,6 +2779,62 @@ class SoftwareDevWorkflow:
             )
         except Exception:
             pass
+
+        self._persist_unresolved_validation_issues()
+
+    # Checks whose failure detail is already reported per-file elsewhere, or
+    # which carry no user-actionable text of their own.
+    _CHECK_DETAIL_KEYS = ("result", "error", "reason")
+
+    def _persist_unresolved_validation_issues(self) -> None:
+        """Record still-failing checks so the UI can explain a failed build.
+
+        ``validation_issues`` is otherwise populated only from the external
+        validator, so checks owned by the in-process suite — smoke_test above
+        all — left the user with a bare ``completed_with_errors`` and no
+        visible reason.
+        """
+        if not getattr(self, "job_db", None):
+            return
+        report = getattr(self, "_validation_report", {}) or {}
+        if report.get("overall") == "PASS":
+            return
+
+        import uuid as _uuid
+
+        for check_name, check in (report.get("checks") or {}).items():
+            if not isinstance(check, dict) or check.get("pass", True):
+                continue
+
+            detail = ""
+            for key in self._CHECK_DETAIL_KEYS:
+                value = check.get(key)
+                if isinstance(value, str) and value.strip():
+                    detail = value.strip()
+                    break
+            if not detail:
+                detail = f"Validation check '{check_name}' failed."
+
+            failing_files = sorted(
+                self._extract_failing_files(detail, self.workspace_path)
+            )
+            file_path = failing_files[0] if len(failing_files) == 1 else None
+
+            try:
+                self.job_db.create_validation_issue(
+                    issue_id=str(_uuid.uuid4()),
+                    job_id=self.project_id,
+                    check_name=check_name,
+                    severity=check.get("severity", "error"),
+                    file_path=file_path,
+                    line_number=None,
+                    description=detail[:4000],
+                )
+            except Exception:
+                logger.warning(
+                    "Could not persist validation issue for check '%s'",
+                    check_name, exc_info=True,
+                )
 
     def _load_phase_artifacts(self) -> None:
         """Load user_stories, design_spec, tech_stack, agent_backstories from workspace (for resume)."""

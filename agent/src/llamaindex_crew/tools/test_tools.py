@@ -14,6 +14,12 @@ from typing import Any, Dict, Optional
 
 from llama_index.core.tools import FunctionTool
 
+from ..utils.sandbox_client import (
+    WORKSPACE_DIR as SANDBOX_WORKSPACE_DIR,
+    SandboxClient,
+    SandboxError,
+    resolve_sandbox_api_url,
+)
 from .file_tools import _resolve_workspace
 
 logger = logging.getLogger(__name__)
@@ -49,12 +55,33 @@ def _find_container_runtime() -> Optional[str]:
     return None
 
 
+def _run_test_command_in_sandbox_api(workspace: Path, command: str, image: str) -> tuple[int, str]:
+    """Run *command* in a sandbox provisioned by the Sandbox API service."""
+    base_url = resolve_sandbox_api_url()
+    if not base_url:
+        return 1, "SMOKE_TEST_BACKEND=sandbox_api but SANDBOX_API_URL is not set"
+
+    client = SandboxClient(base_url)
+    try:
+        with client.sandbox(image=image) as sandbox_id:
+            client.upload_workspace(sandbox_id, workspace)
+            return client.execute(
+                sandbox_id,
+                ["sh", "-c", _sandbox_command(f"cd {SANDBOX_WORKSPACE_DIR} && {command}")],
+            )
+    except SandboxError as e:
+        return 1, f"Sandbox API error: {e}"
+
+
 def _run_test_command_in_container(workspace: Path, command: str) -> tuple[int, str]:
     """Run *command* in an isolated container with the workspace mounted at /app."""
     project_type = _detect_project_type(workspace)
     image = CONTAINER_IMAGES.get(project_type)
     if not image:
         return 1, f"No container image for project type '{project_type}'"
+
+    if os.getenv("SMOKE_TEST_BACKEND", "syntax_only") == "sandbox_api":
+        return _run_test_command_in_sandbox_api(workspace, command, image)
 
     runtime = _find_container_runtime()
     if not runtime:
@@ -269,6 +296,25 @@ CONTAINER_COMMANDS = {
     "java_maven": "cd /app && mvn compile -q 2>&1",
     "java_gradle": "cd /app && gradle build -x test -q 2>&1",
     "go": "cd /app && go build ./... 2>&1",
+}
+
+# Sandbox containers have a read-only root, so toolchains that default to
+# writing under $HOME (go build cache, npm, pip, maven, gradle) fail unless HOME
+# points at a writable mount. Redirect it into the workspace, which is sized for
+# builds — unlike the small /tmp scratch space.
+_SANDBOX_HOME = f"{SANDBOX_WORKSPACE_DIR}/.sandbox-home"
+
+
+def _sandbox_command(command: str) -> str:
+    """Wrap a shell command with the env a sandboxed build needs."""
+    return f"export HOME={_SANDBOX_HOME} && mkdir -p $HOME && {command}"
+
+
+# Same commands as CONTAINER_COMMANDS, rooted at the Sandbox API's writable
+# upload mount rather than the bind-mounted /app used by the local backend.
+SANDBOX_API_COMMANDS = {
+    key: _sandbox_command(cmd.replace("cd /app", f"cd {SANDBOX_WORKSPACE_DIR}", 1))
+    for key, cmd in CONTAINER_COMMANDS.items()
 }
 
 
@@ -592,6 +638,51 @@ class KubernetesJobBackend(SmokeTestBackend):
         return SmokeTestResult(f"❌ K8s Job smoke test failed ({image}):\n{logs}", log=k8s_log)
 
 
+class SandboxAPIBackend(SmokeTestBackend):
+    """Run the smoke test via the standalone Sandbox API service.
+
+    Unlike LocalContainerBackend this needs no local container runtime and no
+    shared filesystem: the workspace is tarred and uploaded over HTTP, so it
+    works from inside a container that has no podman socket.
+
+    Requires ``SANDBOX_API_URL``.
+    """
+
+    def run(self, workspace: Path, project_type: str) -> SmokeTestResult:
+        image = CONTAINER_IMAGES.get(project_type)
+        command = SANDBOX_API_COMMANDS.get(project_type)
+        if not image or not command:
+            return SmokeTestResult(f"❌ No container image configured for project type '{project_type}'")
+
+        base_url = resolve_sandbox_api_url()
+        if not base_url:
+            return SmokeTestResult(
+                "❌ SMOKE_TEST_BACKEND=sandbox_api but SANDBOX_API_URL is not set"
+            )
+
+        client = SandboxClient(base_url)
+        try:
+            with client.sandbox(image=image) as sandbox_id:
+                client.upload_workspace(sandbox_id, workspace)
+                exit_code, output = client.execute(sandbox_id, ["sh", "-c", command])
+        except SandboxError as e:
+            return SmokeTestResult(f"❌ Sandbox API smoke test error: {e}")
+
+        full_log = (
+            f"sandbox_api: {base_url}\n"
+            f"image:       {image}\n"
+            f"command:     {command}\n"
+            f"exit_code:   {exit_code}\n"
+            f"─── output ───\n{output.strip() or '(empty)'}"
+        )
+        if exit_code != 0:
+            return SmokeTestResult(
+                f"❌ Sandbox API smoke test failed ({image}):\n{output[:2000]}",
+                log=full_log,
+            )
+        return SmokeTestResult(f"✅ Sandbox API smoke test passed ({image})", log=full_log)
+
+
 # ── Backend registry and runner ──────────────────────────────────────────────
 
 _BACKENDS = {
@@ -599,6 +690,7 @@ _BACKENDS = {
     "podman": LocalContainerBackend,
     "docker": LocalContainerBackend,
     "k8s_job": KubernetesJobBackend,
+    "sandbox_api": SandboxAPIBackend,
 }
 
 

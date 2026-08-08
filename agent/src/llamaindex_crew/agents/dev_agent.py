@@ -13,6 +13,7 @@ from ..tools import (
     create_workspace_file_tools,
     append_tldr_tools,
 )
+from ..tools.sandbox_tools import create_sandbox_tools
 from ..tools.tool_loader import load_tools
 from ..config import ConfigLoader
 from ..utils.prompt_loader import load_prompt
@@ -65,6 +66,7 @@ You verify and use the technology stack defined by the Technical Architect."""
                 ws_tools = create_workspace_file_tools(Path(workspace_path))
                 tools = list(ws_tools) + [GitTool, PytestRunnerTool, CodeCoverageTool]
                 append_tldr_tools(tools, Path(workspace_path), config=tool_config)
+                tools.extend(create_sandbox_tools(str(workspace_path)))
             else:
                 tools = [
                     FileWriterTool, BulkFileWriterTool, FileReaderTool, FileListTool,

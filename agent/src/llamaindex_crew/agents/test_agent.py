@@ -12,6 +12,7 @@ from ..tools import (
     CodeCoverageTool,
     append_tldr_tools,
 )
+from ..tools.sandbox_tools import create_sandbox_tools
 from ..tools.tool_loader import load_tools
 from ..utils.llm_config import get_supports_react
 from ..config import ConfigLoader
@@ -46,6 +47,7 @@ class TestAgent:
         tools = list(create_workspace_file_tools(self.workspace_path))
         tools.extend([PytestRunnerTool, CodeCoverageTool])
         append_tldr_tools(tools, self.workspace_path)
+        tools.extend(create_sandbox_tools(str(self.workspace_path)))
 
         try:
             config = ConfigLoader.load()

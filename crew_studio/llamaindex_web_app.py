@@ -2094,24 +2094,34 @@ def download_job_workspace(job_id):
 def get_file_content(file_path):
     """Get file content from workspace (supports job-specific paths)"""
     try:
+        # Reject traversal before any path is built: Flask's <path:> converter
+        # happily passes '..' segments through.
+        if not _is_safe_relative_path(file_path):
+            return jsonify({'error': 'Invalid file path'}), 400
+
         job_id = request.args.get('job_id')
-        
+        # Root the lookup is allowed to read from, kept alongside full_path so
+        # the containment check below cannot drift from how the path was built.
+        root = None
+
         if job_id:
             job = job_db.get_job(job_id)
             if job:
                 # Get file from specific job workspace
                 job_workspace = Path(job['workspace_path'])
-                
+
                 # For refactor jobs, look in the 'refactored' subdirectory first
                 if job.get('vision', '').startswith('[Refactor]') or job.get('current_phase') == 'refactoring':
                     refactored_dir = job_workspace / "refactored"
                     if refactored_dir.is_dir():
                         job_workspace = refactored_dir
-                        
+
                 full_path = job_workspace / file_path
+                root = job_workspace
             else:
                 # Job not found, fallback to base workspace
                 full_path = base_workspace_path / file_path
+                root = base_workspace_path
         else:
             # Try to find file in any job workspace
             full_path = None
@@ -2120,15 +2130,24 @@ def get_file_content(file_path):
                 potential_path = job_workspace / file_path
                 if potential_path.exists() and potential_path.is_file():
                     full_path = potential_path
+                    root = job_workspace
                     break
-            
+
             if full_path is None:
                 # Fallback to base workspace
                 full_path = base_workspace_path / file_path
-        
+                root = base_workspace_path
+
         if not full_path.exists() or not full_path.is_file():
             return jsonify({'error': 'File not found'}), 404
-        
+
+        # Defence in depth: a symlink inside the workspace can still point out
+        # of it, which the string-level check above cannot see.
+        try:
+            full_path.resolve().relative_to(Path(root).resolve())
+        except (OSError, ValueError):
+            return jsonify({'error': 'Invalid file path'}), 400
+
         with open(full_path, 'r', encoding='utf-8') as f:
             content = f.read()
         
@@ -2222,6 +2241,68 @@ def get_job_refinements(job_id):
         return jsonify({'error': 'Job not found'}), 404
     refinements = job_db.get_refinement_history(job_id)
     return jsonify({'refinements': refinements})
+
+
+@app.route('/api/jobs/<job_id>/live-preview', methods=['GET'])
+def get_live_preview(job_id):
+    """Current live-preview state for a job (running sandbox + URL, if any)."""
+    from crew_studio.preview_runner import get_preview_state
+
+    job = job_db.get_job(job_id)
+    if not job:
+        return jsonify({'error': 'Job not found'}), 404
+
+    state = get_preview_state(job)
+    return jsonify({
+        'running': bool(state.get('sandbox_id')),
+        'preview_url': state.get('preview_url', ''),
+        'command': state.get('command', ''),
+        'project_type': state.get('project_type', ''),
+    })
+
+
+@app.route('/api/jobs/<job_id>/live-preview', methods=['POST'])
+def start_live_preview(job_id):
+    """Start the job's generated app in a preview sandbox."""
+    from crew_studio.preview_runner import PreviewError, get_preview_state, start_preview, stop_preview
+
+    job = job_db.get_job(job_id)
+    if not job:
+        return jsonify({'error': 'Job not found'}), 404
+
+    # Restarting is the intuitive result of pressing start twice; leaving the
+    # old sandbox would leak it and strand its published port.
+    if get_preview_state(job).get('sandbox_id'):
+        stop_preview(job_db, job)
+        job = job_db.get_job(job_id)
+
+    try:
+        state = start_preview(job_db, job)
+    except PreviewError as exc:
+        return jsonify({'error': str(exc)}), 400
+    except Exception as exc:  # noqa: BLE001 - surface the reason to the user
+        logger.exception("Live preview failed for job %s", job_id)
+        return jsonify({'error': f'Preview failed: {exc}'}), 500
+
+    return jsonify({
+        'running': True,
+        'preview_url': state['preview_url'],
+        'command': state['command'],
+        'project_type': state['project_type'],
+    }), 201
+
+
+@app.route('/api/jobs/<job_id>/live-preview', methods=['DELETE'])
+def stop_live_preview(job_id):
+    """Tear down the job's preview sandbox."""
+    from crew_studio.preview_runner import stop_preview
+
+    job = job_db.get_job(job_id)
+    if not job:
+        return jsonify({'error': 'Job not found'}), 404
+
+    stopped = stop_preview(job_db, job)
+    return jsonify({'running': False, 'stopped': stopped})
 
 
 @app.route('/api/jobs/<job_id>/refinement/changes', methods=['GET'])

@@ -8,10 +8,17 @@ Version tags match container releases (`v2.x.y` → `quay.io/varkrish/crew-backe
 ## [Unreleased]
 
 ### Added
-- **LLM readiness gate on job create** — `POST /api/jobs` returns `422` with `code: llm_not_configured` when neither BYOK nor server fallback (`config.yaml` / `LLM_API_KEY`) is available, so jobs never sit forever in Queued
+- **Runtime code execution via the Sandbox API** — new `sandbox_api` value for `SMOKE_TEST_BACKEND` runs generated code in an isolated container reached over HTTP (`SANDBOX_API_URL`), so validation no longer stops at static analysis. Needs no local container runtime or shared filesystem: the workspace is tarred and uploaded
+- **`sandbox_execute` agent tool** — lets the dev and test agents run code, execute tests, or reproduce an error before fixing it. Registered only when `SANDBOX_API_URL` is set
+- **Live preview** — `GET`/`POST`/`DELETE /api/jobs/<id>/live-preview` start and stop the generated app in a preview sandbox and return a URL. Start command comes from `preview_command:` in `test_plan.md`, else is detected (npm `start`/`dev`, a Python entrypoint or single `__main__` file, `go run`). Waits until the app actually serves and reports the app's own output when it does not, instead of returning a URL that answers nothing
 - **`GET /api/llm/status`** — reports `{ configured, source: byok|server|none, hint? }` for UI/CLI preflight
+- **LLM readiness gate on job create** — `POST /api/jobs` returns `422` with `code: llm_not_configured` when neither BYOK nor server fallback (`config.yaml` / `LLM_API_KEY`) is available, so jobs never sit forever in Queued
 
 ### Fixed
+- **Build failures now reach the fix loop** — `smoke_test` was the only failing check that produced no fixable issue, so a job was marked `completed_with_errors` and the broken code was never handed back to the dev agent. Compiler/runtime output is now attributed to the files it names (Python tracebacks, Maven, and the generic `path:line:col` form), with frames outside the workspace discarded so the agent never edits stdlib or vendored code
+- **Fix loop no longer stops while it is making progress** — it required the issue count to strictly decrease, but compilers cascade: fixing three errors lets the build advance and surface five more, and the loop declared "converged" at exactly the wrong moment. It now stops when the issue set stops *changing*, and allows more passes when code is actually executed
+- **Failing checks are persisted to `validation_issues`** — that table was populated only from the external validator, so checks owned by the in-process suite left the UI with a failed build and no stated reason
+- **Arbitrary file read via `/api/workspace/files/<path>`** — the route built a filesystem path straight from user input while the existing `_is_safe_relative_path` guard was never called, so `..` segments escaped the workspace. Now validated, with a resolved-path containment check so symlinks cannot escape either
 - Flask multipart job create applies the same LLM credential check as the FastAPI path
 
 ## [2.5.0] - 2026-07-16
