@@ -585,6 +585,7 @@ def _run_impact_refinement(
     summary = f"Refinement completed — updated {', '.join(files_modified)} (impact scope)"
     return _complete_refinement(
         workspace_path, job_db, job_id, refinement_id, progress_callback, summary, previous_status,
+        files_changed=files_modified,
     )
 
 
@@ -665,11 +666,15 @@ def _run_single_file_refinement(
             f"The AI agent completed but did not modify {file_path}. "
             "Try rephrasing your request or being more specific."
         )
-        return _fail_refinement(job_db, job_id, refinement_id, progress_callback, error_msg, previous_status)
+        return _fail_refinement(job_db, job_id, refinement_id, progress_callback, error_msg, previous_status,
+                                agent_response=agent_response)
 
     summary = f"Refinement completed — {file_path} deleted." if (file_existed_before and not (workspace_path / file_path).exists()) else f"Refinement completed — {file_path} updated."
     _post_fix_gates(workspace_path, job_db, job_id, refinement_kind)
-    return _complete_refinement(workspace_path, job_db, job_id, refinement_id, progress_callback, summary, previous_status)
+    return _complete_refinement(
+        workspace_path, job_db, job_id, refinement_id, progress_callback, summary, previous_status,
+        agent_response=agent_response, files_changed=[file_path],
+    )
 
 
 def _candidate_files_from_prompt(prompt: str, source_files: List[str], workspace_path: Path) -> List[str]:
@@ -798,6 +803,7 @@ def _run_project_wide_refinement(
         summary = f"Refinement completed — batched edit of {len(preloaded)} file(s)"
         return _complete_refinement(
             workspace_path, job_db, job_id, refinement_id, progress_callback, summary, previous_status,
+            files_changed=list(preloaded),
         )
 
     # >5 candidates: process in batches of 5
@@ -842,6 +848,7 @@ def _run_project_wide_refinement(
     )
     return _complete_refinement(
         workspace_path, job_db, job_id, refinement_id, progress_callback, summary, previous_status,
+        files_changed=files_modified,
     )
 
 
@@ -914,11 +921,14 @@ def _user_friendly_llm_error(raw_error: str) -> str:
     return s
 
 
-def _fail_refinement(job_db, job_id, refinement_id, progress_callback, error_msg, previous_status: str = "completed"):
+def _fail_refinement(job_db, job_id, refinement_id, progress_callback, error_msg, previous_status: str = "completed",
+                     agent_response=None):
     """Mark refinement as failed and restore job status so dashboard shows correct state."""
     logger.error("Refinement failed: %s", error_msg)
     friendly_msg = _user_friendly_llm_error(error_msg)
-    job_db.fail_refinement(refinement_id, friendly_msg)
+    # Record what the agent said even on failure — an attempt that went nowhere
+    # is a negative training example, and the reason is usually in its reply.
+    job_db.fail_refinement(refinement_id, friendly_msg, response=agent_response)
     # Publish the failure phase BEFORE restoring the job row. Writing
     # current_phase='completed' first leaves a window where the UI's progress
     # poll sees a successful-looking state and renders "refinement applied".
@@ -1041,7 +1051,8 @@ def _create_github_pr(workspace_path: Path, job_id: str, prompt: str, job_db) ->
         return None
 
 
-def _complete_refinement(workspace_path, job_db, job_id, refinement_id, progress_callback, message, previous_status: str = "completed"):
+def _complete_refinement(workspace_path, job_db, job_id, refinement_id, progress_callback, message, previous_status: str = "completed",
+                         agent_response=None, files_changed=None):
     """Mark refinement as completed and restore job status so dashboard shows correct state."""
     try:
         _git_snapshot(workspace_path)
@@ -1071,13 +1082,37 @@ def _complete_refinement(workspace_path, job_db, job_id, refinement_id, progress
     except Exception as e:
         logger.warning("Post-refinement PR step failed (non-fatal): %s", e)
 
-    job_db.complete_refinement(refinement_id)
+    job_db.complete_refinement(
+        refinement_id,
+        response=agent_response or message,
+        files_changed=files_changed,
+    )
     job_db.update_job(job_id, {
         "status": previous_status,
         "current_phase": "completed",
         "progress": 100,
         "error": None,
     })
+    # Correction memory: a human said what was wrong and the agent responded.
+    # Written here because refinements are issued after the job's terminal state,
+    # so the post-job hook has already run. Fail-open.
+    try:
+        from crew_studio.memory_hooks import write_refinement_correction_memory
+        from src.llamaindex_crew.config import ConfigLoader
+
+        write_refinement_correction_memory(
+            job_id,
+            config=ConfigLoader.load(),
+            job=job_db.get_job(job_id),
+            workspace_path=Path(workspace_path),
+            job_db=job_db,
+        )
+    except Exception as mem_err:
+        logger.warning(
+            "Refinement correction memory hook raised (non-fatal) for %s: %s",
+            job_id, mem_err,
+        )
+
     done_msg = f"{message} — PR: {pr_url}" if pr_url else message
     progress_callback("completed", 100, done_msg)
     return {"status": "success", "pr_url": pr_url}

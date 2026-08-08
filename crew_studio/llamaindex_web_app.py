@@ -451,15 +451,29 @@ def _run_job_async_impl(
         # Only fires for terminal states — pauses returned above. Fail-open:
         # write_job_outcome_memory swallows its own errors.
         try:
-            from crew_studio.memory_hooks import write_job_outcome_memory
+            from crew_studio.memory_hooks import (
+                write_correction_memories,
+                write_job_outcome_memory,
+            )
+            job_row = job_db.get_job(job_id)
             write_job_outcome_memory(
                 job_id,
                 config=job_config,
-                job=job_db.get_job(job_id),
+                job=job_row,
                 workspace_path=job_workspace,
                 results=results,
                 job_db=job_db,
                 final_status=terminal_status,
+            )
+            # Corrections: what humans and verifiers actually had to fix. Runs
+            # for every mode, and after the outcome write so the resolved
+            # framework/domain scope is already pinned to the job row.
+            write_correction_memories(
+                job_id,
+                config=job_config,
+                job=job_db.get_job(job_id) or job_row,
+                workspace_path=job_workspace,
+                job_db=job_db,
             )
         except Exception as mem_err:
             logger.warning(

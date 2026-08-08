@@ -297,6 +297,24 @@ class MemoryConfig(BaseModel):
     write_reference_docs: bool = Field(
         True, description="Write a summary for each uploaded reference document."
     )
+    write_corrections: bool = Field(
+        True,
+        description=(
+            "Write one episode per correction — what humans and verifiers had to "
+            "fix, verbatim. Spans every job mode: plan/solution review feedback "
+            "and critique passes (build), refinement prompt+response (refine and "
+            "import/fix), migration issues, and refactor instructions. This is the "
+            "highest-signal recall the plane produces; disable only if a customer "
+            "forbids storing reviewer wording."
+        ),
+    )
+    max_corrections_per_job: int = Field(
+        25,
+        description=(
+            "Cap on correction episodes written per job. Human corrections are "
+            "kept in preference to machine critique when trimming."
+        ),
+    )
     read_at_solutioning: bool = Field(
         True, description="Query past memories during the solutioning research phase."
     )
@@ -507,7 +525,14 @@ class ConfigLoader:
         if api_key:
             memory["api_key"] = api_key
 
+        corrections_raw = os.getenv("MEMORY_WRITE_CORRECTIONS")
+        if corrections_raw is not None:
+            memory["write_corrections"] = corrections_raw.strip().lower() in (
+                "1", "true", "yes", "on",
+            )
+
         for env_name, key, caster in (
+            ("MEMORY_MAX_CORRECTIONS", "max_corrections_per_job", int),
             ("MEMORY_SEARCH_LIMIT", "search_limit", int),
             ("MEMORY_TIMEOUT_SECONDS", "timeout_seconds", int),
             ("MEMORY_MAX_RECALL_CHARS", "max_recall_chars", int),

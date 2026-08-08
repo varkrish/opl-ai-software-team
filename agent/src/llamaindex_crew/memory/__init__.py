@@ -11,6 +11,7 @@ disabled no-op and jobs run exactly as they do without it.
 """
 from .scope import MemoryScope, resolve_domain, resolve_framework, resolve_scope, slugify
 from .context_memory import ContextMemory, get_context_memory
+from .corrections import Correction, collect_corrections, render_correction
 from .summaries import (
     build_jira_context_summary,
     build_jira_epic_summary,
@@ -21,7 +22,10 @@ from .summaries import (
 
 __all__ = [
     "ContextMemory",
+    "Correction",
     "MemoryScope",
+    "collect_corrections",
+    "render_correction",
     "build_jira_context_summary",
     "build_jira_epic_summary",
     "collect_job_outcome_signals",

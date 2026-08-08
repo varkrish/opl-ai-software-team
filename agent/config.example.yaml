@@ -184,6 +184,23 @@ memory:
   write_job_outcome: true
   write_reference_docs: true
 
+  # Corrections — what humans and verifiers had to fix, stored verbatim.
+  # This is the highest-signal recall the plane produces, and it spans every
+  # job mode, not just refine:
+  #   build      plan review feedback, solution review feedback,
+  #              solution_critique_pass_N.json, test-bed critique
+  #   import/fix the fix instruction, paired with what the agent did
+  #   refine     refinement prompt + the agent's response
+  #   migration  migration issue description + hint
+  #   refactor   per-file refactor instruction
+  # No LLM is used: these are already human- or verifier-written sentences, and
+  # paraphrasing them would cost money while blunting the specifics that make
+  # them worth recalling. Disable only if a customer forbids storing reviewer
+  # wording. Human corrections are kept in preference to machine critique when
+  # the per-job cap trims.
+  write_corrections: true
+  max_corrections_per_job: 25
+
   # Read side
   read_at_solutioning: true
   search_limit: 5

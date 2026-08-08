@@ -219,6 +219,183 @@ def write_reference_doc_memory(
         return False
 
 
+def write_correction_memories(
+    job_id: str,
+    *,
+    config: Any,
+    job: Optional[Dict[str, Any]] = None,
+    workspace_path: Optional[Path] = None,
+    job_db: Any = None,
+) -> int:
+    """
+    Write one episode per correction recorded for this job. Returns how many landed.
+
+    Corrections are what humans and verifiers had to fix, in the words they used.
+    They go to the **framework** project rather than the shared one because they
+    are stack-specific — "on Frappe, always register the hook in hooks.py" is
+    advice about Frappe, and surfacing it in a Spring Boot job would be noise.
+
+    Stored verbatim rather than summarised: the value of "we are a Postgres shop,
+    do not use MongoDB" is entirely in its specifics, and an LLM paraphrase would
+    blunt exactly that while adding a per-job cost. No LLM is used here.
+    """
+    if not _memory_enabled(config):
+        return 0
+    if not getattr(config.memory, "write_corrections", True):
+        return 0
+
+    try:
+        from src.llamaindex_crew.memory import get_context_memory
+        from src.llamaindex_crew.memory.corrections import (
+            collect_corrections,
+            render_correction,
+        )
+    except ImportError:
+        try:
+            from llamaindex_crew.memory import get_context_memory
+            from llamaindex_crew.memory.corrections import (
+                collect_corrections,
+                render_correction,
+            )
+        except ImportError as exc:
+            logger.warning("Context memory modules unavailable: %s", exc)
+            return 0
+
+    try:
+        limit = int(getattr(config.memory, "max_corrections_per_job", 25) or 25)
+        corrections = collect_corrections(
+            job_id,
+            job=job,
+            workspace_path=workspace_path,
+            job_db=job_db,
+            limit=limit,
+        )
+        if not corrections:
+            return 0
+
+        memory = get_context_memory(
+            config, job=job, workspace_path=workspace_path, agent_id="correction_hook"
+        )
+        if not memory.enabled:
+            return 0
+
+        written = 0
+        for correction in corrections:
+            text = render_correction(correction)
+            if not text:
+                continue
+            if memory.add(
+                text,
+                memory_type="correction",
+                producer="correction_hook",
+                metadata={
+                    "job_id": job_id,
+                    "correction_source": correction.source,
+                    "job_mode": correction.mode,
+                    "outcome": correction.outcome,
+                    "file_path": correction.file_path,
+                    "framework": memory.scope.project_id,
+                    "domain": memory.scope.domain,
+                },
+            ):
+                written += 1
+
+        memory.close()
+        if written:
+            logger.info("Wrote %d correction memory episode(s) for job %s", written, job_id)
+        return written
+    except Exception as exc:  # noqa: BLE001 — post-job hook must never fail a job
+        logger.warning(
+            "Correction memory write raised (non-fatal) for job %s: %s", job_id, exc
+        )
+        return 0
+
+
+def write_refinement_correction_memory(
+    job_id: str,
+    *,
+    config: Any,
+    job: Optional[Dict[str, Any]] = None,
+    workspace_path: Optional[Path] = None,
+    job_db: Any = None,
+) -> int:
+    """
+    Record the refinement that just finished as a correction.
+
+    Refinements are issued *after* a job reaches a terminal state, so the
+    post-job hook has already run by the time one exists. Without this seam the
+    single richest correction source — a human saying in plain words what the
+    agents got wrong, now paired with what the agent did about it — would never
+    reach the memory plane.
+
+    Only the newest refinement is written (``get_refinement_history`` is
+    newest-first), so calling this once per refinement does not re-write history.
+    """
+    if not _memory_enabled(config):
+        return 0
+    if not getattr(config.memory, "write_corrections", True):
+        return 0
+
+    try:
+        from src.llamaindex_crew.memory import get_context_memory
+        from src.llamaindex_crew.memory.corrections import (
+            collect_corrections,
+            render_correction,
+        )
+    except ImportError:
+        try:
+            from llamaindex_crew.memory import get_context_memory
+            from llamaindex_crew.memory.corrections import (
+                collect_corrections,
+                render_correction,
+            )
+        except ImportError as exc:
+            logger.warning("Context memory modules unavailable: %s", exc)
+            return 0
+
+    try:
+        corrections = collect_corrections(
+            job_id,
+            job=job,
+            workspace_path=workspace_path,
+            job_db=job_db,
+            sources={"refinement"},
+            limit=1,
+        )
+        if not corrections:
+            return 0
+
+        memory = get_context_memory(
+            config, job=job, workspace_path=workspace_path, agent_id="refinement_hook"
+        )
+        if not memory.enabled:
+            return 0
+
+        correction = corrections[0]
+        wrote = memory.add(
+            render_correction(correction),
+            memory_type="correction",
+            producer="refinement_hook",
+            metadata={
+                "job_id": job_id,
+                "correction_source": correction.source,
+                "job_mode": correction.mode,
+                "outcome": correction.outcome,
+                "file_path": correction.file_path,
+                "framework": memory.scope.project_id,
+                "domain": memory.scope.domain,
+            },
+        )
+        memory.close()
+        return 1 if wrote else 0
+    except Exception as exc:  # noqa: BLE001 — must never fail a refinement
+        logger.warning(
+            "Refinement correction memory write raised (non-fatal) for %s: %s",
+            job_id, exc,
+        )
+        return 0
+
+
 def write_jira_context_memory(
     job_id: str,
     *,

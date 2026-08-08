@@ -114,3 +114,33 @@ class TestMemoryEnvOverrides(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestCorrectionEnvOverrides(unittest.TestCase):
+    """Corrections carry reviewer wording, so operators need an off switch that
+    does not require editing a possibly read-only config.yaml."""
+
+    def _apply(self, env, config_data=None):
+        data = config_data if config_data is not None else {}
+        with patch.dict(os.environ, env, clear=False):
+            for key in ("MEMORY_WRITE_CORRECTIONS", "MEMORY_MAX_CORRECTIONS"):
+                if key not in env:
+                    os.environ.pop(key, None)
+            ConfigLoader._apply_memory_env_overrides(data)
+        return data
+
+    def test_corrections_enabled_by_default(self):
+        self.assertTrue(MemoryConfig().write_corrections)
+        self.assertEqual(MemoryConfig().max_corrections_per_job, 25)
+
+    def test_can_be_disabled_via_env(self):
+        data = self._apply({"MEMORY_WRITE_CORRECTIONS": "false"})
+        self.assertFalse(data["memory"]["write_corrections"])
+
+    def test_cap_is_cast_to_int(self):
+        data = self._apply({"MEMORY_MAX_CORRECTIONS": "8"})
+        self.assertEqual(data["memory"]["max_corrections_per_job"], 8)
+
+    def test_invalid_cap_ignored(self):
+        data = self._apply({"MEMORY_MAX_CORRECTIONS": "many"})
+        self.assertNotIn("max_corrections_per_job", data.get("memory", {}))

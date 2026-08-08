@@ -1164,7 +1164,7 @@ class SoftwareDevWorkflow:
 
         metadata = self._load_job_metadata()
         history = metadata.get("solution_feedback_history") or []
-        history.append({"feedback": feedback, "at": _json.dumps(datetime.now(timezone.utc).isoformat())})
+        history.append({"feedback": feedback, "at": datetime.now(timezone.utc).isoformat()})
         metadata["solution_feedback_history"] = history
         self._update_job_metadata(metadata)
 
@@ -1310,7 +1310,7 @@ class SoftwareDevWorkflow:
         # Record feedback round
         metadata = self._load_job_metadata()
         history = metadata.get("plan_feedback_history") or []
-        history.append({"feedback": feedback, "at": _json.dumps(datetime.now(timezone.utc).isoformat())})
+        history.append({"feedback": feedback, "at": datetime.now(timezone.utc).isoformat()})
         metadata["plan_feedback_history"] = history
         metadata["pending_review"] = True
         self._update_job_metadata(metadata)

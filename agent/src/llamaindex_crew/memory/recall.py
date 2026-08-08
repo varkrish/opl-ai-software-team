@@ -31,7 +31,8 @@ def build_recall_query(vision: str, scope: Any) -> str:
     vision_text = " ".join(str(vision or "").split())[:_MAX_VISION_IN_QUERY]
     return (
         f"Past {framework} work in the {domain} domain relevant to: {vision_text}. "
-        "What failed validation, what needed rework, what reference docs exist?"
+        "What did reviewers reject or correct, what failed validation, "
+        "what needed rework, what reference docs exist?"
     )
 
 
@@ -106,10 +107,21 @@ def recall_solutioning_context(
 
 
 def _render_block(episodes: list, *, max_chars: int) -> str:
-    """Render merged episodes from both projects into one prompt block."""
+    """
+    Render merged episodes from both projects into one prompt block.
+
+    Corrections lead. They are the most actionable thing the plane holds — a
+    reviewer's own words about what was wrong last time — and the block is
+    truncated to a character budget, so they must not be the lines that get cut.
+    A stable sort preserves ordering within each type.
+    """
+    episodes = sorted(
+        episodes,
+        key=lambda e: 0 if (e.get("metadata") or {}).get("type") == "correction" else 1,
+    )
     lines = [
-        "## PAST CONTEXT — previous jobs, Jira issues, and reference docs "
-        "in this domain (recalled from the context memory plane)",
+        "## PAST CONTEXT — corrections, past jobs, Jira issues, and reference "
+        "docs in this domain (recalled from the context memory plane)",
         "",
     ]
     for episode in episodes:
