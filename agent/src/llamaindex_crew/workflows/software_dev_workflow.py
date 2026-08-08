@@ -420,6 +420,10 @@ class SoftwareDevWorkflow:
             workspace_path=workspace_path
         )
         self.budget_tracker = EnhancedBudgetTracker()
+        # Bind the tracker to this job. Both llm_usage and tool_usage writes are
+        # guarded by ``project_id != "default-project"``, so without this every
+        # token/cost/tool row for the whole pipeline is silently dropped.
+        self.budget_tracker.project_id = project_id
         pl = getattr(config, "prompt_limits", None) if config else None
         self.document_indexer = DocumentIndexer(
             workspace_path,
@@ -1833,8 +1837,8 @@ class SoftwareDevWorkflow:
             f"Fix strategy: {fix_strategy}\n\n"
             f"Tech stack:\n{(self.tech_stack or '')[:2000]}\n\n"
             f"{content_section}"
-            f"Please fix ONLY the specific issue described above using replace_file_content "
-            f"to patch the modified line range. Prefer replace_file_content over file_writer.\n"
+            f"Please fix ONLY the specific issue described above using patch_file_content "
+            f"with SEARCH/REPLACE blocks. Prefer patch_file_content over file_writer.\n"
             f"Do NOT create or modify any other files."
         )
         try:
@@ -1987,6 +1991,15 @@ class SoftwareDevWorkflow:
         report["checks"]["duplicate_files"] = {
             "pass": dup_result["valid"],
             "duplicates": dup_result.get("duplicates", []),
+        }
+
+        # 6b. Builtin shadowing (runtime-only failure; static checks all pass)
+        shadow_result = CodeCompletenessValidator.validate_builtin_shadowing(
+            self.workspace_path
+        )
+        report["checks"]["builtin_shadowing"] = {
+            "pass": shadow_result["valid"],
+            "violations": shadow_result.get("violations", []),
         }
 
         # 7. Entrypoint wiring
@@ -2223,6 +2236,20 @@ class SoftwareDevWorkflow:
                 "description": f"Duplicate filename '{dup.get('filename', '')}' exists at: {', '.join(paths)}",
             })
 
+        for sh in report.get("checks", {}).get("builtin_shadowing", {}).get("violations", []):
+            name = sh.get("name", "")
+            issues.append({
+                "file": sh.get("file", ""),
+                "check": "builtin_shadowing",
+                "description": (
+                    f"Module-level '{name}' shadows the Python builtin '{name}' "
+                    f"(line {sh.get('line', 0)}). Any later use of '{name}' as a type "
+                    f"— e.g. isinstance(x, {name}) or a {name}(...) conversion — fails at "
+                    f"runtime. Rename it (e.g. '{name}_items' or 'get_{name}'), update all "
+                    f"call sites, and do NOT silence this with a noqa comment."
+                ),
+            })
+
         ep_check = report.get("checks", {}).get("entrypoint", {})
         if not ep_check.get("pass", True):
             ep_framework = ep_check.get("framework", "")
@@ -2418,8 +2445,9 @@ class SoftwareDevWorkflow:
             fix_rules = (
                 "Fix the issues with SURGICAL edits only:\n"
                 f"1. Call file_reader(file_path=\"{file_path}\") to load the full current file.\n"
-                "2. Use replace_file_content to patch ONLY the affected line range(s).\n"
-                "Prefer replace_file_content over file_writer. Do NOT rewrite unrelated code or tests.\n"
+                "2. Use patch_file_content with SEARCH/REPLACE blocks covering ONLY the affected lines.\n"
+                "   Copy the SEARCH text exactly from the file_reader output.\n"
+                "Prefer patch_file_content over file_writer. Do NOT rewrite unrelated code or tests.\n"
                 "Use only the frameworks/libraries specified in the tech stack.\n"
             )
 
@@ -3706,7 +3734,7 @@ class SoftwareDevWorkflow:
                 "The following tests failed after implementation. Fix the code so all "
                 "tests pass.\n"
                 "Use code_search(pattern) first to locate relevant code, then patch with "
-                "replace_file_content.\n\n"
+                "patch_file_content using SEARCH/REPLACE blocks.\n\n"
                 f"{critique}"
             )
             try:
@@ -5175,8 +5203,8 @@ class SoftwareDevWorkflow:
                             f"Fix strategy: {fix_strategy}\n\n"
                             f"Tech stack:\n{(self.tech_stack or '')[:2000]}\n\n"
                             f"{content_section}"
-                            f"Please fix ONLY the specific issue described above using replace_file_content "
-                            f"to patch the modified line range. Prefer replace_file_content over file_writer.\n"
+                            f"Please fix ONLY the specific issue described above using patch_file_content "
+                            f"with SEARCH/REPLACE blocks. Prefer patch_file_content over file_writer.\n"
                             f"Do NOT create or modify any other files."
                         )
 

@@ -9,7 +9,7 @@ import re
 import threading
 import functools
 import inspect
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Dict, Optional, Any
 from functools import partial
 from llama_index.core.tools import FunctionTool
@@ -92,6 +92,20 @@ _SOURCE_EXTENSIONS = frozenset({
     ".html", ".css", ".json", ".yaml", ".yml", ".xml", ".toml",
     ".md", ".txt", ".cfg", ".ini", ".sql",
 })
+
+
+# Files whose empty form is a real, intentional artifact rather than a failed
+# generation (stdlib-only dependency list, Python package marker, dir keepers).
+_MAY_BE_EMPTY_BASENAMES = frozenset({
+    "requirements.txt", "__init__.py", ".gitkeep", ".gitignore",
+    "py.typed", ".dockerignore", ".containerignore", ".npmignore",
+})
+
+
+def _may_be_legitimately_empty(file_path: str) -> bool:
+    """True when an empty body is a valid artifact for *file_path*."""
+    name = PurePosixPath((file_path or "").replace("\\", "/")).name
+    return name in _MAY_BE_EMPTY_BASENAMES
 
 
 def _normalize_content(content: str, file_path: str) -> str:
@@ -297,7 +311,14 @@ def file_writer(file_path: str, content: str, workspace_path: Optional[str] = No
             is_llm_stub_content,
             looks_like_raw_agent_dump,
         )
-        if (
+        # An empty body is a legitimate artifact for some files — a stdlib-only
+        # project has an empty requirements.txt, a package marker is an empty
+        # __init__.py. The stub detector treats "" as meta-commentary (correct
+        # when parsing an LLM response, wrong here), which made those tasks fail
+        # forever and took the whole job down with them.
+        if not content.strip() and _may_be_legitimately_empty(file_path):
+            logger.info("file_writer: creating legitimately empty %s", file_path)
+        elif (
             is_llm_stub_content(content, file_path=file_path)
             or is_agent_planning_monologue(content, file_path=file_path)
             or looks_like_raw_agent_dump(content, file_path=file_path)
@@ -581,97 +602,6 @@ def bulk_file_writer(files: list, workspace_path: Optional[str] = None, **kwargs
     
     return "\n".join(results)
 
-@_logged_file_tool("replace_file_content")
-def replace_file_content(
-    file_path: Optional[str] = None,
-    start_line: int = 0,
-    end_line: int = 0,
-    replacement_content: str = "",
-    workspace_path: Optional[str] = None,
-    **kwargs,
-) -> str:
-    """Replace a specific range of lines in an existing file.
-    
-    Args:
-        file_path: The path to the file.
-        start_line: The starting line number (1-indexed) to replace.
-        end_line: The ending line number (1-indexed) to replace.
-        replacement_content: The new content that will replace the lines from start_line to end_line inclusive.
-        workspace_path: Optional workspace root.
-    """
-    file_path, workspace_path, extra = _normalize_file_tool_kwargs(
-        file_path=file_path, workspace_path=workspace_path, **kwargs
-    )
-    start_line = int(extra.get("start_line", start_line) or 0)
-    end_line = int(extra.get("end_line", end_line) or 0)
-    replacement_content = extra.get("replacement_content", extra.get("new_content", replacement_content))
-    if not file_path:
-        return "❌ Error: file_path is required."
-
-    from ..utils.output_parser import (
-        is_agent_planning_monologue,
-        is_llm_stub_content,
-        looks_like_raw_agent_dump,
-    )
-    if (
-        is_llm_stub_content(replacement_content or "", file_path=file_path)
-        or is_agent_planning_monologue(replacement_content or "", file_path=file_path)
-        or looks_like_raw_agent_dump(replacement_content or "", file_path=file_path)
-    ):
-        logger.warning(
-            "replace_file_content REJECTED %s — content is unparsed LLM output (%d chars)",
-            file_path, len(replacement_content or ""),
-        )
-        return (
-            "❌ Rejected: replacement looks like unparsed LLM output "
-            "(channel tokens or meta-commentary), not real file content."
-        )
-
-    try:
-        ws_path = _resolve_workspace(workspace_path)
-        full_path = (ws_path / file_path).resolve()
-        
-        try:
-            full_path.relative_to(ws_path.resolve())
-        except ValueError:
-            return f"❌ Refused: {file_path} is outside the workspace."
-            
-        if ".." in file_path or file_path.startswith("/"):
-            return f"❌ Refused: invalid path {file_path}."
-        if not full_path.exists():
-            return f"❌ File not found: {file_path}. Cannot patch a non-existent file."
-            
-        with open(full_path, "r", encoding="utf-8") as f:
-            lines = f.readlines()
-            
-        if start_line < 1 or end_line < start_line:
-            return "❌ Error: Invalid line numbers. start_line must be >= 1, and end_line must be >= start_line."
-            
-        # 1-indexed to 0-indexed
-        start_idx = start_line - 1
-        end_idx = end_line
-        
-        # If the file is smaller than start_idx, we just append to the end.
-        if start_idx > len(lines):
-            start_idx = len(lines)
-            end_idx = len(lines)
-            
-        replacement_lines = replacement_content.splitlines(keepends=True)
-        # Ensure the last line has a newline if there are subsequent lines
-        if replacement_lines and not replacement_lines[-1].endswith("\n") and end_idx < len(lines):
-            replacement_lines[-1] += "\n"
-            
-        new_lines = lines[:start_idx] + replacement_lines + lines[end_idx:]
-        
-        with open(full_path, "w", encoding="utf-8") as f:
-            f.writelines(new_lines)
-            
-        return f"✅ Successfully patched {file_path} (replaced lines {start_line}-{end_line})"
-    except Exception as e:
-        logger.error(f"Error patching {file_path}: {e}")
-        return f"❌ Error patching {file_path}: {str(e)}"
-
-
 # Create FunctionTool instances (use env WORKSPACE_PATH when called by agent)
 FileWriterTool = FunctionTool.from_defaults(
     fn=file_writer,
@@ -702,6 +632,16 @@ FileDeleterTool = FunctionTool.from_defaults(
     name="file_deleter",
     description="Delete a file from the workspace. Use when the user asks to remove or delete a file. Do NOT empty the file with file_writer — use file_deleter to remove it from the filesystem."
 )
+
+# SEARCH/REPLACE markers, tolerant of how many bracket characters the model emits.
+# Small models routinely write 6 (`<<<<<< SEARCH`) instead of the canonical 7 or 4.
+# Requiring an exact count threw away semantically perfect diffs and forced a full
+# agent retry per mistake — the dominant cost of a slow refinement, and a hard
+# failure for weaker models that never converge on the exact punctuation.
+_SEARCH_MARKER_RE = re.compile(r"^<{3,}\s*SEARCH\s*$", re.IGNORECASE)
+_DIVIDER_MARKER_RE = re.compile(r"^={3,}$")
+_REPLACE_MARKER_RE = re.compile(r"^>{3,}\s*REPLACE\s*$", re.IGNORECASE)
+
 
 @_logged_file_tool("patch_file_content")
 def patch_file_content(file_path: str, diff_blocks: str, workspace_path: Optional[str] = None, **kwargs) -> str:
@@ -747,19 +687,21 @@ def patch_file_content(file_path: str, diff_blocks: str, workspace_path: Optiona
     state = "OUTSIDE"
     
     for line in diff_blocks.splitlines(keepends=True):
-        if line.strip() in ("<<<<<<< SEARCH", "<<<< SEARCH"):
+        stripped = line.strip()
+        if _SEARCH_MARKER_RE.match(stripped):
             state = "SEARCH"
             current_search = []
             continue
-        elif line.strip() in ("=======", "===="):
-            if state == "SEARCH":
-                state = "REPLACE"
-                current_replace = []
-            continue
-        elif line.strip() in (">>>>>>> REPLACE", ">>>> REPLACE"):
+        elif _REPLACE_MARKER_RE.match(stripped):
             if state == "REPLACE":
                 search_replace.append(("".join(current_search), "".join(current_replace)))
                 state = "OUTSIDE"
+            continue
+        elif _DIVIDER_MARKER_RE.match(stripped) and state == "SEARCH":
+            # Only a divider while inside a SEARCH block — otherwise a line of
+            # '====' is ordinary content (e.g. a Markdown heading underline).
+            state = "REPLACE"
+            current_replace = []
             continue
             
         if state == "SEARCH":
@@ -829,7 +771,10 @@ PatchFileContentTool = FunctionTool.from_defaults(
     description=(
         "Patch a file using Aider-style SEARCH/REPLACE blocks. "
         "Args: file_path (str), diff_blocks (str). "
-        "Format diff_blocks with <<<< SEARCH, ====, and >>>> REPLACE markers. "
+        "Format each block as: a line '<<<<<<< SEARCH', the exact existing lines, "
+        "a line '=======', the replacement lines, then a line '>>>>>>> REPLACE'. "
+        "Any run of 3 or more <, = or > characters is accepted. "
+        "Leave the replacement empty to delete code. "
         "Use for ALL edits to existing files."
     ),
 )

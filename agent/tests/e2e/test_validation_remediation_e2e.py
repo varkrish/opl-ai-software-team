@@ -1,7 +1,7 @@
 """
 E2E test case for validation remediation using real LLM.
 Runs the Tech Architect and Dev agents to resolve a seeded coding issue (syntax error)
-and validates that the issue is fixed using replace_file_content.
+and validates that the issue is fixed using patch_file_content.
 """
 from __future__ import annotations
 
@@ -60,7 +60,7 @@ def test_validation_remediation_e2e(tmp_path, monkeypatch):
         workspace_path=workspace,
     )
     wf.dev_agent = DevAgent(
-        custom_backstory="You are an expert developer who modifies code files using replace_file_content.",
+        custom_backstory="You are an expert developer who modifies code files using patch_file_content.",
         workspace_path=workspace,
         config=config,
     )
@@ -179,7 +179,7 @@ def test_validation_remediation_twenty_issues_e2e(tmp_path, monkeypatch):
         workspace_path=workspace,
     )
     wf.dev_agent = DevAgent(
-        custom_backstory="You are an expert developer who modifies code files using replace_file_content.",
+        custom_backstory="You are an expert developer who modifies code files using patch_file_content.",
         workspace_path=workspace,
         config=config,
     )

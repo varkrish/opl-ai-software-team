@@ -129,7 +129,13 @@ Do NOT explain your reasoning. Output ONLY the structured format requested in th
             logger.info("Using FunctionCallingAgent for %s", self.role)
             return agent
         except Exception as e:
-            logger.info("FunctionCallingAgent unavailable (%s), falling back to ReActAgent", e)
+            # Not an info-level event: ReAct parses tool calls out of free text, so
+            # this silently degrades reliability for every tool the agent uses.
+            logger.warning(
+                "FunctionCallingAgent unavailable for %s (%s) — falling back to "
+                "text-based ReActAgent; tool-call reliability is reduced",
+                self.role, e, exc_info=True,
+            )
 
         agent_context = f"""{system_prompt}
 
@@ -275,12 +281,16 @@ IMPORTANT INSTRUCTIONS:
             completion_delta = end_completion_tokens - start_completion_tokens
             if prompt_delta > 0 or completion_delta > 0:
                 self.budget_tracker.record_usage(
-                    self.budget_tracker.project_id,
-                    prompt_tokens=prompt_delta,
-                    completion_tokens=completion_delta,
+                    project_id=self.budget_tracker.project_id,
+                    agent_name=self.role,
+                    model=self.llm.metadata.model_name if hasattr(self.llm, 'metadata') else 'unknown',
+                    input_tokens=prompt_delta,
+                    output_tokens=completion_delta,
                 )
         except Exception:
-            logger.debug("Budget tracking failed for chat_simple", exc_info=True)
+            # Warning, not debug: a silent failure here empties llm_usage/tool_usage
+            # and makes every cost metric read as zero.
+            logger.warning("Budget tracking failed for chat_simple", exc_info=True)
 
         return response
 
@@ -360,7 +370,7 @@ IMPORTANT INSTRUCTIONS:
                     output_tokens=output_tokens
                 )
         except Exception as e:
-            logger.debug(f"Budget tracking skipped: {e}")
+            logger.warning("Budget tracking skipped: %s", e, exc_info=True)
         
         return str(response)
     

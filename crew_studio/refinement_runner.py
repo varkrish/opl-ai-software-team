@@ -4,7 +4,7 @@ Runs in a thread; does not set WORKSPACE_PATH env (thread-safe).
 """
 import logging
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Callable, Optional, List, Dict, Any
 
 logger = logging.getLogger(__name__)
@@ -119,14 +119,35 @@ def _pull_and_reindex(workspace_path: Path, job_db: Any, job_id: str) -> None:
             origin.set_url(original_url)
 
 
-_CHANGE_DETECTION_IGNORE = {".tldr/", ".tldr\\", "__pycache__/", "__pycache__\\"}
+_CHANGE_DETECTION_IGNORE = {".tldr/", ".tldr\\", "__pycache__/", "__pycache__\\", ".git/"}
+
+# Platform-generated files the agent's own machinery writes during a run.
+# execution.log in particular is appended on every tool invocation, so a run
+# where the agent called tools but edited nothing still leaves a dirty tree —
+# which made refinements report success while changing no source file at all.
+_CHANGE_DETECTION_IGNORE_NAMES = {
+    "execution.log", "crew_errors.log", "validation_report.json",
+    "wiring_contract.json", "skill_prefetch.json", "agent_backstories.json",
+    "delivery_mode_triage.json", "solution_candidates.json",
+    "stack_manifest.json", "import_index_manifest.json",
+}
+_CHANGE_DETECTION_IGNORE_PREFIXES = ("state_", "tasks_")
+
+
+def _is_platform_artifact(path_str: str) -> bool:
+    """True when *path_str* is written by the platform rather than by an edit."""
+    name = PurePosixPath(path_str.replace("\\", "/")).name
+    if name in _CHANGE_DETECTION_IGNORE_NAMES:
+        return True
+    return any(name.startswith(p) for p in _CHANGE_DETECTION_IGNORE_PREFIXES)
 
 
 def _workspace_has_changes(workspace_path: Path) -> bool:
     """Check if the workspace has uncommitted source-file changes.
 
-    Ignores noise directories (.tldr cache, __pycache__) that the agent
-    tools may touch without producing meaningful edits.
+    Ignores noise directories (.tldr cache, __pycache__) and platform-generated
+    artifacts (execution.log, task DBs, reports) that the agent machinery
+    touches without producing a meaningful edit.
     """
     try:
         import git
@@ -139,7 +160,9 @@ def _workspace_has_changes(workspace_path: Path) -> bool:
         repo = git.Repo(workspace_path)
 
         def _is_real_change(path_str: str) -> bool:
-            return not any(path_str.startswith(prefix) for prefix in _CHANGE_DETECTION_IGNORE)
+            if any(path_str.startswith(prefix) for prefix in _CHANGE_DETECTION_IGNORE):
+                return False
+            return not _is_platform_artifact(path_str)
 
         changed = [d.a_path for d in repo.index.diff(None)] + \
                   [d.a_path for d in repo.index.diff("HEAD")]
@@ -314,6 +337,17 @@ def _run_refinement_impl(
         {"status": "success"} or {"status": "error", "error": "..."}.
     """
     workspace_path = Path(workspace_path)
+
+    # Drop any dev-phase manifest allowlist left behind by a previous build of this
+    # workspace in the same process. Refinement edits arbitrary existing files, so a
+    # stale build allowlist would make patch_file_content reject every patch with
+    # "outside the registered manifest allowlist".
+    try:
+        from src.llamaindex_crew.tools.file_tools import set_allowed_file_paths
+        set_allowed_file_paths(None, workspace=str(workspace_path))
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning("Could not clear file-write allowlist for refinement: %s", exc)
+
     progress_callback("refining", 2, "Syncing with remote repository...")
     _pull_and_reindex(workspace_path, job_db, job_id)
     _maybe_warm_tldr(workspace_path, job_id)
@@ -504,8 +538,9 @@ def _run_impact_refinement(
                     retry_prompt = (
                         f"{prompt}\n\n"
                         "IMPORTANT: Your previous attempt did NOT modify the file. "
-                        "You MUST call replace_file_content at least once. "
-                        "Read the file with file_reader first, then patch the specific lines."
+                        "You MUST call patch_file_content at least once. "
+                        "Read the file with file_reader first, then build SEARCH/REPLACE blocks "
+                        "whose SEARCH text is copied exactly from that output."
                     )
 
                 agent.run(
@@ -603,11 +638,18 @@ def _run_single_file_refinement(
             logger.exception("File refinement failed for %s: %s", file_path, e)
             return _fail_refinement(job_db, job_id, refinement_id, progress_callback, str(e), previous_status)
 
-        # Verify: either git shows changes (write/modify) or the target file was deleted
+        # Verify against the TARGET FILE first. A workspace-wide dirty check is
+        # not evidence of an edit: the agent's own tool logging (execution.log)
+        # and task DB writes dirty the tree on every run, so a refinement that
+        # wrote nothing would still be reported as successful.
         progress_callback("refining", 80, "Verifying changes...")
         file_existed_before = initial_file_content is not None
         file_deleted_now = file_existed_before and not (workspace_path / file_path).exists()
-        files_changed = _workspace_has_changes(workspace_path) or file_deleted_now
+        content_after = _load_file_content(workspace_path, file_path)
+        target_changed = file_deleted_now or content_after != initial_file_content
+        # Fall back to the (now artifact-filtered) workspace check to catch edits
+        # the agent made to other files, e.g. a new module it had to create.
+        files_changed = target_changed or _workspace_has_changes(workspace_path)
         if files_changed:
             if file_deleted_now:
                 logger.info("File refinement deleted %s (attempt %d)", file_path, attempt)
@@ -765,6 +807,9 @@ def _run_project_wide_refinement(
         preloaded = _preload_source_files(workspace_path, batch)
         if not preloaded:
             continue
+        # Full (untruncated) content captured for change detection — `preloaded`
+        # is truncated for prompt budget and would false-positive on long files.
+        before_map = {fp: _load_file_content(workspace_path, fp) for fp in preloaded}
         try:
             from src.llamaindex_crew.agents.refinement_agent import RefinementAgent
             agent = RefinementAgent(workspace_path=workspace_path, project_id=job_id)
@@ -775,20 +820,26 @@ def _run_project_wide_refinement(
                 refinement_history=refinement_history,
                 project_context=project_context,
             )
-            for fp in batch:
-                if _workspace_has_changes(workspace_path):
+            # Attribute changes per file. A workspace-wide dirty check would
+            # credit every file in the batch as soon as any one of them changed.
+            for fp, before in before_map.items():
+                after = _load_file_content(workspace_path, fp)
+                if after != before:
                     files_modified.append(fp)
         except Exception as e:
             logger.warning("Batch refinement error: %s", e)
 
-    if not files_modified and not _workspace_has_changes(workspace_path):
+    if not files_modified:
         return _fail_refinement(
             job_db, job_id, refinement_id, progress_callback,
             f"Processed {total} candidate files but none were changed.",
             previous_status,
         )
     _post_fix_gates(workspace_path, job_db, job_id, refinement_kind)
-    summary = f"Refinement completed — modified files in {total} candidate set"
+    summary = (
+        f"Refinement completed — updated {', '.join(files_modified)} "
+        f"(of {total} candidates)"
+    )
     return _complete_refinement(
         workspace_path, job_db, job_id, refinement_id, progress_callback, summary, previous_status,
     )
@@ -868,13 +919,16 @@ def _fail_refinement(job_db, job_id, refinement_id, progress_callback, error_msg
     logger.error("Refinement failed: %s", error_msg)
     friendly_msg = _user_friendly_llm_error(error_msg)
     job_db.fail_refinement(refinement_id, friendly_msg)
+    # Publish the failure phase BEFORE restoring the job row. Writing
+    # current_phase='completed' first leaves a window where the UI's progress
+    # poll sees a successful-looking state and renders "refinement applied".
+    progress_callback("refinement_failed", 0, friendly_msg)
     job_db.update_job(job_id, {
         "status": previous_status,
-        "current_phase": "completed",
+        "current_phase": "refinement_failed",
         "progress": 100,
         "error": None,
     })
-    progress_callback("refinement_failed", 0, friendly_msg)
     return {"status": "error", "error": friendly_msg}
 
 

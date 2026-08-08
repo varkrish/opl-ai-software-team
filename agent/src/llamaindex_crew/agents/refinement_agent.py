@@ -20,7 +20,7 @@ You MUST use the provided tools to accomplish the task. Do NOT just describe wha
 Available tools:
 - file_lister: Recursively list all files in a directory to discover project structure.
 - file_reader: Read the current content of a file before modifying it.
-- replace_file_content: Replace a specific range of lines in an existing file (start_line, end_line, replacement_content). Use this for ALL edits to existing files — especially large ones.
+- patch_file_content: Edit an existing file with Aider-style SEARCH/REPLACE blocks (file_path, diff_blocks). Use this for ALL edits to existing files — especially large ones.
 - file_writer: Write NEW files from scratch only. Do NOT use for updating existing files.
 - file_deleter: Delete a file from the workspace. Use this when the user asks to remove, delete, or get rid of a file.
 - code_search: Search the codebase for a regex pattern. Returns matching lines with context.
@@ -29,15 +29,35 @@ Available tools:
 - code_context: Get the call-chain context for a function or method.
 - code_impact: Find all callers of a function (reverse call graph).
 
+How to use patch_file_content — this is the ONLY way to edit an existing file:
+
+  patch_file_content(file_path="src/app.py", diff_blocks=\"\"\"
+  <<<<<<< SEARCH
+  def greet(name):
+      print("hi")
+  =======
+  def greet(name):
+      logger.info("hi %s", name)
+  >>>>>>> REPLACE
+  \"\"\")
+
+Rules for the SEARCH section:
+- It must match the text in the file EXACTLY, character for character, including indentation.
+- ALWAYS call file_reader first and copy the lines you are replacing straight from its output. Never patch from memory.
+- Include enough surrounding lines to make the match unique in the file.
+- To DELETE code: leave the REPLACE section empty (nothing between ======= and >>>>>>> REPLACE).
+- To insert code: SEARCH for an existing anchor line and REPLACE it with that same line plus your new lines.
+- You may put several SEARCH/REPLACE blocks in one diff_blocks string; each is applied in order.
+- If the tool answers "SEARCH block not found", re-read the file with file_reader and retry with the exact text — do NOT switch to file_writer.
+
 CRITICAL RULES:
-- You MUST call replace_file_content for every existing file you want to update.
-- Do NOT use file_writer for updating existing files — it requires the entire file and fails on large files. Use replace_file_content with start_line and end_line.
-- For large or truncated files: call file_reader first, then patch only the changed line ranges with replace_file_content.
+- You MUST call patch_file_content for every existing file you want to update.
+- Do NOT use file_writer for updating existing files — it requires the entire file and fails on large files. Use patch_file_content.
 - When the user asks to DELETE, REMOVE, or get rid of a file: call file_deleter with that file_path.
 - Make minimal, targeted changes that satisfy the user's request.
 - Do not invent new features or refactor beyond what was asked.
 - BEFORE modifying or deleting any function or class, call code_search or code_impact to find all usages. Update every call site.
-- NEVER say "I have made the changes" without actually calling replace_file_content, file_writer, or file_deleter first.
+- NEVER say "I have made the changes" without actually calling patch_file_content, file_writer, or file_deleter first.
 """
 
 
@@ -148,7 +168,14 @@ class RefinementAgent:
             "delete this file", "delete the file", "remove this file", "remove the file",
             "delete file", "remove file", "get rid of this file", "erase this file",
         )
-        file_path and any(p in prompt_lower for p in _explicit_file_delete_phrases)
+        wants_whole_file_delete = bool(
+            file_path and any(p in prompt_lower for p in _explicit_file_delete_phrases)
+        )
+        if wants_whole_file_delete:
+            sections.append(
+                f"\n## Delete request\nThe user is asking to delete the whole file. "
+                f"Call file_deleter(file_path=\"{file_path}\") — do NOT empty it with a patch."
+            )
 
         # ── Target file ────────────────────────────────────────────────
         if file_path:
@@ -166,7 +193,7 @@ class RefinementAgent:
             if initial_file_content is not None:
                 # For large files, extract only the relevant sections to fit context window.
                 # The LLM sees a trimmed view; instructions direct it to use file_reader
-                # for the full file, then replace_file_content on specific line ranges.
+                # for the full file, then patch_file_content with SEARCH/REPLACE blocks.
                 if len(initial_file_content) > self._MAX_INLINE_CHARS:
                     prompt_no_urls = _re.sub(r'https?://\S+', '', user_prompt)
                     tokens = list({
@@ -244,21 +271,21 @@ Follow these steps exactly:
 0. Use code_impact / code_search BEFORE renaming or deleting functions to find call sites.
 1. Call file_reader with file_path="{file_path}" to load the COMPLETE current content.
 2. If the user explicitly asks to DELETE THE ENTIRE FILE: call file_deleter with file_path="{file_path}".
-3. Otherwise apply changes using replace_file_content to patch specific line ranges.
+3. Otherwise apply changes with patch_file_content, copying the SEARCH text exactly from the file_reader output.
 4. Provide a Final Answer summarizing what you changed.
 
 CRITICAL RULES:{allowed_note}
-- You MUST use replace_file_content with start_line and end_line for existing files. DO NOT use file_writer!""")
+- You MUST use patch_file_content with SEARCH/REPLACE blocks for existing files. DO NOT use file_writer!""")
             else:
                 sections.append(f"""
 ## Instructions
 0. Use code_impact / code_search BEFORE renaming or deleting functions to find call sites.
 1. Read the content of **{file_path}** above (or via file_reader if needed).
-2. Apply the user's changes using replace_file_content for specific line ranges.
+2. Apply the user's changes with patch_file_content, copying the SEARCH text exactly from the current content.
 3. Provide a Final Answer summarizing what you changed.
 
 CRITICAL RULES:{allowed_note}
-- You MUST use replace_file_content. DO NOT use file_writer to overwrite the file!""")
+- You MUST use patch_file_content. DO NOT use file_writer to overwrite the file!""")
         else:
             sections.append("""
 ## Instructions
@@ -266,12 +293,12 @@ CRITICAL RULES:{allowed_note}
    Use code_search or code_impact BEFORE renaming/deleting functions to find all call sites.
 1. Call file_lister(".") to discover all files in the project.
 2. Use file_reader to read each relevant source file.
-3. Requests to "remove lines", "delete code" mean EDIT the file with replace_file_content using a blank replacement_content.
+3. Requests to "remove lines", "delete code" mean EDIT the file with patch_file_content using an EMPTY REPLACE section.
 4. Only use file_deleter if the user explicitly asks to DELETE AN ENTIRE FILE (e.g. "delete this file").
-5. For each file to modify: call replace_file_content with start_line and end_line.
+5. For each file to modify: call patch_file_content with SEARCH/REPLACE blocks copied exactly from file_reader output.
 6. Provide a Final Answer listing all files you modified.
 
-CRITICAL: "Remove code/lines/functions" = replace_file_content with empty replacement. file_deleter = only for deleting entire files. DO NOT use file_writer for existing files!""")
+CRITICAL: "Remove code/lines/functions" = patch_file_content with an empty REPLACE section. file_deleter = only for deleting entire files. DO NOT use file_writer for existing files!""")
 
         return "\n".join(sections)
 
@@ -361,16 +388,18 @@ CRITICAL: "Remove code/lines/functions" = replace_file_content with empty replac
 Apply the user's request to ALL the files listed above in a single pass.
 For each file that needs changes:
 1. Use file_reader to load the full current content if the snippet above was truncated.
-2. Use code_search to find exact line numbers for functions/classes you need to edit.
-3. Call replace_file_content with file_path, start_line, end_line, and replacement_content.
-4. "Remove lines / delete code" = replace_file_content with empty replacement_content.
+2. Use code_search to locate the functions/classes you need to edit.
+3. Call patch_file_content(file_path=..., diff_blocks=...) with SEARCH/REPLACE blocks whose SEARCH text
+   is copied EXACTLY from the file (including indentation) and is unique within it.
+4. "Remove lines / delete code" = a SEARCH/REPLACE block with an EMPTY REPLACE section.
 5. Only use file_deleter if the user explicitly asks to delete an entire file by name.
 6. If a file needs no changes, skip it.
 7. After updating all files, provide a Final Answer listing every file you modified.
 
 CRITICAL RULES:
-- You MUST use replace_file_content for ALL edits to existing files. DO NOT use file_writer!
-- You MUST actually call replace_file_content — do NOT just describe changes.
+- You MUST use patch_file_content for ALL edits to existing files. DO NOT use file_writer!
+- You MUST actually call patch_file_content — do NOT just describe changes.
+- If a patch is rejected with "SEARCH block not found", re-read the file and retry with exact text.
 - Without calling the tool, NOTHING is saved.""")
 
         return "\n".join(sections)

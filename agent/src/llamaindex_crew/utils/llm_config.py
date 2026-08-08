@@ -12,6 +12,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Optional, Callable, Any
 from llama_index.core.llms import LLM, LLMMetadata, ChatMessage, ChatResponse, CompletionResponse
+from llama_index.core.llms.function_calling import FunctionCallingLLM
 from llama_index.core.llms.callbacks import llm_chat_callback, llm_completion_callback
 from llama_index.llms.ollama import Ollama
 from llama_index.embeddings.huggingface import HuggingFaceEmbedding
@@ -285,11 +286,19 @@ def _trim_payload_for_context(payload: dict, trim_fraction: float = 0.25) -> dic
     return payload
 
 
-class GenericLlamaLLM(LLM):
+class GenericLlamaLLM(FunctionCallingLLM):
     """
     A truly generic LLM class that uses the LlamaIndex core interfaces.
-    It uses the OpenAI-compatible protocol via httpx directly to avoid 
+    It uses the OpenAI-compatible protocol via httpx directly to avoid
     any OpenAI-specific library dependencies or validation logic.
+
+    Inherits :class:`FunctionCallingLLM` (not plain ``LLM``) because
+    ``FunctionCallingAgentWorker.from_tools`` performs an ``isinstance`` check.
+    With a plain ``LLM`` base every agent silently fell back to text-based
+    ReAct — tool calls then had to survive a round-trip through free text,
+    which small models routinely fail, so no tool ever ran and no file was
+    written. ``get_tool_calls_from_response`` keeps a content-regex fallback
+    for models that drop out of structured mode mid-run.
     """
     model: str
     api_key: str
@@ -332,18 +341,9 @@ class GenericLlamaLLM(LLM):
     # Function-calling interface (used by FunctionCallingAgentWorker)
     # ------------------------------------------------------------------
 
-    def chat_with_tools(
-        self,
-        tools,
-        user_msg=None,
-        chat_history=None,
-        verbose: bool = False,
-        allow_parallel_tool_calls: bool = False,
-        **kwargs,
-    ) -> ChatResponse:
-        """Call the LLM with tools in OpenAI-compatible format."""
-        from llama_index.core.llms import ChatMessage
-
+    @staticmethod
+    def _tool_specs(tools) -> list:
+        """Convert LlamaIndex tools to OpenAI-compatible function specs."""
         tool_specs = []
         for tool in tools:
             fn_schema = {"type": "object", "properties": {}, "required": []}
@@ -360,6 +360,24 @@ class GenericLlamaLLM(LLM):
                     "parameters": fn_schema,
                 },
             })
+        return tool_specs
+
+    def _prepare_chat_with_tools(
+        self,
+        tools,
+        user_msg=None,
+        chat_history=None,
+        verbose: bool = False,
+        allow_parallel_tool_calls: bool = False,
+        **kwargs,
+    ) -> dict:
+        """Build the chat payload for tool use.
+
+        Required by :class:`FunctionCallingLLM` (abstract) and used by the
+        async ``achat_with_tools`` path; the sync path below reuses it so both
+        produce an identical request.
+        """
+        from llama_index.core.llms import ChatMessage
 
         messages = list(chat_history or [])
         if user_msg is not None:
@@ -368,7 +386,32 @@ class GenericLlamaLLM(LLM):
             else:
                 messages.append(user_msg)
 
-        return self.chat(messages, tools=tool_specs, **kwargs)
+        return {
+            "messages": messages,
+            "tools": self._tool_specs(tools),
+            **kwargs,
+        }
+
+    def chat_with_tools(
+        self,
+        tools,
+        user_msg=None,
+        chat_history=None,
+        verbose: bool = False,
+        allow_parallel_tool_calls: bool = False,
+        **kwargs,
+    ) -> ChatResponse:
+        """Call the LLM with tools in OpenAI-compatible format."""
+        payload = self._prepare_chat_with_tools(
+            tools,
+            user_msg=user_msg,
+            chat_history=chat_history,
+            verbose=verbose,
+            allow_parallel_tool_calls=allow_parallel_tool_calls,
+            **kwargs,
+        )
+        messages = payload.pop("messages")
+        return self.chat(messages, **payload)
 
     def get_tool_calls_from_response(
         self,

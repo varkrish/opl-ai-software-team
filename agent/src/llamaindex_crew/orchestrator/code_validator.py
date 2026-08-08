@@ -509,6 +509,69 @@ class CodeCompletenessValidator:
         ]
         return {"valid": len(duplicates) == 0, "duplicates": duplicates}
 
+    # ── Builtin shadowing ─────────────────────────────────────────────────
+
+    # Shadowing one of these at module level rebinds the name for the whole
+    # module, so later *correct* uses break at runtime. Observed live: a
+    # generated todo.py defined `def list()`, which made `isinstance(data, list)`
+    # raise "arg 2 must be a type". Every static check passed — the file parses,
+    # imports fine, and has valid structure. It only fails when executed.
+    #
+    # Restricted to types and constructors actually used in type-position or
+    # called generically; verbs like `print`/`open`/`input` are common, harmless
+    # function names in generated CLIs and would be noisy false positives.
+    _RISKY_PYTHON_BUILTINS = frozenset({
+        "list", "dict", "set", "tuple", "str", "int", "float", "bool",
+        "bytes", "type", "object", "frozenset", "complex",
+    })
+
+    _SHADOW_SKIP_DIRS = frozenset({
+        ".git", ".tldr", "__pycache__", "node_modules", ".venv", "venv",
+        ".pytest_cache", "htmlcov", ".tox", "build", "dist",
+    })
+
+    @classmethod
+    def validate_builtin_shadowing(cls, workspace_path: Path) -> Dict[str, Any]:
+        """Flag module-level defs/assignments that shadow risky Python builtins.
+
+        Implemented as an AST walk rather than a ruff subprocess for two reasons:
+        ruff need not be installed inside a generated project, and an agent can
+        silence a linter with ``# noqa`` — which is exactly what happened here
+        (``def list() -> List[Dict]:  # noqa: A001``). AST inspection cannot be
+        suppressed by a comment.
+        """
+        import ast
+
+        ws = Path(workspace_path)
+        violations: List[Dict[str, Any]] = []
+
+        for src in sorted(ws.rglob("*.py")):
+            if any(part in cls._SHADOW_SKIP_DIRS for part in src.parts):
+                continue
+            try:
+                tree = ast.parse(src.read_text(encoding="utf-8", errors="replace"))
+            except (SyntaxError, OSError):
+                continue  # syntax is validate_syntax's job
+
+            rel = str(src.relative_to(ws))
+            for node in tree.body:  # module level only
+                name = None
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                    name = node.name
+                elif isinstance(node, ast.Assign):
+                    for target in node.targets:
+                        if isinstance(target, ast.Name) and target.id in cls._RISKY_PYTHON_BUILTINS:
+                            name = target.id
+                            break
+                if name and name in cls._RISKY_PYTHON_BUILTINS:
+                    violations.append({
+                        "file": rel,
+                        "line": getattr(node, "lineno", 0),
+                        "name": name,
+                    })
+
+        return {"valid": not violations, "violations": violations}
+
     # ── Package.json completeness ─────────────────────────────────────────
 
     _NPM_IMPORT_RE = re.compile(

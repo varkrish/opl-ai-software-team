@@ -348,8 +348,8 @@ class TestRemediationPhase:
         assert len(failed) == 1
         assert failed[0]["error"] == "Still has SyntaxError after fix"
 
-    def test_apply_fix_prompt_instructs_replace_file_content(self, workspace):
-        """Prompt to dev agent must instruct them to use replace_file_content."""
+    def test_apply_fix_prompt_instructs_patch_file_content(self, workspace):
+        """Prompt to dev agent must instruct them to use patch_file_content."""
         (workspace / "app.py").write_text("print(\n")
 
         wf, job_db = self._make_workflow_with_db(workspace)
@@ -358,8 +358,9 @@ class TestRemediationPhase:
 
         wf._apply_fix("app.py", "Close the open parenthesis on line 1")
         prompt = wf.dev_agent.agent.chat.call_args[0][0]
-        assert "replace_file_content" in prompt
-        assert "file_writer" not in prompt or "prefer replace_file_content" in prompt.lower()
+        assert "patch_file_content" in prompt
+        assert "replace_file_content" not in prompt
+        assert "file_writer" not in prompt or "prefer patch_file_content" in prompt.lower()
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
