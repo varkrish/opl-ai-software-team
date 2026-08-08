@@ -300,49 +300,103 @@ class ContextMemory:
         return block + "\n"
 
 
+def _get(obj: Any, key: str) -> Any:
+    """Read ``key`` from either an object or a dict."""
+    if obj is None:
+        return None
+    if isinstance(obj, dict):
+        return obj.get(key)
+    return getattr(obj, key, None)
+
+
+def _as_episode_dict(item: Any) -> Optional[Dict[str, Any]]:
+    """Normalise one episode-ish item into ``{"content", "metadata"}``."""
+    if isinstance(item, str):
+        return {"content": item, "metadata": {}} if item.strip() else None
+
+    content = _get(item, "content") or _get(item, "text") or _get(item, "episode")
+    if not content:
+        return None
+
+    # filterable_metadata carries the string-valued keys we write (type, job_id,
+    # framework); metadata holds the richer JSON form. Merge, preferring the
+    # filterable copy since that is what our writes populate.
+    metadata: Dict[str, Any] = {}
+    for source in (_get(item, "metadata"), _get(item, "filterable_metadata")):
+        if isinstance(source, dict):
+            metadata.update(source)
+
+    return {"content": str(content), "metadata": metadata}
+
+
 def _extract_episodes(result: Any) -> List[Dict[str, Any]]:
     """
-    Normalise a SearchResult into plain dicts.
+    Normalise a MemMachine ``SearchResult`` into plain dicts.
 
-    The server response shape varies across MemMachine versions, so this probes
-    the documented containers rather than assuming one schema.
+    The documented 0.3.x shape is nested and splits three ways::
+
+        result.content.episodic_memory.long_term_memory.episodes
+        result.content.episodic_memory.short_term_memory.episodes
+        result.content.semantic_memory   -> list[SemanticFeature]
+
+    Semantic features are included, not just episodes: they are what
+    MemMachine's own profile layer derives from the episodes we write, so
+    dropping them would discard the only learned (as opposed to recorded)
+    content the plane produces.
+
+    Flat shapes are still accepted as a fallback, since the response schema has
+    moved between versions and a wrong guess here fails silently — recall simply
+    returns nothing.
     """
     if result is None:
         return []
 
+    episodes: List[Dict[str, Any]] = []
+
+    # ── Documented nested shape ──────────────────────────────────────────────
+    content = _get(result, "content")
+    episodic = _get(content, "episodic_memory")
+    for tier in ("long_term_memory", "short_term_memory"):
+        items = _get(_get(episodic, tier), "episodes")
+        if isinstance(items, list):
+            for item in items:
+                episode = _as_episode_dict(item)
+                if episode:
+                    episodes.append(episode)
+
+    for feature in _get(content, "semantic_memory") or []:
+        name = _get(feature, "feature_name")
+        value = _get(feature, "value")
+        if not value:
+            continue
+        tag = _get(feature, "tag") or ""
+        label = f"{tag}.{name}" if tag and name else (name or tag or "feature")
+        episodes.append(
+            {
+                "content": f"{label}: {value}",
+                "metadata": {"type": "learned_profile", "category": _get(feature, "category") or ""},
+            }
+        )
+
+    if episodes:
+        return episodes
+
+    # ── Fallback: flat shapes ────────────────────────────────────────────────
     candidates: List[Any] = []
-    for attr in ("episodes", "results", "memories", "content"):
-        value = getattr(result, attr, None)
+    for key in ("episodes", "results", "memories"):
+        value = _get(result, key)
         if isinstance(value, list) and value:
             candidates = value
             break
-    if not candidates and isinstance(result, dict):
-        for key in ("episodes", "results", "memories", "content"):
-            value = result.get(key)
-            if isinstance(value, list) and value:
-                candidates = value
-                break
+    if not candidates and isinstance(content, list):
+        candidates = content
     if not candidates and isinstance(result, list):
         candidates = result
 
-    episodes: List[Dict[str, Any]] = []
     for item in candidates:
-        if isinstance(item, str):
-            episodes.append({"content": item, "metadata": {}})
-            continue
-        if isinstance(item, dict):
-            content = item.get("content") or item.get("text") or item.get("episode")
-            metadata = item.get("metadata") or {}
-        else:
-            content = getattr(item, "content", None) or getattr(item, "text", None)
-            metadata = getattr(item, "metadata", None) or {}
-        if content:
-            episodes.append(
-                {
-                    "content": str(content),
-                    "metadata": metadata if isinstance(metadata, dict) else {},
-                }
-            )
+        episode = _as_episode_dict(item)
+        if episode:
+            episodes.append(episode)
     return episodes
 
 

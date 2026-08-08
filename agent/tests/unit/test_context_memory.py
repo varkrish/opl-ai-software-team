@@ -365,8 +365,113 @@ class TestMetadataCoercion(unittest.TestCase):
         self.assertEqual(_stringify_metadata(None), {})
 
 
+class TestRealSearchResultShape(unittest.TestCase):
+    """
+    Extraction against the shape MemMachine 0.3.x actually returns.
+
+    Regression guard: the first version of the extractor only probed for flat
+    list attributes and returned [] against a real server, because the real
+    SearchResult nests three levels deep and splits episodic/semantic. Unit
+    tests using a flat fake passed while live recall silently returned nothing.
+    """
+
+    def _real_result(self, *, long_term=(), short_term=(), semantic=()):
+        """Build a stand-in matching memmachine_common.api.spec.SearchResult."""
+
+        class Episode:
+            def __init__(self, content, metadata=None, filterable=None):
+                self.content = content
+                self.metadata = metadata
+                self.filterable_metadata = filterable
+                self.producer_id = "opl-crew"
+
+        class Feature:
+            def __init__(self, tag, name, value, category="profile"):
+                self.tag = tag
+                self.feature_name = name
+                self.value = value
+                self.category = category
+
+        class Tier:
+            def __init__(self, episodes):
+                self.episodes = list(episodes)
+
+        class Episodic:
+            def __init__(self, lt, st):
+                self.long_term_memory = Tier(lt)
+                self.short_term_memory = Tier(st)
+
+        class Content:
+            def __init__(self, episodic, semantic):
+                self.episodic_memory = episodic
+                self.semantic_memory = list(semantic) if semantic else None
+
+        class Result:
+            def __init__(self, content):
+                self.status = 0
+                self.content = content
+
+        return Result(
+            Content(
+                Episodic(
+                    [Episode(c, {"type": "job_outcome"}) for c in long_term],
+                    [Episode(c) for c in short_term],
+                ),
+                [Feature(*f) for f in semantic],
+            )
+        )
+
+    def test_long_term_episodes_extracted(self):
+        result = _extract_episodes(self._real_result(long_term=["frappe job failed smoke_test"]))
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0]["content"], "frappe job failed smoke_test")
+        self.assertEqual(result[0]["metadata"]["type"], "job_outcome")
+
+    def test_both_memory_tiers_included(self):
+        result = _extract_episodes(
+            self._real_result(long_term=["old outcome"], short_term=["recent outcome"])
+        )
+        self.assertEqual(
+            [r["content"] for r in result], ["old outcome", "recent outcome"]
+        )
+
+    def test_semantic_features_are_surfaced(self):
+        # These are what MemMachine's profile layer derives — the only genuinely
+        # "learned" content the plane produces. Dropping them was the bug.
+        result = _extract_episodes(
+            self._real_result(semantic=[("frappe", "common_failure", "smoke_test times out")])
+        )
+        self.assertEqual(len(result), 1)
+        self.assertIn("smoke_test times out", result[0]["content"])
+        self.assertEqual(result[0]["metadata"]["type"], "learned_profile")
+
+    def test_episodic_and_semantic_combined(self):
+        result = _extract_episodes(
+            self._real_result(
+                long_term=["outcome text"],
+                semantic=[("frappe", "pattern", "always needs hooks.py")],
+            )
+        )
+        self.assertEqual(len(result), 2)
+
+    def test_filterable_metadata_merged(self):
+        result = self._real_result()
+        episode = type(
+            "E", (), {"content": "x", "metadata": None, "filterable_metadata": {"type": "jira_context"}}
+        )()
+        result.content.episodic_memory.long_term_memory.episodes = [episode]
+        self.assertEqual(_extract_episodes(result)[0]["metadata"]["type"], "jira_context")
+
+    def test_empty_real_result(self):
+        self.assertEqual(_extract_episodes(self._real_result()), [])
+
+    def test_semantic_feature_without_value_skipped(self):
+        result = self._real_result(semantic=[("t", "n", "")])
+        self.assertEqual(_extract_episodes(result), [])
+
+
 class TestEpisodeExtraction(unittest.TestCase):
-    """Server response shape varies across MemMachine versions."""
+    """Fallback flat shapes, kept for version drift."""
 
     def test_episodes_key(self):
         result = _extract_episodes({"episodes": [{"content": "a", "metadata": {"t": "1"}}]})
