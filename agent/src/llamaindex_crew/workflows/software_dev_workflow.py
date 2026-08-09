@@ -77,6 +77,13 @@ from .epic_story_loop import (
 
 logger = logging.getLogger(__name__)
 
+# Bounds for the post-generation compile-feedback pass. The cap exists so a
+# build that fails in fifty files cannot turn a single bounded pass into a de
+# facto loop; the remainder are left to the post-build loop, which is designed
+# to iterate.
+_COMPILE_FEEDBACK_MAX_FILES = 8
+_COMPILE_FEEDBACK_SRC_EXT = {".py", ".java", ".kt", ".js", ".jsx", ".ts", ".tsx", ".go"}
+
 # File references in build/runtime error output, by ecosystem:
 # Python tracebacks, Maven [ERROR] lines, and the generic path:line:col form
 # used by Go, Node, and TypeScript.
@@ -2680,6 +2687,120 @@ class SoftwareDevWorkflow:
             related = dict(list(related.items())[:max_files])
 
         return related
+
+    def _run_compile_feedback_turn(self) -> None:
+        """Compile once after generation, hand the errors back for ONE pass.
+
+        Generation currently finishes with nobody having tried to build the
+        result; the first compile happens inside the post-build loop, several
+        phases after the code was written.
+
+        Giving the model a compile tool and a ReAct loop performs best and is
+        the option a sovereign 14b deployment can least afford — the ReAct
+        parser already fails on this model tier, which is why TechArchitect runs
+        tool-less. This takes the cheap part of that benefit: compile, scaffold
+        what is deterministically missing, revise once, hand off. The post-build
+        loop still runs afterwards and remains the thing that iterates.
+
+        Deliberately NOT a loop: no re-validation, no convergence check, no
+        second round. And deliberately narrow: only the files the compiler
+        actually named, because a whole-workspace prompt crowds the error text
+        out of a 14b's usable context.
+
+        Never raises. This is an optimisation and must never be the reason a
+        job fails.
+        """
+        if os.getenv("COMPILE_FEEDBACK_TURN", "1").strip().lower() in ("0", "false", "no"):
+            return
+        if not self.dev_agent:
+            return
+
+        try:
+            from ..tools.test_tools import smoke_test_runner
+
+            smoke_msg = str(smoke_test_runner("auto"))
+        except Exception as exc:
+            logger.debug("Compile feedback turn: smoke test unavailable: %s", exc)
+            return
+
+        if "✅" in smoke_msg:
+            logger.info("Compile feedback turn: build is green, nothing to revise")
+            return
+
+        by_file = self._extract_failing_files(smoke_msg, self.workspace_path)
+        if not by_file:
+            # No file attribution — a missing dependency or a broken toolchain.
+            # Nothing for a per-file pass to act on; the post-build loop's
+            # infrastructure detector owns those.
+            logger.info(
+                "Compile feedback turn: build failed with no file attribution, skipping"
+            )
+            return
+
+        issues = [
+            {
+                "check": "smoke_test",
+                "file": rel_path,
+                "description": (
+                    "This file failed to build/run. Fix the code so the project "
+                    "compiles and starts cleanly:\n" + "\n".join(messages)
+                ),
+            }
+            for rel_path, messages in by_file.items()
+        ]
+
+        # Deterministic fixes BEFORE the model is asked anything. javac blames
+        # the file that REFERENCES a missing type, so without a stub on disk the
+        # model is told to fix a file that is already correct and cannot create
+        # the missing type from inside it.
+        try:
+            auto_fixed = self._auto_fix_issues(issues)
+            if auto_fixed:
+                logger.info(
+                    "Compile feedback turn: auto-fixed %d issue(s) before revision",
+                    len(auto_fixed),
+                )
+        except Exception as exc:
+            logger.warning("Compile feedback turn: auto-fix failed: %s", exc)
+            auto_fixed = []
+
+        from ..tools.file_tools import set_allowed_file_paths
+
+        targets = list(by_file.items())[:_COMPILE_FEEDBACK_MAX_FILES]
+        if len(by_file) > _COMPILE_FEEDBACK_MAX_FILES:
+            logger.info(
+                "Compile feedback turn: revising %d of %d failing files (cap %d); "
+                "the rest are left to the post-build loop",
+                len(targets), len(by_file), _COMPILE_FEEDBACK_MAX_FILES,
+            )
+
+        allowed = {rel for rel, _ in targets}
+        allowed.update(f.get("file", "") for f in auto_fixed if f.get("file"))
+        allowed.discard("")
+
+        # File tree for import paths only — never the file bodies.
+        all_files: Dict[str, str] = {}
+        for src in sorted(self.workspace_path.rglob("*")):
+            if src.is_file() and src.suffix in _COMPILE_FEEDBACK_SRC_EXT:
+                all_files[str(src.relative_to(self.workspace_path))] = ""
+
+        try:
+            set_allowed_file_paths(allowed, workspace=str(self.workspace_path))
+            for rel_path, messages in targets:
+                try:
+                    self._run_post_build_fix_with_context(
+                        rel_path, list(messages), all_files,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "Compile feedback turn: revision failed for %s: %s", rel_path, exc,
+                    )
+        finally:
+            set_allowed_file_paths(None, workspace=str(self.workspace_path))
+
+        logger.info(
+            "Compile feedback turn: one revision pass over %d file(s) complete", len(targets),
+        )
 
     def _run_post_build_fix_with_context(
         self,
@@ -5465,6 +5586,10 @@ class SoftwareDevWorkflow:
                 )
 
         self._export_registry = export_registry
+
+        # Compile once and hand the errors straight back — one bounded pass,
+        # while the code is freshly written, before any other phase runs.
+        self._run_compile_feedback_turn()
 
         # Feature test bed — opt-in via SMOKE_TEST_BACKEND != syntax_only
         self._run_feature_test_bed_loop()
