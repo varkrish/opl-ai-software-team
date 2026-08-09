@@ -3579,6 +3579,24 @@ def _has_source_suffix(p: str) -> bool:
     return Path(p).suffix.lower() in _SOURCE_SUFFIXES
 
 
+def _is_declarable_project_file(p: str) -> bool:
+    """True for code *and* web delivery surfaces (.html/.css/.svg).
+
+    The seed used to filter on ``_SOURCE_SUFFIXES`` alone, so a static site —
+    a stack this pipeline explicitly supports, see
+    ``_workspace_has_html_only_surface`` — produced a contract holding only its
+    stray ``.js`` file, or nothing at all. index.html is the entrypoint of the
+    whole deliverable, and it went undeclared.
+
+    ``_is_manifest_source_path`` has always counted both sets as application
+    source; the seed was the inconsistent one. Kept separate from
+    ``_has_source_suffix`` because that predicate also gates symbol extraction
+    and import scanning, where parsing markup for declarations is meaningless.
+    """
+    suffix = Path(p).suffix.lower()
+    return suffix in _SOURCE_SUFFIXES or suffix in _WEB_DELIVERY_SUFFIXES
+
+
 def _collect_paths_from_spec_text(text: str) -> set[str]:
     """Collect workspace-relative file paths from free text + unicode trees."""
     paths: set[str] = set()
@@ -3590,14 +3608,14 @@ def _collect_paths_from_spec_text(text: str) -> set[str]:
         matches = re.findall(r"\b(?:[a-zA-Z0-9_-]+/)+[a-zA-Z0-9_-]+\.[a-zA-Z0-9]+\b", line)
         for m in matches:
             if not any(x in m for x in [".github", "github.com", "HTTP", "http"]):
-                if _is_valid_file_path(m) and _has_source_suffix(m):
+                if _is_valid_file_path(m) and _is_declarable_project_file(m):
                     paths.add(m)
 
     # Unicode trees / plain one-path-per-line (same parser as task registration)
     for entry in extract_files_with_descriptions_from_tech_stack(text):
         p = (entry.get("path") or "").strip()
         if p and not any(x in p for x in [".github", "github.com", "HTTP", "http"]):
-            if _is_valid_file_path(p) and _has_source_suffix(p):
+            if _is_valid_file_path(p) and _is_declarable_project_file(p):
                 paths.add(p)
 
     return paths

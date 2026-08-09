@@ -56,6 +56,9 @@ logger = logging.getLogger(__name__)
 _FALLBACK_SOURCE_SUFFIXES = frozenset({
     ".go", ".py", ".ts", ".js", ".tsx", ".jsx", ".java", ".kt", ".scala", ".sc",
     ".rs", ".rb", ".php", ".cs", ".c", ".cpp", ".h", ".hpp",
+    # Web delivery surfaces — a static site's duplicate tree is two index.html
+    # files just as surely as a Go one is two manager.go files.
+    ".html", ".css", ".svg",
 })
 
 # A package must hold at least this many source files before its basenames are
@@ -85,8 +88,9 @@ class CompetingPackages:
 
 def _source_suffixes() -> frozenset:
     try:
-        from .wiring_contract import _SOURCE_SUFFIXES  # local import avoids a cycle
-        return _SOURCE_SUFFIXES
+        # local imports avoid a cycle
+        from .wiring_contract import _SOURCE_SUFFIXES, _WEB_DELIVERY_SUFFIXES
+        return frozenset(_SOURCE_SUFFIXES | _WEB_DELIVERY_SUFFIXES)
     except Exception:  # noqa: BLE001 — coherence must never break the import graph
         return _FALLBACK_SOURCE_SUFFIXES
 

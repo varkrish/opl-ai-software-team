@@ -374,6 +374,22 @@ def test_a_package_never_competes_with_its_own_subpackage():
     assert dropped == []
 
 
+def test_a_duplicated_static_site_is_a_duplicate_tree_too():
+    """Markup counts: two index.html trees is the same defect as two main.py."""
+    contract = _contract(
+        {
+            ".": ["index.html", "style.css", "app.js"],
+            "site": ["site/index.html", "site/style.css"],
+        },
+        language="html",
+    )
+
+    resolved, dropped = resolve_competing_packages(contract)
+
+    assert len(_pkg_names(resolved)) == 1
+    assert dropped
+
+
 def test_packages_with_no_source_files_are_ignored():
     """Docs/config packages have no basenames to compare and must not be dropped."""
     contract = _contract({

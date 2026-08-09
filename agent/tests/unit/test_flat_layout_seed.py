@@ -138,6 +138,114 @@ sandbox-api/
     assert "cmd/server" in packages and "internal/api" in packages
 
 
+# ── the same layout question in every other language ────────────────────────
+
+FLAT_BY_LANGUAGE = {
+    "go": ("svc/\n├── main.go\n├── handler.go\n├── store.go\n"
+           "└── internal/\n    └── db/\n        └── db.go",
+           {"main.go", "handler.go", "store.go"}),
+    "node": ("app/\n├── index.js\n├── routes.js\n├── db.js\n"
+             "└── test/\n    └── routes.test.js",
+             {"index.js", "routes.js", "db.js"}),
+    "typescript": ("api/\n├── server.ts\n├── models.ts\n"
+                   "└── tests/\n    └── server.test.ts",
+                   {"server.ts", "models.ts"}),
+    "csharp": ("App/\n├── Program.cs\n├── Service.cs\n"
+               "└── Tests/\n    └── ServiceTests.cs",
+               {"Program.cs", "Service.cs"}),
+    "ruby": ("app/\n├── app.rb\n├── models.rb\n└── spec/\n    └── app_spec.rb",
+             {"app.rb", "models.rb"}),
+    "php": ("site/\n├── index.php\n├── db.php\n└── tests/\n    └── DbTest.php",
+            {"index.php", "db.php"}),
+}
+
+
+@pytest.mark.parametrize("lang", sorted(FLAT_BY_LANGUAGE))
+def test_root_sources_survive_in_every_language(lang):
+    """The bug was never Python-specific — it is keyed on the parent directory."""
+    tree, expected = FLAT_BY_LANGUAGE[lang]
+    contract = _build_path_only_contract_from_specs(
+        "", "", tech_stack=f"```\n{tree}\n```"
+    )
+
+    assert expected <= _all_files(contract), (
+        f"{lang}: expected {sorted(expected)}, got {sorted(_all_files(contract))}"
+    )
+
+
+@pytest.mark.parametrize("lang,tree,roots", [
+    ("rust", "myapp/\n├── src/\n│   ├── main.rs\n│   └── lib.rs\n"
+             "└── tests/\n    └── it.rs", {"src", "tests"}),
+    ("java", "task/\n├── src/main/java/com/example/App.java\n"
+             "├── src/main/java/com/example/Svc.java\n"
+             "└── src/test/java/com/example/SvcTest.java",
+     {"src/main/java/com/example", "src/test/java/com/example"}),
+])
+def test_conventional_nested_layouts_gain_no_root_package(lang, tree, roots):
+    """Cargo and Maven mandate nesting; there is nothing at the root to keep."""
+    contract = _build_path_only_contract_from_specs(
+        "", "", tech_stack=f"```\n{tree}\n```"
+    )
+    packages = contract.get("packages") or {}
+
+    assert "." not in packages, f"{lang} has no root-level sources"
+    assert set(packages) == roots
+
+
+# ── static sites have no code suffix at all ─────────────────────────────────
+
+def test_static_site_declares_its_html_and_css():
+    """
+    ``_collect_paths_from_spec_text`` filters on ``_SOURCE_SUFFIXES``, which
+    holds code extensions only. ``.html`` and ``.css`` live in
+    ``_WEB_DELIVERY_SUFFIXES`` and were dropped, so a static site's contract
+    contained just the stray ``.js`` file — while index.html, the entrypoint of
+    the entire deliverable, went undeclared.
+
+    ``_is_manifest_source_path`` already counts both sets as application source;
+    the seed was the inconsistent one.
+    """
+    spec = """
+```
+site/
+├── index.html
+├── style.css
+└── app.js
+```
+"""
+    contract = _build_path_only_contract_from_specs("", "", tech_stack=spec)
+
+    assert _all_files(contract) == {"index.html", "style.css", "app.js"}
+
+
+def test_templates_in_a_backend_project_are_declared():
+    spec = """
+```
+shop/
+├── main.py
+├── templates/
+│   └── index.html
+└── static/
+    └── style.css
+```
+"""
+    contract = _build_path_only_contract_from_specs("", "", tech_stack=spec)
+    files = _all_files(contract)
+
+    assert "templates/index.html" in files
+    assert "static/style.css" in files
+    assert "main.py" in files
+
+
+def test_static_site_reaches_the_creation_manifest():
+    spec = "```\nsite/\n├── index.html\n└── style.css\n```"
+    contract = _build_path_only_contract_from_specs("", "", tech_stack=spec)
+
+    paths = {e["path"] for e in files_from_contract(contract)}
+
+    assert {"index.html", "style.css"} <= paths
+
+
 def test_no_paths_at_all_yields_no_packages():
     contract = _build_path_only_contract_from_specs("", "", tech_stack="# Just prose\n")
     assert (contract.get("packages") or {}) == {}
