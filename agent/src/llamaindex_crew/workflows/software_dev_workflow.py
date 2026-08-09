@@ -2479,6 +2479,78 @@ class SoftwareDevWorkflow:
                     messages.append(tail)
         return by_file
 
+    def _run_post_dev_gap_fill(self) -> None:
+        """
+        Ask DevAgent to close entrypoint and structural gaps — with the write
+        guard IN FORCE.
+
+        This step previously disabled the guard outright
+        (``set_allowed_file_paths(None)``) before invoking the agent. Told only
+        that "something structural is missing" and given free rein over the
+        filesystem, the agent answered by creating the layout it would have
+        chosen itself, alongside the one that already existed:
+
+            Python job 76f2138d — dev phase produced app/{models,schemas,
+            service,router,main}.py; gap-fill then added api/, core/, db/,
+            models/, schemas/, services/ and a duplicate test module. Nothing
+            failed, because compileall is happy to compile both trees, so the
+            job was graded healthy while carrying an unwired second project.
+
+            Java job d32dcaf7 — dev phase produced src/main/java/...; gap-fill
+            then added model/, controller/, service/, repository/, util/ at the
+            workspace root, outside the Maven source root entirely.
+
+        The guard is not Java- or Python-specific and neither is the failure:
+        the fix is simply to leave it on. Gap-fill can still create any file the
+        plan registered, and can still edit anything on disk — it just cannot
+        invent a new top-level package tree.
+        """
+        from ..tools.file_tools import set_allowed_file_paths
+        from ..utils.manifest_guard import remediation_write_allowlist
+
+        try:
+            registered = self.task_manager.get_registered_file_paths()
+            allowed = remediation_write_allowlist(registered, self.workspace_path)
+            if allowed:
+                set_allowed_file_paths(allowed, workspace=str(self.workspace_path))
+
+            try:
+                from ..orchestrator.code_validator import CodeCompletenessValidator
+
+                entry_check = CodeCompletenessValidator.validate_entrypoint(
+                    self.workspace_path, self.tech_stack or ""
+                )
+                if not entry_check.get("valid", True):
+                    missing = entry_check.get("missing_wiring") or []
+                    detail = missing[0] if missing else "entrypoint wiring incomplete"
+                    logger.warning("Post-dev gap-fill: entrypoint issue — %s", detail)
+                    self.dev_agent.run(
+                        [
+                            "Create or fix the application entrypoint/bootstrap file "
+                            f"by editing the files that already exist. {detail}"
+                        ],
+                        self.tech_stack or "",
+                        self.user_stories,
+                    )
+
+                structure_gaps = self.task_manager.detect_workspace_structure_gaps(
+                    self.workspace_path
+                )
+                if structure_gaps:
+                    logger.warning(
+                        "Post-dev gap-fill: %d structural gap(s) — %s",
+                        len(structure_gaps), structure_gaps[0][:120],
+                    )
+                    self.dev_agent.run(
+                        structure_gaps, self.tech_stack or "", self.user_stories
+                    )
+            finally:
+                # Always lift the guard: leaving it set would silently constrain
+                # every later phase in this workspace.
+                set_allowed_file_paths(None, workspace=str(self.workspace_path))
+        except Exception as e:  # noqa: BLE001 — gap-fill is best-effort
+            logger.warning("Post-dev completeness check failed: %s", e)
+
     def _record_non_convergence(
         self, current: int, best: int, iteration: int
     ) -> None:
@@ -5775,34 +5847,7 @@ class SoftwareDevWorkflow:
                                 )
         
         # ── Post-development completeness check ──
-        try:
-            from ..tools.file_tools import set_allowed_file_paths
-            set_allowed_file_paths(None, workspace=str(self.workspace_path))
-
-            from ..orchestrator.code_validator import CodeCompletenessValidator
-            entry_check = CodeCompletenessValidator.validate_entrypoint(
-                self.workspace_path, self.tech_stack or ""
-            )
-            if not entry_check.get("valid", True):
-                missing = entry_check.get("missing_wiring") or []
-                detail = missing[0] if missing else "entrypoint wiring incomplete"
-                logger.warning("Post-dev gap-fill: entrypoint issue — %s", detail)
-                self.dev_agent.run(
-                    [f"Create or fix the application entrypoint/bootstrap file. {detail}"],
-                    self.tech_stack or "",
-                    self.user_stories,
-                )
-
-            structure_gaps = self.task_manager.detect_workspace_structure_gaps(self.workspace_path)
-            if structure_gaps:
-                logger.warning(
-                    "Post-dev gap-fill: %d structural gap(s) — %s",
-                    len(structure_gaps),
-                    structure_gaps[0][:120],
-                )
-                self.dev_agent.run(structure_gaps, self.tech_stack or "", self.user_stories)
-        except Exception as e:
-            logger.warning("Post-dev completeness check failed: %s", e)
+        self._run_post_dev_gap_fill()
 
         # ── Post-development validation suite (delegates to reusable method) ──
         report = self._run_validation_suite()
