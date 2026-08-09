@@ -307,14 +307,15 @@ CONTAINER_COMMANDS = {
     # with LocalRepositoryNotAccessibleException before compiling anything.
     # Relative path so it resolves under whichever dir the command cd's into —
     # an absolute one would survive the sandbox's `cd /app` rewrite and break.
-    # The JVM ignores $http_proxy — unlike curl, npm, go and pip — so Maven
-    # resolved registry hostnames directly and failed with "Name or service
-    # not known" even while the egress proxy was working. Derive the JVM
-    # proxy flags from the environment, guarded so an unset proxy (egress
-    # disabled) still produces a valid command.
-    "java_maven": "cd /app && if [ -n \"$http_proxy\" ]; then PH=$(echo \"$http_proxy\" | sed -E 's#^https?://##; s#:.*##'); PP=$(echo \"$http_proxy\" | sed -E 's#.*:##'); JP=\"-Dhttp.proxyHost=$PH -Dhttp.proxyPort=$PP -Dhttps.proxyHost=$PH -Dhttps.proxyPort=$PP\"; else JP=\"\"; fi && mvn compile -q -Dmaven.repo.local=.m2-repo-local $JP 2>&1",
-    "java_gradle": "cd /app && if [ -n \"$http_proxy\" ]; then PH=$(echo \"$http_proxy\" | sed -E 's#^https?://##; s#:.*##'); PP=$(echo \"$http_proxy\" | sed -E 's#.*:##'); JP=\"-Dhttp.proxyHost=$PH -Dhttp.proxyPort=$PP -Dhttps.proxyHost=$PH -Dhttps.proxyPort=$PP\"; else JP=\"\"; fi && gradle build -x test -q --gradle-user-home .gradle-home $JP 2>&1",
-    "go": "cd /app && go build ./... 2>&1",
+    # Maven's artifact resolver reads proxy settings from settings.xml, NOT
+    # from -Dhttp.proxyHost (those only affect direct java.net calls). Using
+    # the -D flags alone looked plausible and still failed with "Name or
+    # service not known" on parent-POM resolution; generating a settings.xml
+    # is what actually downloads. Guarded so an unset proxy still works.
+    "java_maven": "cd /app && if [ -n \"$http_proxy\" ]; then PH=$(echo \"$http_proxy\" | sed -E 's#^https?://##; s#:.*##'); PP=$(echo \"$http_proxy\" | sed -E 's#.*:##'); printf '<settings><proxies><proxy><id>p</id><active>true</active><protocol>http</protocol><host>%s</host><port>%s</port></proxy><proxy><id>ps</id><active>true</active><protocol>https</protocol><host>%s</host><port>%s</port></proxy></proxies></settings>' \"$PH\" \"$PP\" \"$PH\" \"$PP\" > /tmp/mvn-proxy.xml; MVNS=\"-s /tmp/mvn-proxy.xml\"; GP=\"-Dhttp.proxyHost=$PH -Dhttp.proxyPort=$PP -Dhttps.proxyHost=$PH -Dhttps.proxyPort=$PP\"; else MVNS=\"\"; GP=\"\"; fi && mvn compile -q -Dmaven.repo.local=.m2-repo-local $MVNS 2>&1",
+    # Gradle does honour the JVM proxy properties.
+    "java_gradle": "cd /app && if [ -n \"$http_proxy\" ]; then PH=$(echo \"$http_proxy\" | sed -E 's#^https?://##; s#:.*##'); PP=$(echo \"$http_proxy\" | sed -E 's#.*:##'); printf '<settings><proxies><proxy><id>p</id><active>true</active><protocol>http</protocol><host>%s</host><port>%s</port></proxy><proxy><id>ps</id><active>true</active><protocol>https</protocol><host>%s</host><port>%s</port></proxy></proxies></settings>' \"$PH\" \"$PP\" \"$PH\" \"$PP\" > /tmp/mvn-proxy.xml; MVNS=\"-s /tmp/mvn-proxy.xml\"; GP=\"-Dhttp.proxyHost=$PH -Dhttp.proxyPort=$PP -Dhttps.proxyHost=$PH -Dhttps.proxyPort=$PP\"; else MVNS=\"\"; GP=\"\"; fi && gradle build -x test -q --gradle-user-home .gradle-home $GP 2>&1",
+"go": "cd /app && go build ./... 2>&1",
     # No build step to run for static HTML/CSS/JS — the meaningful smoke test
     # is confirming the deliverable actually exists and isn't an empty stub.
     "static": "cd /app && test -s index.html && echo 'static entry point present: index.html'",
