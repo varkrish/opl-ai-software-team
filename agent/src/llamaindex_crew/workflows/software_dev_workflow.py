@@ -1133,6 +1133,23 @@ class SoftwareDevWorkflow:
             max_passes=max_passes,
             approved_by_critique=result.approved,
         )
+
+        if result.approved:
+            try:
+                from crew_studio.memory_hooks import write_approved_solution_memory
+                score = None
+                if result.critique_history and isinstance(result.critique_history[-1], dict):
+                    score = result.critique_history[-1].get("score")
+                write_approved_solution_memory(
+                    self.project_id,
+                    config=self.config,
+                    job=job,
+                    workspace_path=self.workspace_path,
+                    score=score,
+                )
+            except Exception:
+                logger.warning("Approved solution memory write failed (non-fatal)", exc_info=True)
+
         self._report_progress(
             "solutioning",
             28,
@@ -2462,6 +2479,50 @@ class SoftwareDevWorkflow:
                     messages.append(tail)
         return by_file
 
+    def _repair_build_manifest(self) -> bool:
+        """
+        Deterministically repair an invalid build manifest. True when repaired.
+
+        A broken manifest is invisible to the fix loop: the errors surface in
+        every source file, so issues are attributed to code that is fine while
+        the file actually at fault is never dispatched. Worse, a small model
+        reading "Could not find artifact … in central" pattern-matches it to a
+        network outage — observed live, where DevAgent began reasoning toward
+        deleting the dependency list. Both the diagnosis and the repair are
+        mechanical, so neither should cost a model call.
+
+        Defects that cannot be repaired by rule (arbitrarily malformed JSON,
+        an undefined property) are recorded so the reason is visible, then left
+        to the normal loop rather than guessed at.
+        """
+        try:
+            from ..utils.manifest_repair import repair_pom_parent_version, validate_manifests
+
+            defect = validate_manifests(self.workspace_path)
+            if not defect:
+                return False
+
+            if defect.repairable and defect.file == "pom.xml":
+                repairs = repair_pom_parent_version(self.workspace_path / "pom.xml")
+                if repairs:
+                    for line in repairs:
+                        logger.info("🔧 Auto-repaired build manifest — %s", line)
+                    self._report_progress(
+                        "validation", 95,
+                        f"Auto-repaired {defect.file}; re-validating...",
+                    )
+                    return True
+
+            logger.error(
+                "⛔ Build manifest %s is invalid and cannot be repaired by rule: %s",
+                defect.file, defect.description,
+            )
+            self._record_infrastructure_issue(f"{defect.file}: {defect.description}")
+            return False
+        except Exception as exc:  # noqa: BLE001 — must never fail a job
+            logger.debug("Manifest repair pass errored (non-fatal): %s", exc)
+            return False
+
     def _detect_infrastructure_failure(self, report: Dict[str, Any]) -> Optional[str]:
         """
         Return a reason string when a failing check is a platform problem.
@@ -3031,6 +3092,15 @@ class SoftwareDevWorkflow:
             if report.get("overall") == "PASS":
                 logger.info("✅ Post-build validation PASS (iteration %d)", iteration)
                 break
+
+            # A malformed build manifest breaks every source file at once, so
+            # the per-file dispatcher below rewrites correct code around a
+            # project the build tool cannot parse. Repair it deterministically
+            # and re-validate before dispatching anything: seen live as
+            # 48 → 67 → 52 → 56 issues over four iterations that never once
+            # touched the pom.xml actually at fault.
+            if self._repair_build_manifest():
+                continue
 
             # An infrastructure failure cannot be fixed by rewriting source, so
             # feeding it to DevAgent just burns the remaining iterations on code
