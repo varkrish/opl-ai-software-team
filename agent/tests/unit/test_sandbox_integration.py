@@ -270,6 +270,49 @@ def test_backend_surfaces_unreachable_service(monkeypatch, workspace):
     assert str(result).startswith("❌")
 
 
+# ── static HTML/CSS/JS smoke test ────────────────────────────────────────────
+#
+# _detect_project_type can return "static" (a bare index.html, no build step),
+# but CONTAINER_IMAGES/CONTAINER_COMMANDS had no entry for it, so every static
+# job run with SMOKE_TEST_BACKEND=sandbox_api failed smoke_test unconditionally
+# with "No container image configured for project type 'static'" — confirmed
+# live: two real jobs landed in validation_issues with exactly that message.
+
+def test_static_has_a_container_image():
+    assert "static" in test_tools.CONTAINER_IMAGES
+
+
+def test_static_has_a_container_command():
+    assert "static" in test_tools.CONTAINER_COMMANDS
+
+
+def test_static_sandbox_command_targets_the_upload_mount():
+    assert "cd /app" not in test_tools.SANDBOX_API_COMMANDS["static"]
+    assert "cd /workspace" in test_tools.SANDBOX_API_COMMANDS["static"]
+
+
+@pytest.fixture
+def static_workspace(tmp_path):
+    (tmp_path / "index.html").write_text("<html><body>hi</body></html>", encoding="utf-8")
+    return tmp_path
+
+
+def test_static_smoke_test_passes_when_entry_point_exists(mock_api, monkeypatch, static_workspace):
+    monkeypatch.setenv("SANDBOX_API_URL", "http://sandbox:18080")
+    mock_api(_Recorder(stdout=("static entry point present: index.html",)))
+    result = test_tools.SandboxAPIBackend().run(static_workspace, "static")
+    assert str(result).startswith("✅")
+
+
+def test_static_smoke_test_fails_on_missing_entry_point(mock_api, monkeypatch, static_workspace):
+    # The command itself must actually check for the file rather than always
+    # exiting 0 — simulate what `test -s index.html` reports when it's absent.
+    monkeypatch.setenv("SANDBOX_API_URL", "http://sandbox:18080")
+    mock_api(_Recorder(exit_code=1, stdout=()))
+    result = test_tools.SandboxAPIBackend().run(static_workspace, "static")
+    assert str(result).startswith("❌")
+
+
 # ── agent tool ───────────────────────────────────────────────────────────────
 
 def test_tool_absent_without_url(monkeypatch, workspace):

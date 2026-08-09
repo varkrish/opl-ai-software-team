@@ -288,6 +288,9 @@ CONTAINER_IMAGES = {
     "java_maven": "registry.access.redhat.com/ubi9/openjdk-21:latest",
     "java_gradle": "registry.access.redhat.com/ubi9/openjdk-21:latest",
     "go": "registry.access.redhat.com/ubi9/go-toolset:latest",
+    # Reuses the python image already pulled for "python" — matches
+    # preview_runner.PREVIEW_IMAGES, which does the same for the same reason.
+    "static": "registry.access.redhat.com/ubi9/python-311:latest",
 }
 
 CONTAINER_COMMANDS = {
@@ -296,6 +299,9 @@ CONTAINER_COMMANDS = {
     "java_maven": "cd /app && mvn compile -q 2>&1",
     "java_gradle": "cd /app && gradle build -x test -q 2>&1",
     "go": "cd /app && go build ./... 2>&1",
+    # No build step to run for static HTML/CSS/JS — the meaningful smoke test
+    # is confirming the deliverable actually exists and isn't an empty stub.
+    "static": "cd /app && test -s index.html && echo 'static entry point present: index.html'",
 }
 
 # Sandbox containers have a read-only root, so toolchains that default to
