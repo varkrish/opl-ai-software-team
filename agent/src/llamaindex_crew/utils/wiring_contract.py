@@ -290,19 +290,57 @@ def parse_emitted_wiring_patch(*texts: str) -> Optional[str]:
     return None
 
 
+# Models often emit the shell invocation instead of the filter body:
+#   jq '\n  .module = "expense_tracker" | ...\n'
+# The old normalizer prepended "." to anything not already starting with one,
+# turning `jq '` into `.jq '` — a guaranteed syntax error that cost job 1cec01ad
+# its structured contract and forced the lossy prose fallback.
+_JQ_SHELL_INVOCATION_RE = re.compile(
+    r"""^jq\b                                   # the binary
+        (?:\s+(?:-[A-Za-z]+|--[\w-]+(?:=\S+)?))*  # any flags (-c, --arg=…)
+        \s*(?P<q>['"])(?P<body>.*)(?P=q)\s*$    # the quoted program
+    """,
+    re.DOTALL | re.VERBOSE,
+)
+
+# A bare field assignment the leading "." repair was written for:
+#   module = "x"      packages["app"].files = [...]
+_JQ_BARE_ASSIGNMENT_RE = re.compile(r"^[A-Za-z_]\w*\s*(?:\[|\.|\s*=|\s*\|)")
+
+
 def _normalize_jq_patch_program(patch: str) -> str:
-    """Strip fences, dedent lines, and ensure the program is a jq filter starting with '.'"""
+    """Strip fences and shell wrappers; return "" when the text is not a jq filter.
+
+    Returning "" is deliberate. Prepending "." to arbitrary prose manufactures a
+    broken program out of an unusable one — it still spawns a jq subprocess and
+    logs a syntax error that reads like a model formatting bug rather than a
+    normalizer bug, which is exactly how this hid.
+    """
     program = patch.strip()
-    program = re.sub(r"^```(?:jq)?\s*", "", program, flags=re.IGNORECASE)
+    program = re.sub(r"^```(?:[A-Za-z]+)?\s*", "", program)
     program = re.sub(r"\s*```$", "", program)
+    program = program.strip()
+
+    # Unwrap before collapsing lines: the closing quote is usually on its own line.
+    shell = _JQ_SHELL_INVOCATION_RE.match(program)
+    if shell:
+        program = shell.group("body").strip()
+
     # LLMs often indent continuation lines; jq tolerates whitespace but keep it tidy
     program = "\n".join(line.strip() for line in program.splitlines() if line.strip())
     program = program.strip()
     if not program:
+        return ""
+    if program.startswith("."):
         return program
-    if not program.startswith("."):
-        program = "." + program
-    return program
+    if _JQ_BARE_ASSIGNMENT_RE.match(program):
+        return "." + program
+    logger.warning(
+        "wiring patch is not a jq filter (starts with %r); ignoring rather than "
+        "prepending '.' to it",
+        program[:40],
+    )
+    return ""
 
 
 def _coerce_wiring_symbol_entries(contract: dict) -> dict:
@@ -3581,15 +3619,15 @@ def _build_path_only_contract_from_specs(
     packages: Dict[str, Any] = {}
     for p in sorted(paths):
         parent_dir = str(Path(p).parent).replace("\\", "/")
-        if parent_dir and parent_dir != ".":
-            packages.setdefault(parent_dir, {"files": [], "owns": []})
-            if p not in packages[parent_dir]["files"]:
-                packages[parent_dir]["files"].append(p)
-
-    # Safety net: root-level files alone must still produce a non-empty packages map
-    # so locking does not skip write_wiring_contract.
-    if not packages and paths:
-        packages["."] = {"files": list(sorted(paths)), "owns": []}
+        # Root-level sources belong to the "." package. This used to be a
+        # last-resort branch taken only when no subdirectory package existed at
+        # all, so a single `tests/` directory — present in essentially every
+        # generated project — silently discarded the whole application. Job
+        # 1cec01ad declared main.py, models.py, schemas.py and service.py at the
+        # root and locked a contract containing nothing but `tests`.
+        packages.setdefault(parent_dir, {"files": [], "owns": []})
+        if p not in packages[parent_dir]["files"]:
+            packages[parent_dir]["files"].append(p)
 
     module_name = infer_module_from_specs(solution_spec, design_spec, packages, tech_stack=tech_stack, workspace=workspace)
 
