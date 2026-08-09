@@ -3166,22 +3166,12 @@ def _languages_present(workspace: Path) -> List[str]:
     job this system runs builds a backend and a frontend, so the single-language
     assumption is wrong for the common case, not the edge case.
 
-    Reuses the extension map tldr_tools already maintains rather than starting a
-    second one that can drift from it.
+    Delegates to tldr_tools, which owns the extension map and the skip-dir list,
+    rather than keeping a second copy here that can drift from it.
     """
-    from ..tools.tldr_tools import _EXT_LANG_MAP, _TLDR_VALID_LANGS
+    from ..tools.tldr_tools import detect_tldr_langs
 
-    found: set = set()
-    for path in Path(workspace).rglob("*"):
-        if not path.is_file():
-            continue
-        rel = str(path)
-        if "node_modules" in rel or "/." in rel or "venv" in rel:
-            continue
-        lang = _EXT_LANG_MAP.get(path.suffix)
-        if lang and lang in _TLDR_VALID_LANGS:
-            found.add(lang)
-    return sorted(found)
+    return detect_tldr_langs(Path(workspace))
 
 
 def collect_undefined_referenced_symbols(workspace: Path) -> List[Dict[str, str]]:

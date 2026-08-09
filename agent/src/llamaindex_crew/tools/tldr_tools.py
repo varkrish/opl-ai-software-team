@@ -183,6 +183,30 @@ def detect_tldr_lang(workspace_path: Path) -> Optional[str]:
     return None
 
 
+def detect_tldr_langs(workspace_path: Path) -> list[str]:
+    """Every tldr-known language with source files in *workspace_path*.
+
+    The plural of detect_tldr_lang, and the right question for anything that
+    walks the whole tree. A workspace here is routinely polyglot — every job
+    builds a backend and a frontend — and a single `tldr structure` call returns
+    only ONE language's files, so asking for the primary language silently drops
+    half of a full-stack project.
+    """
+    found: set[str] = set()
+    try:
+        for p in Path(workspace_path).rglob("*"):
+            if any(part in _SKIP_DIRS for part in p.parts):
+                continue
+            if not p.is_file():
+                continue
+            lang = _EXT_LANG_MAP.get(p.suffix.lower())
+            if lang and lang in _TLDR_VALID_LANGS:
+                found.add(lang)
+    except Exception as e:
+        logger.warning("detect_tldr_langs: extension scan failed: %s", e)
+    return sorted(found)
+
+
 def run_tldr(args: list[str]) -> str:
     """Run tldr with the given argument list and return truncated stdout or an error string."""
     # Fix 3: validate no empty/whitespace args before hitting the subprocess
@@ -666,34 +690,44 @@ def build_symbol_map(workspace_path: Path, max_chars: int = 3000) -> str:
     tldr_bin = _resolve_tldr_bin()
     if not tldr_bin:
         return ""
-    # Call subprocess directly — bypass run_tldr's output cap so large JSON is fully parsed.
-    try:
-        result = subprocess.run(
-            [tldr_bin, "structure", str(workspace_path), "--lang", "all"],
-            capture_output=True, text=True, timeout=_TLDR_TIMEOUT,
-        )
-        raw = result.stdout.strip()
-    except Exception:
-        return ""
-    if not raw:
-        return ""
-    try:
-        data = json.loads(raw)
-    except (json.JSONDecodeError, TypeError):
-        return ""
+
+    # One call per language present, NOT `--lang all`: tldr has no "all"
+    # language, so that argument made argparse exit 2 with empty stdout and this
+    # function returned "" on every call since it was written. Enumerating also
+    # fixes the coverage half of the problem — a single call returns one
+    # language's files, which drops the frontend from a full-stack workspace.
     lines: list[str] = []
-    for fentry in data.get("files") or []:
-        fp = (fentry.get("path") or "").replace("\\", "/")
-        if not fp:
+    seen_paths: set[str] = set()
+    for lang in detect_tldr_langs(workspace_path):
+        # Call subprocess directly — bypass run_tldr's output cap so large JSON is fully parsed.
+        try:
+            result = subprocess.run(
+                [tldr_bin, "structure", str(workspace_path), "--lang", lang],
+                capture_output=True, text=True, timeout=_TLDR_TIMEOUT,
+            )
+            raw = result.stdout.strip()
+        except Exception:
             continue
-        parts: list[str] = []
-        classes = fentry.get("classes") or []
-        fns = (fentry.get("functions") or []) + (fentry.get("methods") or [])
-        if classes:
-            parts.append("classes: " + ", ".join(classes[:8]))
-        if fns:
-            parts.append("fns: " + ", ".join(fns[:10]))
-        lines.append(fp + (" | " + " | ".join(parts) if parts else ""))
+        if not raw:
+            continue
+        try:
+            data = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        for fentry in data.get("files") or []:
+            fp = (fentry.get("path") or "").replace("\\", "/")
+            if not fp or fp in seen_paths:
+                continue
+            seen_paths.add(fp)
+            parts: list[str] = []
+            classes = fentry.get("classes") or []
+            fns = (fentry.get("functions") or []) + (fentry.get("methods") or [])
+            if classes:
+                parts.append("classes: " + ", ".join(classes[:8]))
+            if fns:
+                parts.append("fns: " + ", ".join(fns[:10]))
+            lines.append(fp + (" | " + " | ".join(parts) if parts else ""))
+
     text = "\n".join(lines)
     if len(text) > max_chars:
         text = text[:max_chars] + "\n... (truncated)"
