@@ -2278,6 +2278,55 @@ class SoftwareDevWorkflow:
                     messages.append(tail)
         return by_file
 
+    def _detect_infrastructure_failure(self, report: Dict[str, Any]) -> Optional[str]:
+        """
+        Return a reason string when a failing check is a platform problem.
+
+        Only build/run checks are considered — those are the ones that execute
+        inside the sandbox and can therefore fail for environmental reasons.
+        Static checks (completeness, wiring, manifests) run in-process and a
+        failure there is always about the generated code.
+        """
+        from ..utils.failure_classifier import classify_failure
+
+        checks = report.get("checks", {}) or {}
+        for check_name in ("smoke_test", "feature_test_bed"):
+            check = checks.get(check_name) or {}
+            if check.get("pass", True):
+                continue
+            verdict = classify_failure(str(check.get("result", "")))
+            if verdict.is_infrastructure:
+                return f"{check_name}: {verdict.reason}"
+        return None
+
+    def _record_infrastructure_issue(self, reason: str) -> None:
+        """
+        Persist the platform failure so the UI explains it as an environment
+        problem rather than leaving the user to infer it from a code-shaped
+        issue list. Best-effort: never let bookkeeping break the job.
+        """
+        if not self.job_db:
+            return
+        try:
+            import uuid as _uuid
+
+            self.job_db.create_validation_issue(
+                str(_uuid.uuid4()),
+                self.project_id,
+                "infrastructure",
+                "error",
+                None,
+                None,
+                (
+                    f"Build environment problem, not a code defect: {reason}. "
+                    "The fix loop was stopped because rewriting source cannot "
+                    "resolve this."
+                ),
+                fix_strategy="Resolve the platform issue, then re-run the job.",
+            )
+        except Exception as exc:  # noqa: BLE001 — bookkeeping must not fail a job
+            logger.debug("Could not record infrastructure issue: %s", exc)
+
     def _collect_fixable_issues(self, report: Dict[str, Any]) -> List[Dict[str, Any]]:
         """Distil validation report into a list of actionable file-level issues."""
         issues: List[Dict[str, Any]] = []
@@ -2683,6 +2732,20 @@ class SoftwareDevWorkflow:
 
             if report.get("overall") == "PASS":
                 logger.info("✅ Post-build validation PASS (iteration %d)", iteration)
+                break
+
+            # An infrastructure failure cannot be fixed by rewriting source, so
+            # feeding it to DevAgent just burns the remaining iterations on code
+            # that was never wrong. Stop and surface it as a platform problem.
+            infra = self._detect_infrastructure_failure(report)
+            if infra:
+                logger.error(
+                    "⛔ Post-build validation blocked by an INFRASTRUCTURE failure, "
+                    "not a code defect: %s. Stopping the fix loop after iteration %d — "
+                    "rewriting code cannot resolve this.",
+                    infra, iteration,
+                )
+                self._record_infrastructure_issue(infra)
                 break
 
             fixable = self._collect_fixable_issues(report)
