@@ -1785,6 +1785,87 @@ class SoftwareDevWorkflow:
             except Exception as e:
                 logger.warning("Failed to auto-fix pom.xml at %s: %s", pom_rel, e)
 
+        # ── Scaffold missing Java type files ──
+        # javac reports "cannot find symbol: class X" against the *referencing*
+        # file.  The fix loop can only edit existing files, so without a stub
+        # on disk the loop spins uselessly.  Scaffold a compilable stub so the
+        # per-file pass can then ask DevAgent to flesh it out.
+        java_types_to_scaffold: Dict[str, Dict[str, str]] = {}  # rel_path -> {type_name, symbol_line, location_line}
+        for issue in issues:
+            if issue.get("check") != "smoke_test":
+                continue
+            desc = issue.get("description", "")
+            # Use the issue's already-normalised workspace-relative file path
+            # for directory derivation, not the raw container-absolute path
+            # from the parser (e.g. /app/src/main/java/...).
+            ref_file = issue.get("file", "")
+            if not ref_file or not ref_file.endswith(".java"):
+                continue
+            for parsed in self._parse_javac_missing_symbols(desc):
+                type_name = parsed["type_name"]
+                ref_dir = Path(ref_file).parent
+                target_rel = str(ref_dir / f"{type_name}.java")
+                if target_rel not in java_types_to_scaffold:
+                    java_types_to_scaffold[target_rel] = parsed
+
+        for target_rel, parsed in java_types_to_scaffold.items():
+            target = self.workspace_path / target_rel
+            if target.exists():
+                continue
+            # Safety: only scaffold if the directory contains at least one
+            # existing .java file — validates that our path derivation landed
+            # inside a real Java source tree.
+            if not any(target.parent.glob("*.java")):
+                logger.debug(
+                    "Skipping Java stub for %s: no .java siblings in %s",
+                    target_rel, target.parent,
+                )
+                continue
+
+            # Derive the package from the directory structure.
+            # e.g. src/main/java/com/example/task -> com.example.task
+            rel_dir = str(target.parent.relative_to(self.workspace_path))
+            package = ""
+            for marker in ("src/main/java/", "src/test/java/"):
+                if marker in rel_dir + "/":
+                    package = rel_dir.split(marker, 1)[1].replace("/", ".")
+                    break
+            if not package:
+                # Fallback: use all directory components after 'java/'
+                parts = Path(rel_dir).parts
+                if "java" in parts:
+                    idx = parts.index("java")
+                    package = ".".join(parts[idx + 1:])
+
+            type_name = parsed["type_name"]
+            symbol_line = parsed.get("symbol_line", f"class {type_name}")
+            location_line = parsed.get("location_line", "")
+
+            stub_lines = []
+            if package:
+                stub_lines.append(f"package {package};")
+                stub_lines.append("")
+            stub_lines.append("// TODO: Implement this type. The compiler reported:")
+            stub_lines.append(f"//   symbol:   {symbol_line}")
+            if location_line:
+                stub_lines.append(f"//   location: {location_line}")
+            stub_lines.append("// This file was auto-scaffolded so the per-file fix loop can fill it in.")
+            stub_lines.append(f"public class {type_name} {{")
+            stub_lines.append("}")
+            stub_lines.append("")  # trailing newline
+
+            try:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text("\n".join(stub_lines), encoding="utf-8")
+                fixed.append({
+                    "check": "missing_java_type",
+                    "file": target_rel,
+                    "description": f"Scaffolded stub for missing type {type_name}",
+                })
+                logger.info("Auto-fixed: scaffolded %s for missing type %s", target_rel, type_name)
+            except Exception as e:
+                logger.warning("Failed to scaffold Java stub %s: %s", target_rel, e)
+
         return fixed
 
     def _find_nearest_package_json(self, file_path: str) -> str:
@@ -2219,6 +2300,77 @@ class SoftwareDevWorkflow:
         }
 
     @staticmethod
+    def _parse_javac_missing_symbols(output: str) -> List[Dict[str, str]]:
+        """Parse javac 'cannot find symbol' blocks for missing *type* names.
+
+        Returns a list of dicts with keys: type_name, referencing_file,
+        symbol_line, location_line.  Only type symbols (class/interface/enum)
+        are returned — method and variable symbols cannot be fixed by
+        scaffolding a new file.
+
+        Deduplicates by type_name so the same missing type referenced from
+        multiple call sites produces only one scaffold request.
+        """
+        import re as _re
+
+        results: List[Dict[str, str]] = []
+        seen_types: set = set()
+        lines = output.splitlines()
+
+        # Pattern: [ERROR] <path>.java:[line,col] cannot find symbol
+        error_re = _re.compile(
+            r"\[ERROR\]\s+(\S+\.java):\[\d+,\d+\]\s+cannot find symbol"
+        )
+        # The next two lines after the error carry the symbol and location:
+        #   symbol:   class TaskDto
+        #   location: class com.example.task.TaskService
+        symbol_re = _re.compile(r"^\s*symbol:\s+(.+)$")
+        location_re = _re.compile(r"^\s*location:\s+(.+)$")
+
+        i = 0
+        while i < len(lines):
+            m = error_re.search(lines[i])
+            if not m:
+                i += 1
+                continue
+
+            ref_file = m.group(1)
+            symbol_text = ""
+            location_text = ""
+
+            # Look ahead for the symbol and location lines (up to 2 lines)
+            for j in range(i + 1, min(i + 3, len(lines))):
+                sm = symbol_re.match(lines[j])
+                if sm:
+                    symbol_text = sm.group(1).strip()
+                    continue
+                lm = location_re.match(lines[j])
+                if lm:
+                    location_text = lm.group(1).strip()
+
+            # Only scaffold for type symbols, not methods or variables
+            type_match = _re.match(r"(?:class|interface|enum)\s+(\w+)", symbol_text)
+            if not type_match:
+                i += 1
+                continue
+
+            type_name = type_match.group(1)
+            if type_name in seen_types:
+                i += 1
+                continue
+            seen_types.add(type_name)
+
+            results.append({
+                "type_name": type_name,
+                "referencing_file": ref_file,
+                "symbol_line": symbol_text,
+                "location_line": location_text,
+            })
+            i += 1
+
+        return results
+
+    @staticmethod
     def _normalize_execution_path(raw: str, workspace: Path) -> Optional[str]:
         """Map a path from container error output to a workspace-relative path.
 
@@ -2253,7 +2405,11 @@ class SoftwareDevWorkflow:
         a runtime failure has nowhere to go.
         """
         by_file: Dict[str, List[str]] = {}
-        for line in output.splitlines():
+        lines = output.splitlines()
+        i = 0
+        while i < len(lines):
+            line = lines[i]
+            matched_rel = None
             for pattern in _EXECUTION_ERROR_PATTERNS:
                 match = pattern.search(line)
                 if not match:
@@ -2264,13 +2420,34 @@ class SoftwareDevWorkflow:
                     text = line.strip()
                     if text and text not in messages and len(messages) < 10:
                         messages.append(text)
+                    matched_rel = rel
                 break
+
+            # Capture indented continuation lines that follow a matched error.
+            # javac emits "  symbol:   class X" and "  location: class Y" on
+            # the two lines after "cannot find symbol" — the agent needs both
+            # to know WHICH symbol is missing, and the scaffolding parser needs
+            # them to create the right stub file.
+            if matched_rel is not None:
+                messages = by_file[matched_rel]
+                for j in range(i + 1, min(i + 3, len(lines))):
+                    cont = lines[j]
+                    # Continuation lines are indented (start with whitespace)
+                    # and contain structured info like "symbol:" or "location:"
+                    if cont and cont[0] in (' ', '\t'):
+                        text = cont.strip()
+                        if text and text not in messages and len(messages) < 12:
+                            messages.append(text)
+                    else:
+                        break
+
+            i += 1
 
         # Interpreters put the actual error on the last line, separate from the
         # frame that names the file — without it the agent sees a location but
         # not what went wrong.
         tail = next(
-            (ln.strip() for ln in reversed(output.splitlines()) if ln.strip()), ""
+            (ln.strip() for ln in reversed(lines) if ln.strip()), ""
         )
         if tail:
             for messages in by_file.values():
