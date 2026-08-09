@@ -753,6 +753,196 @@ class CodeCompletenessValidator:
 
     # ── Intra-file duplicate code block detection ─────────────────────────
 
+    # ── Client calls vs server routes ────────────────────────────────────────
+    #
+    # Every other check asks whether the code is *arranged* correctly. None asks
+    # whether the thing the project exists to do exists. Job 107b3d3e shipped a
+    # dashboard whose UI fetches five endpoints and whose backend defines none —
+    # 386 lines, thirty references to its data sources, one decorator, and that
+    # one was @app.on_event("startup"). completeness, entrypoint and
+    # wiring_reconciliation all passed.
+    #
+    # The client is a machine-readable specification: it names the URLs it
+    # depends on. Comparing them to the routes the server defines is static
+    # analysis over both sides — no api_contract.yaml, no model.
+
+    # Callees that mean "talk to the server". Real clients rarely call fetch
+    # directly: job 107b3d3e's frontend routes everything through its own
+    # useFetch hook, so a fetch-only pattern saw one call in five. Matching any
+    # identifier containing fetch/request/axios/api covers the idiom
+    # (useFetch, apiGet, httpRequest, client.get via axios) while leaving
+    # client-router navigation alone — navigate('/dashboard') and push('/x')
+    # contain none of those words.
+    _CLIENT_CALLEE = (
+        r"(?:\w*[Ff]etch\w*|\w*[Rr]equest\w*|axios(?:\.\w+)?|\w*[Aa]pi\w*"
+        r"|EventSource|WebSocket)"
+    )
+    # Same-origin calls only; an external API is not this server's job.
+    _CLIENT_CALL_RE = re.compile(
+        _CLIENT_CALLEE + r"""\s*\(\s*[`'"](?P<url>/[^`'"\s?#]*)""",
+    )
+    # `fetch(`${BASE}/overview`)` — the literal tail still names an endpoint.
+    # Only trusted in a file that also makes a plain same-origin call, which is
+    # the evidence that its base points at this project's own server rather
+    # than someone else's API.
+    _CLIENT_TEMPLATE_CALL_RE = re.compile(
+        _CLIENT_CALLEE + r"""\s*\(\s*`\$\{[^}]+\}(?P<url>/[^`\s?#]*)""",
+    )
+    _CLIENT_EXTENSIONS = frozenset({".js", ".jsx", ".ts", ".tsx", ".mjs", ".vue", ".svelte", ".html"})
+
+    # Route declarations, scoped by language. A single flat list applied to
+    # every file misreads client code as server code: the Express shape
+    # (`\w+.get("/...")`) matches Python's `client.get("/api/v1/jobs")` in a
+    # test, and inflated routes silently suppress real findings.
+    _SERVER_ROUTE_RES: Dict[str, List[re.Pattern]] = {
+        ".py": [
+            # FastAPI / Flask decorators — the @ is what makes it a declaration
+            # rather than a call.
+            re.compile(r"""@\w+\.(?:get|post|put|patch|delete|route)\s*\(\s*['"]([^'"]+)['"]"""),
+            # Django urls
+            re.compile(r"""\bpath\s*\(\s*['"]([^'"]+)['"]"""),
+        ],
+        ".js": [
+            re.compile(r"""\b\w+\.(?:get|post|put|patch|delete|all|use)\s*\(\s*['"`](/[^'"`]*)['"`]"""),
+        ],
+        ".java": [
+            re.compile(r"""@(?:Get|Post|Put|Patch|Delete|Request)Mapping\s*\(\s*(?:value\s*=\s*)?['"]([^'"]+)['"]"""),
+            re.compile(r"""@Path\s*\(\s*['"]([^'"]+)['"]"""),
+        ],
+        ".go": [
+            re.compile(r"""\b\w+\.(?:Get|Post|Put|Patch|Delete|HandleFunc|Handle)\s*\(\s*"(/[^"]*)\""""),
+        ],
+    }
+    # Suffixes that share a route dialect.
+    _ROUTE_DIALECT: Dict[str, str] = {
+        ".py": ".py",
+        ".js": ".js", ".ts": ".js", ".mjs": ".js", ".jsx": ".js", ".tsx": ".js",
+        ".java": ".java", ".kt": ".java",
+        ".go": ".go",
+    }
+    # Enough to say a server exists here. Without one, every client call belongs
+    # to somebody else's API and this check has nothing to say.
+    _SERVER_MARKER_RE = re.compile(
+        r"(?:\bFastAPI\b|\bFlask\b|\bAPIRouter\b|\bBlueprint\b"
+        r"|express\(\)|express\.Router\(|require\(['\"]express|from ['\"]express"
+        r"|@RestController|@SpringBootApplication|@RequestMapping|@Path\b"
+        r"|chi\.NewRouter|gin\.(?:Default|New)|http\.ListenAndServe|mux\.NewRouter)"
+    )
+    _SERVER_EXTENSIONS = frozenset({".py", ".js", ".ts", ".java", ".go", ".rb", ".php", ".cs"})
+
+    @staticmethod
+    def _normalise_route(path: str) -> str:
+        """Collapse path parameters and trailing slashes so both sides compare.
+
+        A client interpolates ``/jobs/${id}``; the server declares
+        ``/jobs/{job_id}`` or ``/jobs/:id``. Same endpoint, three spellings.
+        """
+        norm = path.strip()
+        norm = re.sub(r"\{[^}]*\}", "{}", norm)          # {job_id}
+        norm = re.sub(r":\w+", "{}", norm)                 # :id
+        norm = re.sub(r"\$\{[^}]*\}", "{}", norm)        # ${id}
+        norm = re.sub(r"<[^>]*>", "{}", norm)             # <int:pk>
+        norm = re.sub(r"/+", "/", norm)
+        if len(norm) > 1:
+            norm = norm.rstrip("/")
+        return norm
+
+    @classmethod
+    def validate_client_server_contract(cls, workspace_path: Path) -> Dict[str, Any]:
+        """Report same-origin client calls no server route can answer.
+
+        Returns ``{"valid": bool, "unreachable_calls": [{"url","files"}],
+        "routes": int, "skipped": bool}``.
+
+        Biased hard toward false negatives: a wrongly reported endpoint sends the
+        fix loop to invent routes that should not exist. Hence same-origin only,
+        suffix matching so a prefix-mounted router still counts, parameters
+        normalised, tests excluded, and silence when no server is present.
+        """
+        ws = Path(workspace_path)
+        routes: Set[str] = set()
+        server_present = False
+        calls: Dict[str, Set[str]] = {}
+
+        for src in sorted(ws.rglob("*")):
+            if not src.is_file():
+                continue
+            suffix = src.suffix.lower()
+            if suffix not in cls._CLIENT_EXTENSIONS and suffix not in cls._SERVER_EXTENSIONS:
+                continue
+            try:
+                rel = str(src.relative_to(ws))
+            except ValueError:
+                continue
+            if any(part in cls._VENDOR_PARTS for part in Path(rel).parts):
+                continue
+            try:
+                content = src.read_text(encoding="utf-8", errors="replace")
+            except Exception:  # noqa: BLE001 — a check must never fail a job
+                continue
+
+            # Routes are only read from files that declare a server. Without
+            # this gate the Express pattern (`\w+.get("/...")`) matches a
+            # client's own `axios.get("/api/v1/jobs")`, so a frontend answers
+            # its own calls and the check goes quiet. Job 107b3d3e reported
+            # "7 routes found" against a backend with none until this was added.
+            # Routes come only from files that declare a server, in that
+            # language's dialect, and never from tests — a test client's
+            # `client.get("/api/v1/jobs")` is a call, not a declaration.
+            if (
+                suffix in cls._SERVER_EXTENSIONS
+                and not cls._is_test_path(rel)
+                and cls._SERVER_MARKER_RE.search(content)
+            ):
+                server_present = True
+                dialect = cls._ROUTE_DIALECT.get(suffix)
+                for pattern in cls._SERVER_ROUTE_RES.get(dialect, []):
+                    for match in pattern.finditer(content):
+                        route = match.group(1)
+                        if route.startswith("/"):
+                            routes.add(cls._normalise_route(route))
+
+            # A test mocking fetch is not a dependency on a real endpoint.
+            if suffix in cls._CLIENT_EXTENSIONS and not cls._is_test_path(rel):
+                literal = [
+                    m.group("url") for m in cls._CLIENT_CALL_RE.finditer(content)
+                    if "${" not in m.group("url") and "{{" not in m.group("url")
+                ]
+                for url in literal:
+                    calls.setdefault(cls._normalise_route(url), set()).add(rel)
+                # Template-based calls count only once this file has shown it
+                # addresses our own server with an absolute path. Without that
+                # evidence `${BASE}/x` could be any third-party API, and a
+                # wrongly reported endpoint sends the fix loop inventing routes.
+                if literal:
+                    for m in cls._CLIENT_TEMPLATE_CALL_RE.finditer(content):
+                        calls.setdefault(
+                            cls._normalise_route(m.group("url")), set()
+                        ).add(rel)
+
+        if not server_present:
+            return {"valid": True, "unreachable_calls": [], "routes": 0, "skipped": True}
+
+        unreachable = []
+        for url in sorted(calls):
+            # Suffix match: a router mounted under a prefix declares only the
+            # tail, so /overview legitimately answers /api/v1/overview.
+            if any(url == route or url.endswith(route) for route in routes if route != "/"):
+                continue
+            unreachable.append({"url": url, "files": sorted(calls[url])})
+
+        return {
+            "valid": not unreachable,
+            "unreachable_calls": unreachable,
+            "routes": len(routes),
+            "skipped": False,
+        }
+
+    _VENDOR_PARTS = frozenset({
+        "node_modules", ".venv", "venv", "dist", "build", "target",
+        "__pycache__", ".git", "vendor", "site-packages",
+    })
+
     @classmethod
     def validate_duplicate_code_blocks(
         cls, workspace_path: Path, min_block_lines: int = 5,

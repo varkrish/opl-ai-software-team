@@ -2261,6 +2261,21 @@ class SoftwareDevWorkflow:
             "duplicates": dup_code_result.get("duplicates", []),
         }
 
+        # 13b. Client calls vs server routes. Every other check asks whether the
+        # code is arranged correctly; this one asks whether the endpoints the UI
+        # depends on exist. Job 107b3d3e passed completeness, entrypoint and
+        # wiring_reconciliation while its dashboard called /api/v1/stream and
+        # /api/v1/infrastructure against a server offering /events and /infra.
+        contract_result = CodeCompletenessValidator.validate_client_server_contract(
+            self.workspace_path
+        )
+        report["checks"]["client_server_contract"] = {
+            "pass": contract_result["valid"],
+            "unreachable_calls": contract_result.get("unreachable_calls", []),
+            "routes": contract_result.get("routes", 0),
+            "skipped": contract_result.get("skipped", False),
+        }
+
         # 14. Maven pom.xml completeness (Java imports vs declared deps)
         pom_result = CodeCompletenessValidator.validate_pom_xml_completeness(
             self.workspace_path
@@ -2767,6 +2782,24 @@ class SoftwareDevWorkflow:
                     "file": affected_file,
                     "check": "package_json_completeness",
                     "description": f"Package '{pkg_name}' imported but not declared in any package.json",
+                })
+
+        for call in report.get("checks", {}).get("client_server_contract", {}).get(
+            "unreachable_calls", []
+        ):
+            # Attributed to the calling file because that is the side we can
+            # point at with certainty; the fix may equally be to add the route,
+            # and the description says so rather than presuming.
+            for caller in (call.get("files") or [""])[:1]:
+                issues.append({
+                    "file": caller,
+                    "check": "client_server_contract",
+                    "description": (
+                        f"The client requests '{call.get('url', '')}' but no server "
+                        f"route answers it. Either add the endpoint on the server or "
+                        f"correct the URL here to match an existing route — do not "
+                        f"remove the call unless the feature is genuinely dropped."
+                    ),
                 })
 
         for dup_block in report.get("checks", {}).get("duplicate_code_blocks", {}).get("duplicates", []):
