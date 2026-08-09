@@ -2890,6 +2890,390 @@ def import_matches_module_root(imp: str, module_root: str) -> bool:
     return False
 
 
+
+
+def _module_to_path_stem(module: str) -> str:
+    """Normalise an import module string to a slash-separated path stem.
+
+    tldr strips the leading dots from Python relative imports, so ``.helpers``
+    and ``..helpers`` both arrive as ``helpers`` and the depth is unrecoverable.
+    TypeScript keeps its ``./`` and ``../`` prefixes, which carry no more
+    information once stripped. Either way the stem is all we get, and resolution
+    downstream has to tolerate it matching in more than one place.
+    """
+    stem = (module or "").strip().replace("\\", "/")
+    while stem.startswith("./") or stem.startswith("../"):
+        stem = stem.split("/", 1)[1] if "/" in stem else ""
+    stem = stem.lstrip("./")
+    return stem.replace(".", "/").strip("/")
+
+
+# Per-file `tldr imports` reads are one subprocess each; generated projects run
+# well under this, and the cap keeps a large or unexpected workspace bounded.
+_MAX_IMPORT_FALLBACK_FILES = 80
+
+
+def _language_for_suffix(suffix: str) -> str:
+    """Language for a file extension, from the map tldr_tools already maintains."""
+    try:
+        from ..tools.tldr_tools import _EXT_LANG_MAP
+
+        return _EXT_LANG_MAP.get(suffix, "")
+    except Exception:
+        return ""
+
+
+def _defined_symbol_name(raw) -> str:
+    """The bare symbol name from an extracted definition.
+
+    Extractors leak modifier keywords into the name, and which ones depends on
+    the tool version rather than the language: tldr 1.2.2 reports TypeScript's
+    ``export function makeTask`` as ``"export makeTask"`` and Java's method as
+    ``"private final public create"``; 1.5.2 reports both cleanly. Taking the
+    last whitespace-separated token recovers the name in every one of those
+    cases without enumerating keywords, so it does not need updating when a new
+    modifier or a new language shows up.
+
+    This matters because a mangled name never matches an import and would be
+    reported as an undefined symbol that is in fact defined right there.
+    """
+    text = str(raw or "").strip()
+    return text.rsplit(None, 1)[-1] if text else ""
+
+
+def _resolve_module_candidates(module: str, known_paths: set[str]) -> list[str]:
+    """Workspace files an import module could refer to. Empty means third-party.
+
+    Two rules, both read off the workspace's own file list rather than a
+    per-language table:
+
+      module names a FILE       ``schemas``        -> ``app/schemas.py``
+      module names a DIRECTORY  ``internal/store`` -> every file directly in it
+
+    Between them they cover Python's ``__init__.py``, TypeScript's ``index.ts``,
+    Rust's ``mod.rs`` and Go's package directories as the same case, so a
+    language nobody anticipated resolves without a code change.
+
+    Returns every plausible match rather than guessing one, because the dot
+    stripping above makes an exact answer impossible. Callers must treat a
+    multi-candidate result as "missing only if missing from all of them".
+    """
+    stem = _module_to_path_stem(module)
+    if not stem:
+        return []
+
+    matches: list[str] = []
+    extensions = {
+        "." + p.rsplit(".", 1)[1] for p in known_paths if "." in p.rsplit("/", 1)[-1]
+    }
+    for path in known_paths:
+        # module -> file
+        if any(
+            path == stem + ext or path.endswith("/" + stem + ext) for ext in extensions
+        ):
+            matches.append(path)
+            continue
+        # module -> directory: every file directly inside it is part of it
+        parent = path.rsplit("/", 1)[0] if "/" in path else ""
+        if parent and (parent == stem or parent.endswith("/" + stem)):
+            matches.append(path)
+    return sorted(set(matches))
+
+
+def _structure_symbol_issues(
+    structure_data: Optional[dict],
+    imports_by_path: Optional[Dict[str, list]] = None,
+) -> List[Dict[str, str]]:
+    """Find symbols a file imports that the target file never defines.
+
+    The third reconciliation direction. The other two ask whether the contract
+    was satisfied; this asks whether it was sufficient. Nothing declared
+    Status.java, so nothing was reported missing, and the check passed while the
+    build was broken.
+
+    Operates purely on a ``tldr structure`` payload — no disk access, no model.
+    Detection is 100% static; the model only writes the file it is told to.
+
+    Language-agnostic by construction: nothing here names a language. A file is
+    checked when the payload actually carries the evidence to check it — named
+    imports on one side, a target that parsed to at least one symbol on the
+    other. Where an extractor is weak the evidence is simply absent and the
+    check goes quiet on its own, so tldr's empty Java imports produce no
+    findings without Java being named anywhere, and a language whose support
+    improves later starts working with no code change.
+
+    False positives are the dangerous direction: a missed symbol costs one
+    iteration, a phantom one sends the fix loop editing correct code. So an
+    unresolved module, an unparsed target, a star import and a re-exported name
+    all resolve to silence.
+    """
+    if not isinstance(structure_data, dict):
+        return []
+
+    files = structure_data.get("files")
+    if not isinstance(files, list):
+        return []
+
+    # Partition by language before diffing. A workspace here is routinely
+    # polyglot — every job builds a backend and a frontend — and resolution must
+    # stay inside one language, or a Python `from .models import Task` resolves
+    # to frontend/src/models.ts and reports a phantom against it. The tag comes
+    # from tldr's own output, so no language is named here.
+    # Tolerate both payload schemas: tldr <=1.2.x reports a single
+    # ``language``, 1.5.x reports a ``languages`` list and returns every
+    # language's files from one call, tagging none of them individually. So fall
+    # back to the file's own extension, which is available in every version.
+    default_language = str(structure_data.get("language") or "")
+    if not default_language and isinstance(structure_data.get("languages"), list):
+        langs = structure_data["languages"]
+        default_language = str(langs[0]) if len(langs) == 1 else ""
+
+    groups: Dict[str, list] = {}
+    for entry in files:
+        if not isinstance(entry, dict):
+            continue
+        lang = str(entry.get("language") or "")
+        if not lang:
+            suffix = Path(str(entry.get("path") or "")).suffix
+            lang = _language_for_suffix(suffix) or default_language
+        groups.setdefault(lang, []).append(entry)
+
+    issues: List[Dict[str, str]] = []
+    seen: set = set()
+    severity = os.getenv("WIRING_UNDEFINED_SYMBOL_SEVERITY", "warning").strip() or "warning"
+
+    for group in groups.values():
+        issues.extend(
+            _symbol_issues_for_language(group, severity, seen, imports_by_path or {})
+        )
+    return issues
+
+
+def _symbol_issues_for_language(
+    files: list, severity: str, seen: set, imports_by_path: Dict[str, list],
+) -> List[Dict[str, str]]:
+    """Run the referenced-vs-defined diff within one language group.
+
+    ``imports_by_path`` supplies references for files whose structure entry has
+    no named imports — the TypeScript case, where only the per-file ``tldr
+    imports`` command parses ES6 named imports correctly. Those references are
+    reliable in every tldr version, but pairing them against definitions the
+    extractor cannot parse reports every name as undefined, so that fallback is
+    used only when the group demonstrates it can parse definitions at all.
+    """
+    # Evidence that definitions are parseable here: at least one file with a
+    # class. tldr 1.2.2 returns classes:[] for every TypeScript file; 1.5.2
+    # returns them. A payload property, not a version check or a language name.
+    definitions_are_parseable = any(
+        isinstance(e, dict) and (e.get("classes") or []) for e in files
+    )
+    # Symbols each file makes importable: what it defines, plus what it
+    # re-exports. Treating imported names as available handles package __init__
+    # facades and chains through several hops without recursion.
+    defined: Dict[str, set] = {}
+    entries: List[tuple] = []
+    for entry in files:
+        if not isinstance(entry, dict):
+            continue
+        path = normalize_workspace_path(str(entry.get("path") or ""))
+        if not path:
+            continue
+        # `methods` appears in newer tldr payloads and is absent in older ones.
+        names = {
+            _defined_symbol_name(n) for n in
+            (entry.get("classes") or [])
+            + (entry.get("functions") or [])
+            + (entry.get("methods") or [])
+            if n
+        }
+        names.discard("")
+        imports = entry.get("imports")
+        imports = imports if isinstance(imports, list) else []
+
+        # Structure parsed no NAMED imports for this file. Either it genuinely
+        # has none, or the extractor could not read them — for TypeScript it
+        # returns the whole "{ Foo, Bar } from './models'" clause as the module
+        # with names:[]. The per-file `tldr imports` command reads those
+        # correctly in every version, so prefer it when structure came up empty
+        # and the group's definitions are known to be parseable.
+        if definitions_are_parseable and not any(
+            isinstance(i, dict) and (i.get("names") or []) for i in imports
+        ):
+            fallback = imports_by_path.get(path)
+            if isinstance(fallback, list) and fallback:
+                imports = fallback
+
+        for imp in imports:
+            if not isinstance(imp, dict):
+                continue
+            for n in imp.get("names") or []:
+                if n and n != "*":
+                    names.add(str(n))
+        defined[path] = names
+        entries.append((path, imports))
+
+    known_paths = set(defined)
+    issues: List[Dict[str, str]] = []
+
+    for path, imports in entries:
+        if path.startswith("tests/") or path.startswith("test/") or path.startswith("."):
+            continue
+        for imp in imports:
+            if not isinstance(imp, dict):
+                continue
+            names = [str(n) for n in (imp.get("names") or []) if n]
+            if not names or "*" in names:
+                continue
+            targets = _resolve_module_candidates(
+                str(imp.get("module") or ""), known_paths,
+            )
+            # Unresolved: a third-party or stdlib module, not ours to check.
+            targets = [t for t in targets if t != path and defined.get(t)]
+            if not targets:
+                continue
+            available = set().union(*(defined[t] for t in targets))
+            for name in names:
+                if name in available:
+                    continue
+                # Report against the file that must CHANGE — the symbol has to be
+                # defined at the target, not at the file that referenced it.
+                target = targets[0]
+                key = (target, name)
+                if key in seen:
+                    continue
+                seen.add(key)
+                issues.append({
+                    "file": target,
+                    "symbol": name,
+                    "description": (
+                        f"undefined symbol: '{path}' imports '{name}' from "
+                        f"'{imp.get('module')}', but '{target}' does not define or "
+                        f"re-export it"
+                    ),
+                    "type": "wiring_reconciliation",
+                    "severity": severity,
+                })
+    return issues
+
+
+def _languages_present(workspace: Path) -> List[str]:
+    """Every tldr-known language with source files in *workspace*.
+
+    ``tldr structure`` without --lang auto-detects and returns exactly ONE
+    language's files, which silently halves the coverage of a full-stack
+    project: verified against tldr 1.2.2 on a FastAPI + TypeScript tree, where
+    the call returned the two Python files and neither TypeScript file. Every
+    job this system runs builds a backend and a frontend, so the single-language
+    assumption is wrong for the common case, not the edge case.
+
+    Reuses the extension map tldr_tools already maintains rather than starting a
+    second one that can drift from it.
+    """
+    from ..tools.tldr_tools import _EXT_LANG_MAP, _TLDR_VALID_LANGS
+
+    found: set = set()
+    for path in Path(workspace).rglob("*"):
+        if not path.is_file():
+            continue
+        rel = str(path)
+        if "node_modules" in rel or "/." in rel or "venv" in rel:
+            continue
+        lang = _EXT_LANG_MAP.get(path.suffix)
+        if lang and lang in _TLDR_VALID_LANGS:
+            found.add(lang)
+    return sorted(found)
+
+
+def collect_undefined_referenced_symbols(workspace: Path) -> List[Dict[str, str]]:
+    """Referenced-but-undefined symbols across every language in a workspace.
+
+    Returns no issues when tldr is unavailable or nothing parses — a workspace
+    we cannot read is not evidence of a defect.
+    """
+    try:
+        from ..tools.tldr_tools import _resolve_tldr_bin
+
+        tldr_bin = _resolve_tldr_bin()
+        if not tldr_bin:
+            return []
+        import subprocess
+
+        merged: List[dict] = []
+        seen_paths: set = set()
+        for lang in _languages_present(workspace):
+            try:
+                result = subprocess.run(
+                    [tldr_bin, "structure", str(workspace), "--lang", lang],
+                    capture_output=True, text=True, timeout=60,
+                )
+                raw = (result.stdout or "").strip()
+                if not raw:
+                    continue
+                for entry in json.loads(raw).get("files") or []:
+                    if not isinstance(entry, dict):
+                        continue
+                    # Dedupe by path: newer tldr can return every language's
+                    # files from one call, so the per-language loop would
+                    # otherwise stack duplicates of the same file.
+                    path = str(entry.get("path") or "")
+                    if path in seen_paths:
+                        continue
+                    seen_paths.add(path)
+                    # Deliberately NOT tagged with the language it was requested
+                    # under: the diff derives that from the file's extension,
+                    # which stays correct even if a tldr version ignores --lang
+                    # and returns the whole tree under the first language asked.
+                    merged.append(entry)
+            except Exception as exc:
+                logger.debug("Symbol diff: %s structure failed: %s", lang, exc)
+
+        if not merged:
+            return []
+
+        # Files whose structure entry carries no named imports get a per-file
+        # `tldr imports` read, which parses ES6 named imports that structure
+        # mangles. Bounded so a large workspace cannot spawn a subprocess storm;
+        # what is dropped is logged rather than silently truncated.
+        needs_imports = [
+            str(e.get("path") or "") for e in merged
+            if not any(
+                isinstance(i, dict) and (i.get("names") or [])
+                for i in (e.get("imports") or [])
+            )
+        ]
+        needs_imports = [p for p in needs_imports if p]
+        if len(needs_imports) > _MAX_IMPORT_FALLBACK_FILES:
+            logger.info(
+                "Symbol diff: reading imports for %d of %d files (cap %d); "
+                "the remainder keep structure-only references",
+                _MAX_IMPORT_FALLBACK_FILES, len(needs_imports),
+                _MAX_IMPORT_FALLBACK_FILES,
+            )
+            needs_imports = needs_imports[:_MAX_IMPORT_FALLBACK_FILES]
+
+        imports_by_path: Dict[str, list] = {}
+        for rel in needs_imports:
+            try:
+                result = subprocess.run(
+                    [tldr_bin, "imports", rel],
+                    capture_output=True, text=True, timeout=30,
+                    cwd=str(workspace),
+                )
+                raw = (result.stdout or "").strip()
+                if not raw:
+                    continue
+                parsed = json.loads(raw)
+                if isinstance(parsed, list) and parsed:
+                    imports_by_path[normalize_workspace_path(rel)] = parsed
+            except Exception as exc:
+                logger.debug("Symbol diff: imports read failed for %s: %s", rel, exc)
+
+        return _structure_symbol_issues({"files": merged}, imports_by_path)
+    except Exception as exc:
+        logger.debug("Undefined-symbol diff skipped: %s", exc)
+        return []
+
+
 def _directory_has_source_files(directory: Path) -> bool:
     for p in directory.rglob("*"):
         if p.is_file() and p.suffix in _SOURCE_SUFFIXES:
@@ -2931,7 +3315,14 @@ def reconcile_workspace_against_contract(
     contract: dict,
     workspace: Path,
 ) -> List[Dict[str, str]]:
-    """Language-neutral wiring drift checks; returns actionable issue dicts."""
+    """Language-neutral wiring drift checks; returns actionable issue dicts.
+
+    Three directions. The first two — declared-but-missing and on-disk-but-
+    undeclared — plus the import-prefix check all ask whether the contract was
+    SATISFIED. The third asks whether it was SUFFICIENT: a symbol nothing ever
+    declared cannot be reported missing, which is how a job passed
+    reconciliation with a build that could not compile.
+    """
     issues: List[Dict[str, str]] = []
     if not contract:
         return issues
@@ -2990,6 +3381,10 @@ def reconcile_workspace_against_contract(
                         "severity": "error",
                     })
                     break
+
+    # Third direction: referenced AND NOT defined. Independent of the contract —
+    # it reads the code itself, so it catches what the contract never mentioned.
+    issues.extend(collect_undefined_referenced_symbols(workspace))
 
     return issues
 
