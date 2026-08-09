@@ -214,6 +214,168 @@ def _check_pyproject(workspace: Path) -> Optional[ManifestDefect]:
     return None
 
 
+# ── unresolvable version pins ───────────────────────────────────────────────
+#
+# A test command like ``pip install -r requirements.txt && pytest tests`` fails
+# closed: when the install fails, ``&&`` short-circuits and no test ever runs.
+# The runner exits non-zero, ``_run_feature_test_bed_loop`` reads that as "tests
+# failed", and DevAgent is sent to patch test code for three rounds over a
+# one-line version pin. Job 107b3d3e spent its whole test budget that way.
+#
+# Detection is unambiguous, and pip prints the resolvable versions in the same
+# message, so the repair is a lookup in the error text rather than a judgement.
+
+_PIP_UNRESOLVABLE_RE = re.compile(
+    r"Could not find a version that satisfies the requirement\s+"
+    r"(?P<pkg>[A-Za-z0-9._-]+)\s*(?:\[[^\]]*\])?\s*"
+    r"(?:==|>=|<=|~=|!=)?\s*(?P<req>[A-Za-z0-9._*+-]+)?"
+    r"[^\n]*?\(from versions:\s*(?P<avail>[^)]*)\)",
+)
+# npm names the package but never lists candidates.
+_NPM_NOTARGET_RE = re.compile(
+    r"No matching version found for\s+(?P<pkg>@?[A-Za-z0-9._/-]+?)@(?P<req>[^\s.]+[^\s]*?)\.?\s*$",
+    re.MULTILINE,
+)
+
+_PRERELEASE_RE = re.compile(r"[A-Za-z]")
+
+
+@dataclass
+class DependencyDefect:
+    """A pinned dependency version that the registry does not offer."""
+
+    package: str
+    requested: str
+    available: List[str]
+    ecosystem: str
+    # False when the registry offered no alternatives — which usually means the
+    # index was unreachable, not that the pin is wrong. Guessing there would
+    # rewrite a correct manifest during a network outage.
+    repairable: bool
+
+
+def _version_key(version: str) -> tuple:
+    parts = []
+    for chunk in re.split(r"[._-]", version):
+        parts.append((0, int(chunk)) if chunk.isdigit() else (1, 0))
+    return tuple(parts)
+
+
+def _newest_stable(versions: List[str]) -> Optional[str]:
+    stable = [v for v in versions if not _PRERELEASE_RE.search(v)]
+    pool = stable or []
+    if not pool:
+        return None
+    return max(pool, key=_version_key)
+
+
+def detect_dependency_resolution_failure(output: Optional[str]) -> Optional[DependencyDefect]:
+    """Identify an unresolvable version pin in runner output, or None.
+
+    Deliberately narrow. A genuine assertion failure, an empty log, or a
+    network outage must all fall through to the normal paths — this only fires
+    on a registry saying, in so many words, that the requested version does not
+    exist.
+    """
+    if not output or not isinstance(output, str):
+        return None
+
+    match = _PIP_UNRESOLVABLE_RE.search(output)
+    if match:
+        raw = (match.group("avail") or "").strip()
+        # Tokens can be truncated when the log is clipped mid-list; keep only
+        # well-formed versions so a partial "0.3" tail cannot be selected.
+        available = [
+            tok.strip() for tok in raw.split(",")
+            if re.fullmatch(r"[0-9]+(?:\.[0-9]+)+[A-Za-z0-9.]*", tok.strip())
+        ]
+        return DependencyDefect(
+            package=match.group("pkg"),
+            requested=(match.group("req") or "").strip(),
+            available=available,
+            ecosystem="pip",
+            repairable=bool(available and _newest_stable(available)),
+        )
+
+    npm = _NPM_NOTARGET_RE.search(output)
+    if npm:
+        return DependencyDefect(
+            package=npm.group("pkg"),
+            requested=npm.group("req"),
+            available=[],
+            ecosystem="npm",
+            repairable=False,
+        )
+    return None
+
+
+def repair_unresolvable_pins(workspace: Path, output: Optional[str]) -> List[str]:
+    """Rewrite an impossible pin to the newest version the registry offers.
+
+    Returns one description per repair, empty when there is nothing to do.
+    Idempotent: a manifest already holding the chosen version reports no repair,
+    so the caller can retry the run without spinning.
+
+    Never raises — a repair gap must cost a retry, never a job.
+    """
+    defect = detect_dependency_resolution_failure(output)
+    if not defect or not defect.repairable or defect.ecosystem != "pip":
+        return []
+
+    target = _newest_stable(defect.available)
+    if not target:
+        return []
+
+    workspace = Path(workspace)
+    try:
+        candidates = sorted(workspace.rglob("requirements*.txt"))
+    except OSError:
+        return []
+
+    repairs: List[str] = []
+    # Match the package at line start, tolerating extras and any comparator.
+    pin_re = re.compile(
+        rf"^(?P<name>{re.escape(defect.package)}(?:\[[^\]]*\])?)\s*"
+        rf"(?:==|>=|<=|~=|!=)\s*(?P<ver>[^\s;#]+)",
+        re.IGNORECASE | re.MULTILINE,
+    )
+
+    for req_file in candidates:
+        if any(part in {"node_modules", ".venv", "venv", ".git"} for part in req_file.parts):
+            continue
+        try:
+            text = req_file.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+
+        found = pin_re.search(text)
+        if not found or found.group("ver") == target:
+            continue
+
+        new_text = pin_re.sub(lambda m: f"{m.group('name')}=={target}", text, count=1)
+        try:
+            req_file.write_text(new_text, encoding="utf-8")
+        except OSError as exc:
+            logger.warning("Could not write repaired %s: %s", req_file.name, exc)
+            continue
+
+        rel = req_file.name
+        try:
+            rel = str(req_file.relative_to(workspace))
+        except ValueError:
+            pass
+        repairs.append(
+            f"{rel}: '{defect.package}=={found.group('ver')}' does not exist on the "
+            f"index (offered: {', '.join(defect.available[:6])}). Pinned "
+            f"'{defect.package}=={target}'. The install failed before any test "
+            f"ran, so this was not a test failure."
+        )
+
+    for repair in repairs:
+        logger.warning("[deps] %s", repair)
+    return repairs
+
+
 def validate_manifests(workspace: Path) -> Optional[ManifestDefect]:
     """
     Return the first manifest defect found, or None.

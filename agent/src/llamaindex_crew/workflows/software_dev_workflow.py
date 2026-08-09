@@ -4473,10 +4473,78 @@ class SoftwareDevWorkflow:
             )
         return "\n".join(lines)
 
+    def _handle_blocked_test_run(
+        self,
+        backend_result: Dict[str, Any],
+        frontend_result: Dict[str, Any],
+    ) -> bool:
+        """Deal with a run that never reached the tests. Returns True to retry.
+
+        Sets ``_dependency_blocked_test_run`` when the blockage is real but not
+        repairable here, so the caller stops instead of spending DevAgent passes
+        on test code that was never executed.
+        """
+        from ..utils.manifest_repair import (
+            detect_dependency_resolution_failure,
+            repair_unresolvable_pins,
+        )
+
+        self._dependency_blocked_test_run = False
+        parts: List[str] = []
+        for result in (backend_result, frontend_result):
+            parts.append(str(result.get("raw_output") or ""))
+            for failure in result.get("failures") or []:
+                parts.append(str(failure.get("error") or ""))
+        output = "\n".join(p for p in parts if p)
+
+        try:
+            repairs = repair_unresolvable_pins(self.workspace_path, output)
+        except Exception as exc:  # noqa: BLE001 — never fail a job on a repair
+            logger.debug("Dependency pin repair errored: %s", exc)
+            return False
+
+        if repairs:
+            for repair in repairs:
+                logger.warning("[test-bed] %s", repair)
+            return True
+
+        defect = detect_dependency_resolution_failure(output)
+        if not defect:
+            return False
+
+        # Named but unrepairable — usually npm, which reports the bad target
+        # without listing what it would accept. Inventing one would rewrite a
+        # manifest on a guess, so escalate with the real cause instead.
+        self._dependency_blocked_test_run = True
+        description = (
+            f"Tests never ran: the {defect.ecosystem} install failed because "
+            f"'{defect.package}{('==' + defect.requested) if defect.requested else ''}' "
+            f"is not available on the registry. The test command installs before it "
+            f"runs, so nothing was executed — this is a dependency manifest defect, "
+            f"not a test failure. Pin '{defect.package}' to a version that exists."
+        )
+        logger.warning("[test-bed] %s", description)
+        if self.job_db:
+            try:
+                import uuid as _uuid
+                self.job_db.create_validation_issue(
+                    issue_id=str(_uuid.uuid4()),
+                    job_id=self.project_id,
+                    check_name="dependency_manifest",
+                    severity="error",
+                    file_path=None,
+                    line_number=None,
+                    description=description,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("Could not record dependency defect: %s", exc)
+        return False
+
     def _run_feature_test_bed_loop(self) -> None:
         """Run container-isolated tests after file tasks; loop DevAgent on RED."""
         if os.getenv("SMOKE_TEST_BACKEND", "syntax_only") == "syntax_only":
             return
+        self._dependency_blocked_test_run = False
 
         from ..tools.test_tools import run_feature_tests
 
@@ -4497,6 +4565,18 @@ class SoftwareDevWorkflow:
 
             failures = list(backend_result.get("failures") or [])
             failures.extend(frontend_result.get("failures") or [])
+
+            # A test command is usually `install && run`, so a failed install
+            # short-circuits and nothing is ever executed. The runner still
+            # exits non-zero, and treating that as "the tests failed" sends
+            # DevAgent to patch test code over a bad version pin — job 107b3d3e
+            # spent its whole budget that way and then recorded "Tests still
+            # failing after 3 iterations".
+            if self._handle_blocked_test_run(backend_result, frontend_result):
+                continue
+            if self._dependency_blocked_test_run:
+                return
+
             critique = self._build_test_critique(
                 backend_result, frontend_result, failures,
             )
