@@ -35,6 +35,9 @@ PREVIEW_IMAGES = {
     "java_maven": "registry.access.redhat.com/ubi9/openjdk-21:latest",
     "java_gradle": "registry.access.redhat.com/ubi9/openjdk-21:latest",
     "go": "registry.access.redhat.com/ubi9/go-toolset:latest",
+    # Reuses the python image already pulled for "python" — no extra image to
+    # fetch just to serve static files.
+    "static": "registry.access.redhat.com/ubi9/python-311:latest",
 }
 
 DEFAULT_PORT = 8000
@@ -117,6 +120,12 @@ def detect_preview(workspace: Path, project_type: str) -> Tuple[str, int]:
 
     if project_type == "go":
         return "go run ./...", DEFAULT_PORT
+
+    if project_type == "static":
+        # http.server binds all interfaces by default (no loopback-only trap)
+        # and needs no dependency install — index.html is already confirmed
+        # present by _detect_project_type.
+        return f"python3 -m http.server {DEFAULT_PORT}", DEFAULT_PORT
 
     if project_type in ("java_maven", "java_gradle"):
         raise PreviewError(

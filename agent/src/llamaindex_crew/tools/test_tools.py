@@ -318,8 +318,43 @@ SANDBOX_API_COMMANDS = {
 }
 
 
+def _project_type_from_stack_manifest(workspace: Path) -> Optional[str]:
+    """
+    Fall back to the job's own AI-derived stack contract when nothing on disk
+    identifies the stack.
+
+    ``stack_manifest.json`` is written by the solutioning loop before a single
+    file is generated, so it can answer even when generation hasn't produced a
+    file this detector recognises. Only ever consulted as a fallback — a
+    concrete manifest file on disk (package.json, pom.xml, ...) always wins,
+    since the workspace could contain a stale or copied stack_manifest.json
+    that no longer matches what was actually generated.
+
+    Only the unambiguous case is handled: ``forbidden_tiers`` containing
+    ``application_server`` is an explicit, already-existing lock against a
+    backend runtime. Deliberately not attempting to map ``chosen_stack``
+    keywords — that list can contain arbitrary free-text technology names from
+    the full solutioning path (e.g. "Frappe", "Rust/Actix") with no closed
+    vocabulary, so guessing from it would just relocate the guessing problem.
+    """
+    manifest_path = workspace / "stack_manifest.json"
+    if not manifest_path.exists():
+        return None
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError, UnicodeDecodeError):
+        return None
+    if not isinstance(manifest, dict):
+        return None
+
+    forbidden = {str(t).lower() for t in (manifest.get("forbidden_tiers") or [])}
+    if "application_server" in forbidden:
+        return "static"
+    return None
+
+
 def _detect_project_type(workspace: Path) -> str:
-    """Auto-detect the project type from manifest files."""
+    """Auto-detect the project type from manifest files, or the stack contract."""
     if (workspace / "pom.xml").exists():
         return "java_maven"
     if (workspace / "build.gradle").exists() or (workspace / "build.gradle.kts").exists():
@@ -336,7 +371,14 @@ def _detect_project_type(workspace: Path) -> str:
         return "python"
     if list(workspace.rglob("*.go")):
         return "go"
-    return "unknown"
+    # Plain static HTML/CSS/JS — no build step, so a root-level index.html is
+    # directly servable. Deliberately narrow to the root: a nested index.html
+    # (e.g. pages/index.html) implies a build/router step this check cannot
+    # infer, and misdetecting it would serve the wrong thing rather than fail
+    # loudly.
+    if (workspace / "index.html").exists():
+        return "static"
+    return _project_type_from_stack_manifest(workspace) or "unknown"
 
 
 class SmokeTestResult:
