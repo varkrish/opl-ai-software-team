@@ -992,18 +992,41 @@ def normalize_symbol_keys(contract: dict) -> dict:
     return out
 
 
-def _guess_package_for_symbol(name: str, packages: Dict[str, Any], current_pkg: str | None) -> str:
+def _attribute_symbol_to_package(name: str, packages: Dict[str, Any], current_pkg: str | None) -> str:
+    """Owning package for a symbol found in prose, or "" when nothing supports one.
+
+    This used to end in ``return next(iter(sorted(packages.keys())))``, so every
+    signature-shaped line — including ones inside illustrative code blocks — was
+    filed under whichever package sorted first, and written into its ``owns``
+    list that codegen reads as "this package must define these".
+
+    In ``sandbox_full_output/wiring_contract.json`` that gave ``configuration``
+    ownership of ``Fatal``, ``Info``, ``ListenAndServe``, ``NewProduction``,
+    ``Sync`` and ``NewRouter`` — stdlib and third-party calls lifted out of a
+    ``func main()`` example — instructing the model to reimplement them. It also
+    handed the phantom package 11 symbols against the real one's 5, which is why
+    contract_coherence ranks on dep edges instead of symbol ownership.
+
+    A dropped symbol leaves the contract honestly weak, which
+    ``_repair_wiring_planned_emit`` already answers by asking for a real emit. A
+    fabricated one is acted on as fact.
+    """
+    # 1. An explicit package heading above the signature.
     if current_pkg and current_pkg in packages:
         return current_pkg
-    # Prefer boundary packages for *Handler / *Controller / *Router names
+    # 2. Boundary naming is evidence: *Handler / *Controller / *Router.
     lower = name.lower()
     if any(lower.endswith(sfx) for sfx in ("handler", "controller", "router", "endpoint", "view")):
-        for pkg in packages:
-            if package_has_boundary_keywords(pkg, packages.get(pkg, {}).get("owns") if isinstance(packages.get(pkg), dict) else None):
+        for pkg in sorted(packages):
+            data = packages.get(pkg)
+            if package_has_boundary_keywords(
+                pkg, data.get("owns") if isinstance(data, dict) else None
+            ):
                 return pkg
-    if packages:
-        return next(iter(sorted(packages.keys())))
-    return current_pkg or ""
+    # 3. A single-package project has no ambiguity to resolve.
+    if len(packages) == 1:
+        return next(iter(packages))
+    return ""
 
 
 def extract_planned_interfaces_from_specs(*texts: str, packages: Optional[Dict[str, Any]] = None) -> dict:
@@ -1046,7 +1069,7 @@ def extract_planned_interfaces_from_specs(*texts: str, packages: Optional[Dict[s
             if len(sig) > 200:
                 sig = sig[:200]
 
-            pkg = _guess_package_for_symbol(name, packages, current_pkg)
+            pkg = _attribute_symbol_to_package(name, packages, current_pkg)
             if not pkg:
                 continue
             q = symbol_key(pkg, name)
