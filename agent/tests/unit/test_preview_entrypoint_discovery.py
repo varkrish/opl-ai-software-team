@@ -202,6 +202,32 @@ def test_vendor_directories_are_skipped(tmp_path):
         _python_entrypoint_or_raise(tmp_path)
 
 
+def test_two_runnable_files_at_the_root_stay_ambiguous(tmp_path):
+    """
+    Pre-existing rule, kept: a ``__main__`` guard only says a file *can* run,
+    so two of them is a real ambiguity. Recursive discovery must not turn that
+    into "pick the first one".
+    """
+    for name in ("todo.py", "report.py"):
+        (tmp_path / name).write_text(
+            "if __name__ == '__main__':\n    pass\n", encoding="utf-8"
+        )
+
+    assert _python_entrypoint(tmp_path) is None
+    with pytest.raises(PreviewError, match="entrypoint"):
+        detect_preview(tmp_path, "python")
+
+
+def test_a_named_entrypoint_beats_a_second_runnable_file(tmp_path):
+    """main.py names itself; report.py merely happens to be runnable."""
+    (tmp_path / "main.py").write_text(MAIN_PY, encoding="utf-8")
+    (tmp_path / "report.py").write_text(
+        "if __name__ == '__main__':\n    pass\n", encoding="utf-8"
+    )
+
+    assert _python_entrypoint(tmp_path) == "main.py"
+
+
 def test_two_competing_service_entrypoints_are_not_guessed_between(tmp_path):
     """Starting the wrong half of a project is worse than saying so."""
     for svc in ("service_a", "service_b"):

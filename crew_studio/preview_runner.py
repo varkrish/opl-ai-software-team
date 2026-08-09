@@ -105,15 +105,19 @@ def _is_skipped(rel: Path) -> bool:
     return any(part in _SKIP_DIRS for part in rel.parts[:-1])
 
 
-def _python_entrypoint_candidates(workspace: Path) -> List[str]:
-    """Every plausible entrypoint, workspace-relative, root-level ones first.
+def _entrypoint_groups(workspace: Path) -> Tuple[List[str], List[str]]:
+    """``(conventional, main_guard)`` candidates, workspace-relative, root first.
 
-    Used to be root-only, which assumes the project is single-module and
+    Kept apart because they carry different weight. A file *named* main.py is
+    the project stating its entrypoint, so the conventional preference order
+    settles a tie. A ``__main__`` guard only says a file is runnable, and two
+    runnable files are a genuine ambiguity — guessing starts the wrong app.
+
+    Both used to be root-only, which assumes the project is single-module and
     rooted. Job 107b3d3e put its API in ``backend/main.py`` — the layout its own
     wiring contract declared — and Start Preview answered "No Python entrypoint
-    found". ``PythonStrategy.validate_entrypoint`` walks the tree with
-    ``rglob`` and passed on the same workspace, so the project was
-    simultaneously valid and unpreviewable.
+    found", while ``validate_entrypoint``, which walks the tree with ``rglob``,
+    passed on the same workspace.
     """
     conventional: List[tuple] = []
     declared: List[str] = []
@@ -138,23 +142,41 @@ def _python_entrypoint_candidates(workspace: Path) -> List[str]:
         except OSError:
             continue
 
-    if conventional:
-        return [rel for _d, _pref, rel in sorted(conventional)]
-    return sorted(declared, key=lambda p: (p.count("/"), p))
+    return (
+        [rel for _d, _pref, rel in sorted(conventional)],
+        sorted(declared, key=lambda p: (p.count("/"), p)),
+    )
+
+
+def _python_entrypoint_candidates(workspace: Path) -> List[str]:
+    """The candidates a caller should show when the choice is ambiguous."""
+    conventional, declared = _entrypoint_groups(workspace)
+    return conventional or declared
 
 
 def _python_entrypoint(workspace: Path) -> Optional[str]:
     """The single file to run, or None when the choice is not obvious.
 
-    A root-level entrypoint wins outright — that is the project's own answer.
-    Below the root, only an unambiguous single candidate is accepted: starting
-    the wrong half of a two-service project is worse than saying so.
+    A conventionally named file at the root wins outright — that is the project
+    naming its own entrypoint, and the preference order settles main.py against
+    app.py. Everywhere else only a single candidate is accepted: two runnable
+    files are a real ambiguity, and starting the wrong half of a two-service
+    project is worse than saying so.
     """
-    candidates = _python_entrypoint_candidates(workspace)
-    root_level = [c for c in candidates if "/" not in c]
-    if root_level:
-        return root_level[0]
-    return candidates[0] if len(candidates) == 1 else None
+    conventional, declared = _entrypoint_groups(workspace)
+
+    for group in (conventional, declared):
+        if not group:
+            continue
+        root_level = [c for c in group if "/" not in c]
+        if root_level:
+            # Conventional names are ranked, so the first is the project's
+            # answer; runnable-by-guard files are not, so two is ambiguous.
+            if group is conventional:
+                return root_level[0]
+            return root_level[0] if len(root_level) == 1 else None
+        return group[0] if len(group) == 1 else None
+    return None
 
 
 def _pip_install_prefix(workspace: Path, entry: str) -> str:
@@ -212,9 +234,27 @@ def detect_preview(workspace: Path, project_type: str) -> Tuple[str, int]:
     Generated projects vary too much to detect perfectly; ``preview_command``
     in test_plan.md always wins so a project can state its own.
     """
+    # Best first: what the project says about itself, then what it declares
+    # structurally, then inference. Detection only runs when the project has
+    # told us nothing usable.
     explicit = _read_start_command(workspace)
     if explicit:
         return explicit, _port_from_command(explicit) or DEFAULT_PORT
+
+    # Imported here so this module keeps working when it is loaded as a
+    # top-level module rather than as part of the crew_studio package.
+    try:
+        from .compose_preview import compose_preview_command, read_dev_compose_preview
+    except ImportError:  # pragma: no cover - direct-module import path
+        from compose_preview import compose_preview_command, read_dev_compose_preview
+
+    declared = read_dev_compose_preview(workspace)
+    if declared is not None:
+        logger.info(
+            "Preview from dev-compose.yaml: service %r of %s",
+            declared.service, declared.services,
+        )
+        return compose_preview_command(declared), declared.port
 
     if project_type == "node":
         pkg = _node_package_json(workspace)

@@ -17,6 +17,38 @@ from ..tools.tldr_tools import append_tldr_tools
 from ..budget.tracker import EnhancedBudgetTracker
 from ..utils.prompt_loader import load_prompt
 
+# The production compose file builds images (``build: context: ./backend``),
+# which is right for deployment and wrong for a preview button — every click
+# would pay an image build. dev-compose.yaml is the same topology expressed for
+# running the source directly out of a mounted workspace.
+DEV_COMPOSE_INSTRUCTIONS = """\
+## dev-compose.yaml (required, separate from any production compose file)
+
+A dev-time compose file used to preview the running app. It describes the same
+services, but runs the source directly instead of building images:
+
+- No `build:` sections. Each service uses a stock base image for its language
+  (e.g. `python:3.11-slim`, `node:20-slim`, `nginx:alpine`).
+- Mount the source rather than copying it: `volumes: ["./backend:/app"]`, with
+  `working_dir` set to the mount point.
+- `command:` installs dependencies and then starts the process, in one shell
+  line, e.g. `sh -c "pip install -r requirements.txt && python3 main.py"`.
+- Every server must bind `0.0.0.0`, never `127.0.0.1` — a loopback bind is
+  unreachable from outside the container.
+- Publish only the port a human needs to open.
+- Reference only paths that exist in the file tree. Do not invent directories.
+- Add a top-level marker naming the service whose port is THE preview URL:
+
+    x-preview:
+      primary: <service name>
+
+  Preview opens one URL, so this decides which service it is. For an API plus a
+  UI, the UI is usually primary; for an API-only project, the API is.
+
+Keep it minimal and runnable. A service that cannot start from a clean checkout
+with these commands is worse than one fewer service.
+"""
+
 logger = logging.getLogger(__name__)
 
 DEVOPS_BACKSTORY = (
@@ -197,8 +229,10 @@ class DevOpsAgent:
             "- Containerfile(s) matching the framework skill above (e.g. S2I-based for Frappe).\n"
             "- apps.json if the skill requires it.\n"
             "- compose.yml for local development if the skill provides a template.\n"
+            "- dev-compose.yaml — see below. Always write this one.\n"
             f"- {pipeline_instruction}"
         )
+        sections.append(DEV_COMPOSE_INSTRUCTIONS)
         return "\n\n".join(sections)
 
     def run(
