@@ -120,7 +120,13 @@ def _parent(pkg: str) -> str:
     return str(Path(pkg).parent).replace("\\", "/")
 
 
-def _competes(a: str, b: str, files_a: Set[str], files_b: Set[str]) -> Optional[Set[str]]:
+def _competes(
+    a: str,
+    b: str,
+    files_a: Set[str],
+    files_b: Set[str],
+    packages: Any = None,
+) -> Optional[Set[str]]:
     """Return the shared basenames when *a* and *b* are rival layouts, else None."""
     if not files_a or not files_b or _is_nested(a, b):
         return None
@@ -131,19 +137,32 @@ def _competes(a: str, b: str, files_a: Set[str], files_b: Set[str]) -> Optional[
 
     ratio = len(shared) / min(len(files_a), len(files_b))
 
-    if _parent(a) == _parent(b):
-        # Siblings under one parent are a deliberate decomposition
-        # (internal/sse/writer.go beside internal/log/writer.go). Require more
-        # than a single coincidental filename before calling them rivals.
+    # Siblings under a real shared namespace are a deliberate decomposition
+    # (internal/sse/writer.go beside internal/log/writer.go), so they need more
+    # than one coincidental filename. The top level is NOT such a namespace —
+    # every root package has parent "." by construction, and reading that as a
+    # decomposition let job 1cec01ad keep `api -> main.py` and `model ->
+    # models.py` beside the root package that already declared both.
+    if _parent(a) == _parent(b) != ".":
         if len(shared) >= _MIN_OVERLAP_FOR_SIBLINGS and ratio >= _MIN_OVERLAP_RATIO:
             return shared
         return None
 
-    # Different roots. Either the smaller package is wholly contained in the
-    # larger (the Java sketch: model/Task.java against the real Maven tree), or
-    # the two substantially mirror each other (app/ against expense_tracker/).
-    if ratio >= 1.0 or (len(shared) >= _MIN_OVERLAP_FOR_SIBLINGS and ratio >= _MIN_OVERLAP_RATIO):
+    # Several duplicated names is duplication however you read it.
+    if len(shared) >= _MIN_OVERLAP_FOR_SIBLINGS and ratio >= _MIN_OVERLAP_RATIO:
         return shared
+
+    # One package wholly contained in the other on a single filename. Real when
+    # something separates them — the Java sketch model/Task.java against a
+    # three-file Maven tree, or `configuration` standing alone against
+    # `internal/config` among four other `internal/` packages. But
+    # frontend/index.js against backend/index.js is symmetric in every respect,
+    # and dropping either would be a coin flip dressed up as a decision.
+    if ratio >= 1.0:
+        if len(files_a) != len(files_b):
+            return shared
+        if _root_dominance(packages, a) != _root_dominance(packages, b):
+            return shared
     return None
 
 
@@ -220,12 +239,17 @@ def _rank(
     return (
         # 1. What was actually built is ground truth once codegen has run.
         _on_disk_count(workspace, sources),
-        # 2. What the rest of the contract's dependency graph actually relies on.
-        _dep_edge_count(contract, pkg),
+        # 2. How much of the project this package actually holds. A package
+        #    declaring eight files is the layout; one that declares a single
+        #    file already covered by it is an alias for part of it.
+        len(sources),
         # 3. The layout root the rest of the project is organised around.
         _root_dominance(contract.get("packages"), pkg),
-        # 4. The more developed layout is the more likely real one.
-        len(sources),
+        # 4. What the contract's dependency graph relies on. Below size on
+        #    purpose: job 1cec01ad's jq patch gave the aliasing layer packages
+        #    (api -> main.py) dep edges the eight-file root package did not
+        #    have, and ranking deps first dropped the whole application.
+        _dep_edge_count(contract, pkg),
         # 5. Deterministic final tiebreak — negated so the smaller name wins.
         tuple(-ord(c) for c in pkg),
     )
@@ -265,7 +289,7 @@ def find_competing_packages(
         for b in ordered[i + 1:]:
             if b in dropped:
                 continue
-            shared = _competes(a, b, names[a], names[b])
+            shared = _competes(a, b, names[a], names[b], packages)
             if not shared:
                 continue
             rank_a = _rank(contract, a, packages.get(a, {}).get("files"), workspace, suffixes)

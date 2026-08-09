@@ -213,7 +213,88 @@ def test_java_scattered_sketch_roots_are_dropped():
     )
 
 
+def test_layer_packages_that_alias_root_files_collapse_into_the_root():
+    """
+    Job 1cec01ad, replayed through the fixed seed. The jq patch declared layer
+    packages whose files are the very same root-level paths::
+
+        .       -> main.py, models.py, schemas.py, service.py, api.py, db.py, ...
+        api     -> main.py
+        model   -> models.py
+        schema  -> schemas.py
+        service -> service.py
+
+    Every top-level package shares the parent ".", which must not be read as a
+    deliberate decomposition the way ``internal/`` is.
+    """
+    contract = _contract({
+        ".": ["__init__.py", "api.py", "db.py", "main.py", "models.py",
+              "schemas.py", "service.py", "services.py"],
+        "api": ["main.py"],
+        "model": ["models.py"],
+        "schema": ["schemas.py"],
+        "service": ["service.py"],
+    })
+
+    resolved, dropped = resolve_competing_packages(contract)
+
+    assert _pkg_names(resolved) == {"."}
+    assert len(dropped) == 4
+
+
+def test_dep_edges_do_not_outrank_holding_the_whole_project():
+    """
+    The same job's jq patch wired deps to the aliasing layer packages but not to
+    the root package that declared all eight files. Ranking deps above size
+    dropped the entire application and kept `api -> main.py`.
+    """
+    contract = _contract({
+        ".": ["__init__.py", "api.py", "db.py", "main.py", "models.py",
+              "schemas.py", "service.py", "services.py"],
+        "api": ["main.py"],
+    })
+    contract["deps"] = [
+        {"from": "api", "to": "model"},
+        {"from": "api", "to": "service"},
+    ]
+
+    resolved, _dropped = resolve_competing_packages(contract)
+
+    assert _pkg_names(resolved) == {"."}
+
+
+def test_near_duplicate_test_roots_collapse():
+    """`test -> tests/test_service.py` beside `tests -> tests/*` — same tree."""
+    contract = _contract({
+        "test": ["tests/test_service.py"],
+        "tests": ["tests/__init__.py", "tests/conftest.py", "tests/test_api.py",
+                  "tests/test_service.py", "tests/test_services.py"],
+    })
+
+    resolved, _dropped = resolve_competing_packages(contract)
+
+    assert _pkg_names(resolved) == {"tests"}
+
+
 # ── false positives would be worse than the bug ─────────────────────────────
+
+def test_symmetric_single_file_top_level_packages_are_kept():
+    """
+    frontend/index.js beside backend/index.js: one shared name, same size, same
+    root standing. Nothing separates them, so dropping either would be a guess.
+    """
+    contract = _contract(
+        {
+            "frontend": ["frontend/index.js"],
+            "backend": ["backend/index.js"],
+        },
+        language="javascript",
+    )
+
+    resolved, dropped = resolve_competing_packages(contract)
+
+    assert _pkg_names(resolved) == {"frontend", "backend"}
+    assert dropped == []
 
 def test_monorepo_services_sharing_only_an_entrypoint_are_kept():
     """Every service has a main.py. One shared generic name is not duplication."""
