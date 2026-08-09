@@ -37,7 +37,7 @@ Produce exactly these three top-level sections, in this order, using the exact h
 - State whether data is reused across test runs or generated fresh per test, and how isolation between tests is guaranteed.
 
 ### `# 3. Execution Configuration`
-End the document with **exactly** these six lines, in this exact order, each on its own line,
+End the document with **exactly** these seven lines, in this exact order, each on its own line,
 using this exact `key: value` format (no markdown formatting, no extra commentary before/after them):
 
 ```
@@ -47,6 +47,7 @@ backend_test_dir: <relative path to backend test directory>
 frontend_test_dir: <relative path to frontend test directory>
 test_framework_backend: <e.g. pytest, JUnit, go test>
 test_framework_frontend: <e.g. Jest, Vitest, Cypress, or "none">
+preview_command: <shell command that starts the app and serves it on port 8000>
 ```
 
 **Rules for this section:**
@@ -58,5 +59,6 @@ test_framework_frontend: <e.g. Jest, Vitest, Cypress, or "none">
    - `frontend_test_dir` = `.`
    - `test_framework_frontend` = `none`
 5. If there is no backend (frontend-only project), apply the same pattern symmetrically to the backend fields.
+6. `preview_command` starts the app for a human to click through — one long-running process, listening on port 8000, bound to `0.0.0.0` (not `127.0.0.1`, which is unreachable from outside the container). Include the dependency install, and name the real entrypoint path from the file tree, e.g. `pip install -r backend/requirements.txt && python3 backend/main.py`. If the project has several services, choose the one serving the HTTP API — preview runs a single process. If nothing in this project can be served over HTTP, write `preview_command: none`.
 6. Do not include placeholder angle brackets (`<...>`) in the final output — replace every value with a real, stack-appropriate answer.
 7. These six lines must appear only once, only at the very end of the document, with nothing after them.

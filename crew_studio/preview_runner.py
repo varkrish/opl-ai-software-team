@@ -13,7 +13,7 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse, urlunparse
 
 logger = logging.getLogger(__name__)
@@ -47,41 +47,163 @@ class PreviewError(RuntimeError):
     """Raised when a preview cannot be started."""
 
 
+_PLACEHOLDER_RE = re.compile(r"<[^>]+>|\.\.\.|TODO|FIXME", re.IGNORECASE)
+# Paths the command names, e.g. `python3 backend/main.py`, `-r req/base.txt`.
+_COMMAND_PATH_RE = re.compile(r"(?<![\w/.-])([\w.-]+(?:/[\w.-]+)+\.[A-Za-z0-9]+)")
+
+
 def _read_start_command(workspace: Path) -> str:
-    """Honour an explicit ``preview_command`` in test_plan.md when present."""
+    """Honour an explicit ``preview_command`` in test_plan.md, if it holds up.
+
+    The model that writes this line is the same one that pinned a nonexistent
+    ``memmachine-client==0.1.5`` and emitted ``jq '...'`` where a jq filter was
+    required, so a declaration is preferred but not taken on trust: it is
+    dropped when it is a placeholder, or when it names a file the project does
+    not contain. Falling through to detection beats starting a container that
+    cannot work.
+    """
     plan = workspace / "test_plan.md"
     if not plan.is_file():
         return ""
+    command = ""
     for line in plan.read_text(encoding="utf-8", errors="replace").splitlines():
         key, _, value = line.strip().partition(":")
         if key.strip() == "preview_command":
-            return value.strip()
-    return ""
+            command = value.strip()
+            break
+    if not command or command.lower() in ("none", "n/a", "-"):
+        return ""
+    if _PLACEHOLDER_RE.search(command):
+        logger.warning("Ignoring placeholder preview_command: %r", command)
+        return ""
+    for referenced in _COMMAND_PATH_RE.findall(command):
+        if not (workspace / referenced).exists():
+            logger.warning(
+                "Ignoring preview_command %r: it names %r, which is not in the "
+                "project; falling back to detection",
+                command, referenced,
+            )
+            return ""
+    return command
 
 
 _MAIN_GUARD_RE = re.compile(r"^if\s+__name__\s*==\s*['\"]__main__['\"]", re.M)
 
 
-def _python_entrypoint(workspace: Path) -> Optional[str]:
-    """Find the file to run: conventional names first, then self-declared ones.
+_CONVENTIONAL_ENTRYPOINTS = ("main.py", "app.py", "server.py", "run.py", "wsgi.py")
 
-    Generated projects frequently name their entrypoint after the domain
-    (``todo.py``, ``inventory_api.py``), so falling back to a ``__main__``
-    guard catches far more real projects than a fixed name list.
+# Directories that never hold the thing to run.
+_SKIP_DIRS = frozenset({
+    "node_modules", ".venv", "venv", "env", ".git", "__pycache__",
+    "site-packages", ".tox", "dist", "build", "target", "out", "vendor",
+    "test", "tests", "__tests__", "spec", "specs", "testing",
+    ".mypy_cache", ".pytest_cache", "migrations",
+})
+
+
+def _is_skipped(rel: Path) -> bool:
+    return any(part in _SKIP_DIRS for part in rel.parts[:-1])
+
+
+def _python_entrypoint_candidates(workspace: Path) -> List[str]:
+    """Every plausible entrypoint, workspace-relative, root-level ones first.
+
+    Used to be root-only, which assumes the project is single-module and
+    rooted. Job 107b3d3e put its API in ``backend/main.py`` — the layout its own
+    wiring contract declared — and Start Preview answered "No Python entrypoint
+    found". ``PythonStrategy.validate_entrypoint`` walks the tree with
+    ``rglob`` and passed on the same workspace, so the project was
+    simultaneously valid and unpreviewable.
     """
-    for candidate in ("main.py", "app.py", "server.py", "run.py", "wsgi.py"):
-        if (workspace / candidate).is_file():
-            return candidate
+    conventional: List[tuple] = []
+    declared: List[str] = []
 
-    declared = []
-    for src in sorted(workspace.glob("*.py")):
+    for src in sorted(workspace.rglob("*.py")):
+        if not src.is_file():
+            continue
+        try:
+            rel = src.relative_to(workspace)
+        except ValueError:
+            continue
+        if _is_skipped(rel):
+            continue
+        rel_str = rel.as_posix()
+        depth = len(rel.parts) - 1
+        if src.name in _CONVENTIONAL_ENTRYPOINTS:
+            conventional.append((depth, _CONVENTIONAL_ENTRYPOINTS.index(src.name), rel_str))
+            continue
         try:
             if _MAIN_GUARD_RE.search(src.read_text(encoding="utf-8", errors="replace")):
-                declared.append(src.name)
+                declared.append(rel_str)
         except OSError:
             continue
-    # Only unambiguous when exactly one file claims to be runnable.
-    return declared[0] if len(declared) == 1 else None
+
+    if conventional:
+        return [rel for _d, _pref, rel in sorted(conventional)]
+    return sorted(declared, key=lambda p: (p.count("/"), p))
+
+
+def _python_entrypoint(workspace: Path) -> Optional[str]:
+    """The single file to run, or None when the choice is not obvious.
+
+    A root-level entrypoint wins outright — that is the project's own answer.
+    Below the root, only an unambiguous single candidate is accepted: starting
+    the wrong half of a two-service project is worse than saying so.
+    """
+    candidates = _python_entrypoint_candidates(workspace)
+    root_level = [c for c in candidates if "/" not in c]
+    if root_level:
+        return root_level[0]
+    return candidates[0] if len(candidates) == 1 else None
+
+
+def _pip_install_prefix(workspace: Path, entry: str) -> str:
+    """Install from the requirements.txt nearest the entrypoint.
+
+    Only ``workspace/requirements.txt`` used to count, so a discovered
+    subdirectory entrypoint would start without its dependencies and crash on
+    the first import.
+
+    Install output is no longer sent to /dev/null. A failed install used to be
+    invisible, surfacing later as an unexplained ImportError from the app —
+    while the real cause (on job 107b3d3e, a pin for a version that does not
+    exist) sat in the suppressed output.
+    """
+    entry_dir = Path(entry).parent
+    preferred = [entry_dir / "requirements.txt", Path("requirements.txt")]
+    for rel in preferred:
+        if (workspace / rel).is_file():
+            return f"pip install --no-cache-dir -r {rel.as_posix()} 2>&1; "
+    for found in sorted(workspace.rglob("requirements.txt")):
+        try:
+            rel = found.relative_to(workspace)
+        except ValueError:
+            continue
+        if _is_skipped(rel) or not found.is_file():
+            continue
+        return f"pip install --no-cache-dir -r {rel.as_posix()} >/dev/null 2>&1; "
+    return ""
+
+
+def _node_package_json(workspace: Path) -> Optional[Path]:
+    """The package.json that declares how to start the app, root preferred."""
+    root = workspace / "package.json"
+    if root.is_file():
+        return root
+    for found in sorted(workspace.rglob("package.json")):
+        try:
+            rel = found.relative_to(workspace)
+        except ValueError:
+            continue
+        if _is_skipped(rel) or not found.is_file():
+            continue
+        try:
+            scripts = json.loads(found.read_text(encoding="utf-8")).get("scripts", {})
+        except (json.JSONDecodeError, OSError, AttributeError):
+            continue
+        if isinstance(scripts, dict) and ("start" in scripts or "dev" in scripts):
+            return found
+    return None
 
 
 def detect_preview(workspace: Path, project_type: str) -> Tuple[str, int]:
@@ -95,27 +217,38 @@ def detect_preview(workspace: Path, project_type: str) -> Tuple[str, int]:
         return explicit, _port_from_command(explicit) or DEFAULT_PORT
 
     if project_type == "node":
-        pkg = workspace / "package.json"
-        if pkg.is_file():
+        pkg = _node_package_json(workspace)
+        if pkg is not None:
             try:
                 scripts = json.loads(pkg.read_text(encoding="utf-8")).get("scripts", {})
             except (json.JSONDecodeError, OSError):
                 scripts = {}
+            # cd into the package when it is not at the root, so npm resolves
+            # the right manifest.
+            rel_dir = pkg.parent.relative_to(workspace).as_posix()
+            prefix = "" if rel_dir in ("", ".") else f"cd {rel_dir} && "
             if "start" in scripts:
-                return "npm install --ignore-scripts && npm start", DEFAULT_PORT
+                return f"{prefix}npm install --ignore-scripts && npm start", DEFAULT_PORT
             if "dev" in scripts:
-                return "npm install --ignore-scripts && npm run dev", DEFAULT_PORT
+                return f"{prefix}npm install --ignore-scripts && npm run dev", DEFAULT_PORT
         raise PreviewError("No 'start' or 'dev' script found in package.json")
 
     if project_type == "python":
         entry = _python_entrypoint(workspace)
         if not entry:
+            candidates = _python_entrypoint_candidates(workspace)
+            if len(candidates) > 1:
+                raise PreviewError(
+                    f"Several runnable entrypoints found ({', '.join(candidates)}). "
+                    f"Preview runs one process, so add a 'preview_command:' line to "
+                    f"test_plan.md naming the one to start."
+                )
             raise PreviewError(
-                "No Python entrypoint found (looked for main.py, app.py, server.py, run.py)"
+                "No Python entrypoint found (looked for "
+                f"{', '.join(_CONVENTIONAL_ENTRYPOINTS)} and any file with a "
+                "__main__ guard, in the project root and its subdirectories)"
             )
-        install = ""
-        if (workspace / "requirements.txt").is_file():
-            install = "pip install --no-cache-dir -r requirements.txt >/dev/null 2>&1; "
+        install = _pip_install_prefix(workspace, entry)
         return f"{install}python3 {entry}", DEFAULT_PORT
 
     if project_type == "go":
