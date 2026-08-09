@@ -2479,6 +2479,44 @@ class SoftwareDevWorkflow:
                     messages.append(tail)
         return by_file
 
+    def _record_non_convergence(
+        self, current: int, best: int, iteration: int
+    ) -> None:
+        """
+        Record that the fix loop gave up because it stopped making progress.
+
+        Without this the stop is silent, and a job that quit early looks
+        identical in the UI to one that finished — the user sees a lower issue
+        count and no explanation for why nothing more was attempted.
+        """
+        if not self.job_db:
+            return
+        try:
+            import uuid as _uuid
+
+            self.job_db.create_validation_issue(
+                str(_uuid.uuid4()),
+                self.project_id,
+                "fix_loop_not_converging",
+                "warning",
+                None,
+                None,
+                (
+                    f"The automated fix loop stopped after iteration {iteration}: "
+                    f"{current} issue(s) remain and no round improved on the best "
+                    f"of {best}. Continuing would have rewritten code without "
+                    f"reducing the problem. The remaining issues need review — "
+                    f"they are often caused by a single upstream defect that the "
+                    f"per-file fix loop cannot reach."
+                ),
+                fix_strategy=(
+                    "Inspect the earliest failing check rather than the issue "
+                    "count; a build-level failure makes every file look broken."
+                ),
+            )
+        except Exception as exc:  # noqa: BLE001 — bookkeeping must not fail a job
+            logger.debug("Could not record non-convergence: %s", exc)
+
     def _repair_build_manifest(self) -> bool:
         """
         Deterministically repair an invalid build manifest. True when repaired.
@@ -3085,6 +3123,19 @@ class SoftwareDevWorkflow:
         prev_signatures = None
         stagnant_rounds = 0
 
+        # Set-identity alone misses churn: job d32dcaf7 ran 48 -> 67 -> 52 -> 56
+        # touching different files every pass, so the set always differed and
+        # the loop spent its whole budget rewriting correct code.
+        #
+        # Counting downward is not the answer either — see the docstring: a
+        # rising count often *is* progress, because fixing a parse error lets
+        # the build reach errors it could not previously see. What distinguishes
+        # the two is whether the run ever improves on its best: real progress
+        # sets a new low eventually, churn orbits one.
+        max_rounds_without_improvement = 3
+        best_issue_count: Optional[int] = None
+        rounds_without_improvement = 0
+
         for iteration in range(1, max_iterations + 1):
             report = self._run_validation_suite()
             self._validation_report = report
@@ -3122,6 +3173,26 @@ class SoftwareDevWorkflow:
                     "Post-build validation: ISSUES_FOUND but no actionable file issues to fix"
                 )
                 break
+
+            # Convergence check: has this run ever bettered its own best count?
+            if best_issue_count is None or len(fixable) < best_issue_count:
+                best_issue_count = len(fixable)
+                rounds_without_improvement = 0
+            else:
+                rounds_without_improvement += 1
+                if rounds_without_improvement >= max_rounds_without_improvement:
+                    logger.warning(
+                        "⏹️ Post-build fix is not converging: %d issue(s) this round, "
+                        "best was %d, no improvement in %d rounds. Stopping after "
+                        "iteration %d rather than spending the remaining budget "
+                        "rewriting code that is not getting better.",
+                        len(fixable), best_issue_count,
+                        rounds_without_improvement, iteration,
+                    )
+                    self._record_non_convergence(
+                        len(fixable), best_issue_count, iteration
+                    )
+                    break
 
             signatures = self._issue_signatures(fixable)
             if prev_signatures is not None and signatures == prev_signatures:
