@@ -395,3 +395,33 @@ def test_tool_rejects_empty_command(monkeypatch, workspace):
     monkeypatch.setenv("SANDBOX_API_URL", "http://sandbox:18080")
     tool = create_sandbox_tools(str(workspace))[0]
     assert "❌" in str(tool.call(command=[]))
+
+
+# ── Java honours proxies differently to everything else ─────────────────────
+#
+# curl, npm, go and pip all read http_proxy from the environment. The JVM does
+# not. Verified live: with the egress proxy working (curl reached Maven Central
+# with 200 from the same sandbox), `mvn compile` still died with
+# "repo1.maven.org: Name or service not known" because it tried to resolve the
+# host directly, and build sandboxes have no DNS of their own.
+#
+# The fix is to generate a settings.xml from $http_proxy at run time. Proven in
+# a live sandbox: "Downloaded from central: ... h2-2.2.224.jar (2.6 MB)".
+
+def test_maven_configures_a_proxy_from_the_environment():
+    cmd = test_tools.CONTAINER_COMMANDS["java_maven"]
+    assert "http_proxy" in cmd, "Maven must derive proxy settings from $http_proxy"
+    assert "settings.xml" in cmd or "-Dhttp.proxyHost" in cmd
+
+
+def test_maven_still_works_without_a_proxy():
+    """Egress is opt-in; with it off, $http_proxy is unset and mvn must still run."""
+    cmd = test_tools.CONTAINER_COMMANDS["java_maven"]
+    # Guarded so an empty proxy does not produce -Dhttp.proxyHost= or an
+    # settings.xml pointing at "".
+    assert 'if [ -n "$http_proxy" ]' in cmd or "if [ -n \"${http_proxy}\" ]" in cmd
+
+
+def test_gradle_configures_a_proxy_from_the_environment():
+    cmd = test_tools.CONTAINER_COMMANDS["java_gradle"]
+    assert "http_proxy" in cmd

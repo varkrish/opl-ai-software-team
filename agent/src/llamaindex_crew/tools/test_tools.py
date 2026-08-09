@@ -307,8 +307,13 @@ CONTAINER_COMMANDS = {
     # with LocalRepositoryNotAccessibleException before compiling anything.
     # Relative path so it resolves under whichever dir the command cd's into —
     # an absolute one would survive the sandbox's `cd /app` rewrite and break.
-    "java_maven": "cd /app && mvn compile -q -Dmaven.repo.local=.m2-repo-local 2>&1",
-    "java_gradle": "cd /app && gradle build -x test -q --gradle-user-home .gradle-home 2>&1",
+    # The JVM ignores $http_proxy — unlike curl, npm, go and pip — so Maven
+    # resolved registry hostnames directly and failed with "Name or service
+    # not known" even while the egress proxy was working. Derive the JVM
+    # proxy flags from the environment, guarded so an unset proxy (egress
+    # disabled) still produces a valid command.
+    "java_maven": "cd /app && if [ -n \"$http_proxy\" ]; then PH=$(echo \"$http_proxy\" | sed -E 's#^https?://##; s#:.*##'); PP=$(echo \"$http_proxy\" | sed -E 's#.*:##'); JP=\"-Dhttp.proxyHost=$PH -Dhttp.proxyPort=$PP -Dhttps.proxyHost=$PH -Dhttps.proxyPort=$PP\"; else JP=\"\"; fi && mvn compile -q -Dmaven.repo.local=.m2-repo-local $JP 2>&1",
+    "java_gradle": "cd /app && if [ -n \"$http_proxy\" ]; then PH=$(echo \"$http_proxy\" | sed -E 's#^https?://##; s#:.*##'); PP=$(echo \"$http_proxy\" | sed -E 's#.*:##'); JP=\"-Dhttp.proxyHost=$PH -Dhttp.proxyPort=$PP -Dhttps.proxyHost=$PH -Dhttps.proxyPort=$PP\"; else JP=\"\"; fi && gradle build -x test -q --gradle-user-home .gradle-home $JP 2>&1",
     "go": "cd /app && go build ./... 2>&1",
     # No build step to run for static HTML/CSS/JS — the meaningful smoke test
     # is confirming the deliverable actually exists and isn't an empty stub.
