@@ -1744,6 +1744,19 @@ def write_wiring_contract(workspace: Path, data: dict) -> Path:
         stack_manifest=stack_manifest if isinstance(stack_manifest, dict) else None,
     ) or data
     synced = sync_module_identity_from_workspace(data, workspace)
+
+    # Every producer — path seed, jq-patch, prose strengthening, tldr enrichment —
+    # converges here, and each of them has been observed emitting two layouts for
+    # one project (see contract_coherence). Resolving at the write boundary is the
+    # only place a single check covers them all.
+    from .contract_coherence import resolve_competing_packages
+
+    synced, dropped_packages = resolve_competing_packages(synced, workspace)
+    if dropped_packages:
+        meta = dict(synced.get("_meta") or {})
+        meta["dropped_competing_packages"] = dropped_packages
+        synced["_meta"] = meta
+
     normalized = validate_wiring_contract(normalize_signatures_for_language(synced))
     target = workspace / WIRING_CONTRACT_FILENAME
     content = json.dumps(normalized, indent=2) + "\n"
@@ -1759,6 +1772,11 @@ def load_wiring_contract(workspace: Path) -> dict | None:
     try:
         data = json.loads(target.read_text(encoding="utf-8"))
         validated = validate_wiring_contract(data)
+        # Contracts written before the coherence gate existed — and any a resumed
+        # job picks up — must not be served with two layouts either.
+        from .contract_coherence import resolve_competing_packages
+
+        validated, _dropped = resolve_competing_packages(validated, workspace)
         # Keep in-memory view aligned with package manifests when present.
         return sync_module_identity_from_workspace(validated, workspace)
     except Exception as exc:
