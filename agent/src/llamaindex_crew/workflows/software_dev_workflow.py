@@ -4108,6 +4108,19 @@ class SoftwareDevWorkflow:
         except Exception as exc:
             logger.warning("Test plan generation failed (non-fatal): %s", exc)
 
+    @staticmethod
+    def _format_test_tally(result: Dict[str, Any]) -> str:
+        """Render a layer's outcome, distinguishing "none passed" from "unknown".
+
+        The parser omits counts for runners it has no pattern for. Printing the
+        old ``0/? passed`` for those states a measured zero the code never
+        measured — and the model downstream cannot tell the two apart.
+        """
+        verdict = "PASSED" if result.get("passed") else "FAILED"
+        if "total" not in result:
+            return f"{verdict} (test counts unavailable — runner output not recognised)"
+        return f"{verdict} — {result.get('passed_count', 0)}/{result['total']} passed"
+
     def _build_test_critique(
         self,
         backend_result: Dict[str, Any],
@@ -4115,16 +4128,10 @@ class SoftwareDevWorkflow:
         failures: List[Dict[str, Any]],
     ) -> str:
         lines = ["TEST FAILURES — fix these before continuing:"]
-        if not backend_result.get("skipped"):
-            lines.append(
-                f"Backend: {backend_result.get('passed_count', 0)}/"
-                f"{backend_result.get('total', '?')} passed"
-            )
-        if not frontend_result.get("skipped"):
-            lines.append(
-                f"Frontend: {frontend_result.get('passed_count', 0)}/"
-                f"{frontend_result.get('total', '?')} passed"
-            )
+        for label, result in (("Backend", backend_result), ("Frontend", frontend_result)):
+            if result.get("skipped"):
+                continue
+            lines.append(f"{label}: {self._format_test_tally(result)}")
         for failure in failures[:20]:
             lines.append(
                 f"  - {failure.get('test', 'unknown')}: "

@@ -107,46 +107,121 @@ def _run_test_command_in_container(workspace: Path, command: str) -> tuple[int, 
         return 1, f"Container test error: {exc}"
 
 
-def _parse_test_output_with_llm(raw_output: str) -> Dict[str, Any]:
-    """Use LLM to parse arbitrary test-runner output into structured results."""
-    from ..utils.llm_config import get_llm_for_agent
+# Best-effort test counts, in priority order — first pattern that matches wins.
+# `.` never crosses a newline, so a pattern can only pair numbers that the
+# runner printed on the same summary line; unrelated "4 passed" / "9 failed"
+# lines elsewhere in a log can never be stitched into a bogus pair.
+#
+# Adding a runner is one entry. Getting it wrong costs a cosmetic count, so
+# these are deliberately literal rather than clever.
+_TEST_COUNT_PATTERNS: list[tuple[re.Pattern, str]] = [
+    # rust/cargo — "test result: ok. 3 passed; 1 failed; 0 ignored"
+    (re.compile(r"test result:.*?(\d+) passed; (\d+) failed"), "passed_failed"),
+    # maven surefire — "Tests run: 6, Failures: 1, Errors: 1, Skipped: 0"
+    (re.compile(r"Tests run: (\d+), Failures: (\d+), Errors: (\d+)"), "surefire"),
+    # pytest, jest, vitest — all three print FAILED BEFORE PASSED
+    #   pytest  "2 failed, 3 passed in 0.12s"
+    #   jest    "Tests:  1 failed, 7 passed, 8 total"
+    #   vitest  "Tests  1 failed | 3 passed (4)"
+    (re.compile(r"(\d+) failed\s*[,|]\s*(\d+) passed"), "failed_passed"),
+    # passed-first variants of the same family
+    (re.compile(r"(\d+) passed\s*[,|]\s*(\d+) failed"), "passed_failed"),
+    # all-green summary with no failure clause — "3 passed in 0.02s".
+    # The trailing duration is required: a bare "N passed" matches things like
+    # "Deploy step 4 passed" in a build log, which is not a test count.
+    (re.compile(r"(\d+) passed[^\n]*? in [\d.]+\s*m?s"), "passed_only"),
+    # TAP — count the result lines themselves
+    (re.compile(r"^(?:not ok|ok) \d+", re.MULTILINE), "tap"),
+    # go test — per-package verdicts, so these are package counts, not test counts
+    (re.compile(r"^(?:FAIL|ok)\s+\S+", re.MULTILINE), "go"),
+]
 
-    prompt = (
-        "Parse the test runner output below into JSON with exactly these keys:\n"
-        '  "passed" (bool), "total" (int), "passed_count" (int), '
-        '"failed_count" (int), "failures" (list of {"test": str, "error": str})\n'
-        "Output ONLY valid JSON — no markdown fences, no prose.\n\n"
-        f"Test output:\n{raw_output[:8000]}"
-    )
-    llm = get_llm_for_agent("worker")
-    response = str(llm.complete(prompt))
 
-    json_match = re.search(r"\{.*\}", response, re.DOTALL)
-    if not json_match:
-        passed = "passed" in raw_output.lower() and "failed" not in raw_output.lower()
-        return {
-            "passed": passed,
-            "total": 0,
-            "passed_count": 0,
-            "failed_count": 0 if passed else 1,
-            "failures": [] if passed else [{"test": "unknown", "error": raw_output[:500]}],
-        }
+def _extract_test_counts(raw_output: str) -> Dict[str, int]:
+    """Best-effort test counts from runner output. Empty dict when unparseable.
+
+    Returning nothing is a correct answer. The caller renders missing counts as
+    "unavailable", which is honest; a fabricated zero is not, and the small model
+    reading the critique cannot tell the difference between "nothing passed" and
+    "we could not tell".
+    """
+    for pattern, kind in _TEST_COUNT_PATTERNS:
+        if kind == "tap":
+            passed = len(re.findall(r"^ok \d+", raw_output, re.MULTILINE))
+            failed = len(re.findall(r"^not ok \d+", raw_output, re.MULTILINE))
+            if not (passed or failed):
+                continue
+            return {"passed_count": passed, "failed_count": failed, "total": passed + failed}
+
+        if kind == "go":
+            passed = len(re.findall(r"^ok\s+\S+", raw_output, re.MULTILINE))
+            failed = len(re.findall(r"^FAIL\s+\S+", raw_output, re.MULTILINE))
+            if not (passed or failed):
+                continue
+            return {"passed_count": passed, "failed_count": failed, "total": passed + failed}
+
+        # Last match, not first: summaries come at the end, and runners that
+        # print more than one tally put the one we want last. jest emits
+        # "Test Suites: 1 failed, 2 passed" before "Tests: 1 failed, 7 passed";
+        # vitest emits "Test Files" before "Tests". Taking the first match
+        # reports the file tally as if it were the test tally.
+        match = None
+        for match in pattern.finditer(raw_output):
+            pass
+        if match is None:
+            continue
+
+        if kind == "surefire":
+            total = int(match.group(1))
+            # Surefire separates assertion failures from thrown errors; both failed.
+            failed = int(match.group(2)) + int(match.group(3))
+            return {
+                "total": total,
+                "failed_count": failed,
+                "passed_count": max(total - failed, 0),
+            }
+        if kind == "passed_only":
+            passed = int(match.group(1))
+            return {"passed_count": passed, "failed_count": 0, "total": passed}
+
+        passed, failed = (
+            (int(match.group(2)), int(match.group(1)))
+            if kind == "failed_passed"
+            else (int(match.group(1)), int(match.group(2)))
+        )
+        return {"passed_count": passed, "failed_count": failed, "total": passed + failed}
+
+    return {}
+
+
+def _parse_test_output(exit_code: int, raw_output: str) -> Dict[str, Any]:
+    """Turn a test run into a verdict, without a model.
+
+    The exit code is the whole verdict — every runner in every language sets it,
+    and it was already overriding the old LLM parser whenever the two disagreed.
+    Counts are best-effort decoration and are omitted entirely when no pattern
+    matches, so an unrecognised runner degrades to "counts unavailable" rather
+    than to a fabricated zero.
+
+    Never raises: a parsing gap must cost a number, never a job.
+    """
+    passed = exit_code == 0
+    result: Dict[str, Any] = {"passed": passed, "failures": []}
+
+    if not passed:
+        # Tail, not head: runners put the summary and failure list at the end,
+        # while the head is setup noise the critique has no room for.
+        result["failures"] = [{
+            "test": "runner",
+            "error": (raw_output or f"test runner exited {exit_code} with no output")[-500:],
+        }]
+
     try:
-        parsed = json.loads(json_match.group(0))
-        parsed.setdefault("passed", parsed.get("failed_count", 0) == 0)
-        parsed.setdefault("total", 0)
-        parsed.setdefault("passed_count", 0)
-        parsed.setdefault("failed_count", 0)
-        parsed.setdefault("failures", [])
-        return parsed
-    except json.JSONDecodeError:
-        return {
-            "passed": False,
-            "total": 0,
-            "passed_count": 0,
-            "failed_count": 1,
-            "failures": [{"test": "parse_error", "error": response[:500]}],
-        }
+        result.update(_extract_test_counts(raw_output or ""))
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.debug("Test count extraction failed, continuing without counts: %s", exc)
+
+    return result
 
 
 def run_feature_tests(
@@ -171,11 +246,7 @@ def run_feature_tests(
         return {"passed": True, "skipped": True, "reason": f"no {cmd_key}"}
 
     exit_code, raw_output = _run_test_command_in_container(workspace, command)
-    parsed = _parse_test_output_with_llm(raw_output)
-    if exit_code != 0 and parsed.get("passed"):
-        parsed["passed"] = False
-        if not parsed.get("failures"):
-            parsed["failures"] = [{"test": "runner", "error": raw_output[:500]}]
+    parsed = _parse_test_output(exit_code, raw_output)
     parsed["layer"] = layer
     parsed["raw_output"] = raw_output[:4000]
     return parsed
