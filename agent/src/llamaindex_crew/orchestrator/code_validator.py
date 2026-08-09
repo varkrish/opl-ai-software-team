@@ -771,6 +771,11 @@ class CodeCompletenessValidator:
         for src in sorted(ws.rglob("*")):
             if not src.is_file() or src.suffix not in _SOURCE_EXTENSIONS:
                 continue
+            # Tests repeat their setup on purpose: each case is kept readable on
+            # its own rather than factored together. Job 107b3d3e failed on a
+            # fetch mock shared by two cases in tests/frontend_test.js.
+            if cls._is_test_path(str(src.relative_to(ws))):
+                continue
             try:
                 content = src.read_text(encoding="utf-8", errors="replace")
             except Exception:
@@ -785,7 +790,13 @@ class CodeCompletenessValidator:
 
             seen: Dict[str, int] = {}
             for i in range(len(lines) - min_block_lines + 1):
-                block = "\n".join(lines[i : i + min_block_lines])
+                window = lines[i : i + min_block_lines]
+                # A window of closing brackets repeats in every nested file and
+                # says nothing about duplicated logic. Require the window to
+                # carry some actual statements before it can count.
+                if sum(1 for l in window if cls._is_substantive_line(l)) < 3:
+                    continue
+                block = "\n".join(window)
                 seen[block] = seen.get(block, 0) + 1
 
             for block, count in seen.items():
@@ -798,6 +809,33 @@ class CodeCompletenessValidator:
                     break
 
         return {"valid": len(duplicates) == 0, "duplicates": duplicates}
+
+    # Language-neutral: every ecosystem marks tests by directory or filename.
+    _TEST_DIR_PARTS = frozenset({"test", "tests", "__tests__", "spec", "specs", "testing"})
+
+    @staticmethod
+    def _is_substantive_line(line: str) -> bool:
+        """True when a line carries logic rather than only delimiters.
+
+        ``});``, ``}``, ``)`` and friends survive the comment filter and can fill
+        a whole window, so repetition of them was being reported as duplicated
+        code.
+        """
+        stripped = re.sub(r"[\s{}()\[\];,.:]+", "", line)
+        return len(stripped) > 2
+
+    @classmethod
+    def _is_test_path(cls, rel_path: str) -> bool:
+        norm = rel_path.replace("\\", "/").lower()
+        parts = norm.split("/")
+        if any(part in cls._TEST_DIR_PARTS for part in parts[:-1]):
+            return True
+        stem = parts[-1].rsplit(".", 1)[0]
+        return (
+            stem.startswith(("test_", "spec_"))     # test_service.py
+            or stem.endswith(("_test", "_spec"))    # api_test.go, models_spec.rb
+            or ".test" in stem or ".spec" in stem   # App.test.jsx
+        )
 
     # ── Module system consistency ───────────────────────────────────────────
 
