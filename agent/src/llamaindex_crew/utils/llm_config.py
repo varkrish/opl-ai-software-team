@@ -286,6 +286,43 @@ def _trim_payload_for_context(payload: dict, trim_fraction: float = 0.25) -> dic
     return payload
 
 
+def _text_from_choice(choice: dict) -> str:
+    """
+    Pull the assistant's text out of one response choice, never returning None.
+
+    Reasoning models (gpt-oss-120b and friends) set ``content: null`` and put
+    their partial output in ``reasoning_content`` when they exhaust max_tokens
+    mid-reasoning, with ``finish_reason: "length"``. Passing that None straight
+    into ChatMessage/CompletionResponse raises a pydantic ValidationError that
+    propagates all the way out and kills the entire job — an unhelpful answer
+    must degrade, not crash the pipeline.
+
+    Order: real content, then the legacy ``text`` field (/completions shape),
+    then the partial reasoning text (the only output there is), then "".
+    """
+    if not isinstance(choice, dict):
+        return ""
+
+    message = choice.get("message")
+    message = message if isinstance(message, dict) else {}
+
+    for candidate in (
+        message.get("content"),
+        choice.get("text"),
+        message.get("reasoning_content"),
+        choice.get("reasoning_content"),
+    ):
+        if isinstance(candidate, str) and candidate.strip():
+            return candidate
+
+    if choice.get("finish_reason") == "length":
+        logger.warning(
+            "LLM returned no usable content (finish_reason=length) — the model "
+            "hit max_tokens before emitting an answer. Treating as empty."
+        )
+    return ""
+
+
 class GenericLlamaLLM(FunctionCallingLLM):
     """
     A truly generic LLM class that uses the LlamaIndex core interfaces.
@@ -684,7 +721,7 @@ class GenericLlamaLLM(FunctionCallingLLM):
                         
                     choice = data["choices"][0]
                     msg_data = choice.get("message", {})
-                    content = msg_data.get("content") or ""
+                    content = _text_from_choice(choice)
                     logger.debug(f"LLM Response: {content[:200]}...")
 
                     additional_kwargs: dict = {}
@@ -885,7 +922,7 @@ class GenericLlamaLLM(FunctionCallingLLM):
                 return ChatResponse(
                     message=ChatMessage(
                         role=MessageRole.ASSISTANT,
-                        content=choice["message"]["content"]
+                        content=_text_from_choice(choice)
                     ),
                     raw=data
                 )
@@ -961,7 +998,7 @@ class GenericLlamaLLM(FunctionCallingLLM):
                         raise ValueError(f"LLM returned invalid format: {err_msg}")
                         
                     return CompletionResponse(
-                        text=data["choices"][0]["text"],
+                        text=_text_from_choice(data["choices"][0]),
                         raw=data
                     )
             except retryable as e:
@@ -1031,7 +1068,7 @@ class GenericLlamaLLM(FunctionCallingLLM):
                     raise ValueError(f"LLM returned invalid format: {err_msg}")
                     
                 return CompletionResponse(
-                    text=data["choices"][0]["text"],
+                    text=_text_from_choice(data["choices"][0]),
                     raw=data
                 )
 

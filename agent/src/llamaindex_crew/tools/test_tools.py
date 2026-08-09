@@ -295,9 +295,20 @@ CONTAINER_IMAGES = {
 
 CONTAINER_COMMANDS = {
     "node": "cd /app && npm install --ignore-scripts 2>&1 && node -e \"try{require('./server')}catch(e){process.exit(0)}\"",
-    "python": "cd /app && python -m py_compile *.py 2>&1 || true",
-    "java_maven": "cd /app && mvn compile -q 2>&1",
-    "java_gradle": "cd /app && gradle build -x test -q 2>&1",
+    # compileall, not `py_compile *.py`: the glob only matches the workspace
+    # ROOT, so a project with its code under app/ or src/ compiled nothing —
+    # and the old `|| true` turned that no-op into a PASS. Seen live: exit 0
+    # with "[Errno 2] No such file or directory: '*.py'". compileall recurses
+    # and exits non-zero on a genuine syntax error, so no `|| true` here.
+    "python": "cd /app && python -m compileall -q "
+              "-x '(^|/)(\\.venv|venv|node_modules|__pycache__|\\.git)(/|$)' . 2>&1",
+    # -Dmaven.repo.local is required, not just $HOME: Maven reads the OS passwd
+    # home (/home/default), which is on the read-only sandbox root, so it fails
+    # with LocalRepositoryNotAccessibleException before compiling anything.
+    # Relative path so it resolves under whichever dir the command cd's into —
+    # an absolute one would survive the sandbox's `cd /app` rewrite and break.
+    "java_maven": "cd /app && mvn compile -q -Dmaven.repo.local=.m2-repo-local 2>&1",
+    "java_gradle": "cd /app && gradle build -x test -q --gradle-user-home .gradle-home 2>&1",
     "go": "cd /app && go build ./... 2>&1",
     # No build step to run for static HTML/CSS/JS — the meaningful smoke test
     # is confirming the deliverable actually exists and isn't an empty stub.

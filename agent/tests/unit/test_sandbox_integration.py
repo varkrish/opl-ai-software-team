@@ -313,6 +313,62 @@ def test_static_smoke_test_fails_on_missing_entry_point(mock_api, monkeypatch, s
     assert str(result).startswith("❌")
 
 
+# ── toolchain commands must work under the sandbox's constraints ─────────────
+#
+# The sandbox root filesystem is read-only and the container user's real home
+# (/home/default) is not writable. Every toolchain that caches under $HOME has
+# to be redirected somewhere inside the writable workspace mount.
+
+def test_maven_does_not_rely_on_home_for_its_local_repo():
+    """
+    Maven resolves its local repo from the OS passwd home, NOT $HOME, so
+    exporting HOME is not enough — verified live: a real Java job failed with
+    "Could not create local repository at /home/default/.m2/repository" on
+    every remediation iteration, because that path is on the read-only root.
+    The repo must be pinned explicitly with -Dmaven.repo.local.
+    """
+    cmd = test_tools.CONTAINER_COMMANDS["java_maven"]
+    assert "-Dmaven.repo.local=" in cmd
+
+
+def test_maven_local_repo_path_is_relative_not_absolute():
+    """
+    Relative so it lands under whichever workspace dir the command cd's into.
+    An absolute /app path would break the sandbox variant, which rewrites
+    `cd /app` to the upload mount but would leave a hardcoded path untouched.
+    """
+    cmd = test_tools.CONTAINER_COMMANDS["java_maven"]
+    repo_arg = [a for a in cmd.split() if a.startswith("-Dmaven.repo.local=")][0]
+    value = repo_arg.split("=", 1)[1]
+    assert not value.startswith("/"), f"must be relative, got {value!r}"
+    assert "$HOME" not in value, "must not depend on $HOME — Maven ignores it here"
+
+
+def test_gradle_does_not_rely_on_home_for_its_cache():
+    cmd = test_tools.CONTAINER_COMMANDS["java_gradle"]
+    assert "--gradle-user-home" in cmd or "-g " in cmd
+
+
+def test_python_smoke_test_checks_nested_sources():
+    """
+    `py_compile *.py` only globs the workspace ROOT. A real FastAPI project
+    puts its code in app/ or src/, so the glob matched nothing — and `|| true`
+    turned that into a PASS. Verified live: a Python job reported exit_code 0
+    with output "[Errno 2] No such file or directory: '*.py'", certifying
+    nothing while looking green. compileall recurses and exits non-zero on a
+    genuine syntax error.
+    """
+    cmd = test_tools.CONTAINER_COMMANDS["python"]
+    assert "compileall" in cmd
+    assert "*.py" not in cmd
+
+
+def test_python_smoke_test_does_not_swallow_failures():
+    """`|| true` makes the check incapable of ever failing."""
+    cmd = test_tools.CONTAINER_COMMANDS["python"]
+    assert "|| true" not in cmd
+
+
 # ── agent tool ───────────────────────────────────────────────────────────────
 
 def test_tool_absent_without_url(monkeypatch, workspace):
