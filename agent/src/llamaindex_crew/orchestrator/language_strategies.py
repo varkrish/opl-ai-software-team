@@ -26,6 +26,8 @@ from typing import Any, Dict, List, Optional, Set
 
 import yaml
 
+from ..utils.vendor_paths import SKIP_DIRS as _SHARED_SKIP_DIRS
+
 logger = logging.getLogger(__name__)
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -90,11 +92,8 @@ class LanguageStrategy(ABC):
 
     # Directories holding other projects' manifests, or build output copies of
     # this project's. Language-neutral: every ecosystem has at least one.
-    VENDOR_DIRS: frozenset = frozenset({
-        "node_modules", ".venv", "venv", "env", ".git", "__pycache__",
-        "site-packages", ".tox", "dist", "build", "target", "out",
-        ".mypy_cache", ".pytest_cache", ".gradle", "vendor", ".next",
-    })
+    # Shared definition; see utils/vendor_paths for why there is only one.
+    VENDOR_DIRS: frozenset = _SHARED_SKIP_DIRS
 
     @classmethod
     def find_manifests(cls, workspace: Path, *patterns: str) -> List[Path]:

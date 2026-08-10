@@ -40,7 +40,7 @@ def workspace_source_hint(workspace_path: Path) -> str:
         ".py", ".java", ".kt", ".go", ".rs", ".rb", ".php", ".cs", ".swift",
         ".js", ".jsx", ".ts", ".tsx", ".vue", ".c", ".h", ".cpp", ".hpp",
     }
-    skip_parts = (".git", "__pycache__", "node_modules", ".venv", "venv", "dist", "build")
+    from ..utils.vendor_paths import SKIP_DIRS as skip_parts
     n = 0
     try:
         for p in workspace_path.rglob("*"):

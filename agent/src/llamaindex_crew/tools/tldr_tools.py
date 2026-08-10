@@ -89,7 +89,7 @@ _EXT_LANG_MAP: dict[str, str] = {
     ".lua": "lua",
 }
 
-_SKIP_DIRS = {".git", "__pycache__", "node_modules", ".pytest_cache", "venv", ".venv"}
+from ..utils.vendor_paths import SKIP_DIRS as _SKIP_DIRS  # one shared definition
 
 _TLDR_BIN_CACHE: Optional[str] = None
 

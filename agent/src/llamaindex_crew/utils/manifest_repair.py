@@ -30,6 +30,8 @@ from pathlib import Path
 from typing import List, Optional
 from xml.etree import ElementTree
 
+from .vendor_paths import is_skippable
+
 logger = logging.getLogger(__name__)
 
 _MAVEN_NS = "{http://maven.apache.org/POM/4.0.0}"
@@ -341,7 +343,7 @@ def repair_unresolvable_pins(workspace: Path, output: Optional[str]) -> List[str
     )
 
     for req_file in candidates:
-        if any(part in {"node_modules", ".venv", "venv", ".git"} for part in req_file.parts):
+        if is_skippable(req_file):
             continue
         try:
             text = req_file.read_text(encoding="utf-8", errors="replace")

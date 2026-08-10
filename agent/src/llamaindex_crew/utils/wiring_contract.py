@@ -34,6 +34,8 @@ import subprocess
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional, Set, TypedDict
 
+from .vendor_paths import is_skippable
+
 logger = logging.getLogger(__name__)
 
 WIRING_CONTRACT_FILENAME = "wiring_contract.json"
@@ -1298,15 +1300,25 @@ def enrich_wiring_contract_from_tldr(
                 fp = str(fp_path.relative_to(workspace)).replace("\\", "/")
         except Exception:
             pass
+        # Dependencies are not this project's packages. The workspace
+        # reconciler already skipped them; this loop did not, so anything tldr
+        # reported out of node_modules or a virtualenv became a package in the
+        # project's own contract.
+        if is_skippable(fp):
+            continue
+
         pkg = _pkg_for_path(fp)
         if not pkg:
-            # Discover package prefix from parent dir if under known roots
+            # Root-level files belong to ".". Requiring a parent other than "."
+            # was the fourth instance of the same exclusion — after the contract
+            # seed dropping flat-layout sources, the language strategies missing
+            # backend/requirements.txt, and preview finding no entrypoint below
+            # the root. A file created after the contract was locked, by gap-fill
+            # or the fix loop, was observed here, matched to nothing and dropped,
+            # leaving the contract blind to a file it would later reconcile.
             parent = str(Path(fp).parent).replace("\\", "/")
-            if parent and parent != ".":
-                pkg = parent
-                packages.setdefault(pkg, {"files": [], "owns": []})
-        if not pkg:
-            continue
+            pkg = parent if parent and parent != "." else "."
+            packages.setdefault(pkg, {"files": [], "owns": []})
         pkg_data = packages.setdefault(pkg, {"files": [], "owns": []})
         files = pkg_data.setdefault("files", [])
         if fp not in files:
@@ -3428,7 +3440,10 @@ def reconcile_workspace_against_contract(
         rel_path = normalize_workspace_path(str(p.relative_to(workspace)))
         if rel_path.startswith(".") or rel_path.startswith("tests/") or rel_path.startswith("test/"):
             continue
-        if "node_modules" in rel_path or "venv" in rel_path:
+        # Whole components, not a substring: `"venv" in rel_path` also skipped a
+        # legitimate my-venv-tool/ package, silently dropping it from import
+        # reconciliation.
+        if is_skippable(rel_path):
             continue
         try:
             content = p.read_text(encoding="utf-8", errors="replace")

@@ -16,6 +16,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse, urlunparse
 
+from llamaindex_crew.utils.vendor_paths import SKIP_DIRS as _SHARED_SKIP_DIRS
+
 logger = logging.getLogger(__name__)
 
 METADATA_KEY = "live_preview"
@@ -92,13 +94,12 @@ _MAIN_GUARD_RE = re.compile(r"^if\s+__name__\s*==\s*['\"]__main__['\"]", re.M)
 
 _CONVENTIONAL_ENTRYPOINTS = ("main.py", "app.py", "server.py", "run.py", "wsgi.py")
 
-# Directories that never hold the thing to run.
-_SKIP_DIRS = frozenset({
-    "node_modules", ".venv", "venv", "env", ".git", "__pycache__",
-    "site-packages", ".tox", "dist", "build", "target", "out", "vendor",
-    "test", "tests", "__tests__", "spec", "specs", "testing",
-    ".mypy_cache", ".pytest_cache", "migrations",
-})
+# Directories that never hold the thing to run: the shared skip set, plus test
+# and migration directories. Those last are NOT vendored — they are this
+# project's own code — so they stay listed here rather than polluting the
+# shared definition other callers rely on.
+_TEST_DIRS = frozenset({"test", "tests", "__tests__", "spec", "specs", "testing", "migrations"})
+_SKIP_DIRS = _SHARED_SKIP_DIRS | _TEST_DIRS
 
 
 def _is_skipped(rel: Path) -> bool:

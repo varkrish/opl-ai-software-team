@@ -10,10 +10,8 @@ from typing import Any, Callable, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
-_SKIP_DIRS = {
-    ".git", "__pycache__", "node_modules", ".pytest_cache", "htmlcov",
-    ".tox", "venv", ".venv", "dist", "build", "target", ".idea",
-}
+# One shared definition; see llamaindex_crew/utils/vendor_paths.
+from llamaindex_crew.utils.vendor_paths import SKIP_DIRS as _SKIP_DIRS
 _SOURCE_EXTS = {
     ".py", ".js", ".jsx", ".ts", ".tsx", ".java", ".kt", ".go", ".rs",
     ".rb", ".c", ".cpp", ".h", ".hpp", ".cs", ".swift",

@@ -30,6 +30,7 @@ from .language_strategies import (
     StrategyRegistry,
     _extract_openapi_paths,
 )
+from ..utils.vendor_paths import SKIP_DIRS as _SHARED_SKIP_DIRS
 
 logger = logging.getLogger(__name__)
 
@@ -525,10 +526,8 @@ class CodeCompletenessValidator:
         "bytes", "type", "object", "frozenset", "complex",
     })
 
-    _SHADOW_SKIP_DIRS = frozenset({
-        ".git", ".tldr", "__pycache__", "node_modules", ".venv", "venv",
-        ".pytest_cache", "htmlcov", ".tox", "build", "dist",
-    })
+    # Shared definition; see utils/vendor_paths for why there is only one.
+    _SHADOW_SKIP_DIRS = _SHARED_SKIP_DIRS
 
     @classmethod
     def validate_builtin_shadowing(cls, workspace_path: Path) -> Dict[str, Any]:
@@ -938,10 +937,8 @@ class CodeCompletenessValidator:
             "skipped": False,
         }
 
-    _VENDOR_PARTS = frozenset({
-        "node_modules", ".venv", "venv", "dist", "build", "target",
-        "__pycache__", ".git", "vendor", "site-packages",
-    })
+    # Shared definition; see utils/vendor_paths for why there is only one.
+    _VENDOR_PARTS = _SHARED_SKIP_DIRS
 
     @classmethod
     def validate_duplicate_code_blocks(
