@@ -128,6 +128,11 @@ def _resolve_tldr_bin() -> Optional[str]:
     if path_bin:
         candidates.append(path_bin)
 
+    candidates.extend([
+        "/usr/local/bin/tldr",
+        str(Path.home() / ".local" / "bin" / "tldr"),
+    ])
+
     seen: set[str] = set()
     for candidate in candidates:
         if not candidate or candidate in seen:
@@ -769,14 +774,14 @@ def read_call_graph(workspace_path: Path) -> list[dict]:
 
 
 def refresh_call_graph(workspace_path: Path, lang: Optional[str] = None) -> None:
-    """Run `tldr structure` to force tldr to rebuild its call graph cache.
+    """Run `tldr warm` to force tldr to rebuild its call graph cache.
 
     This is a side-effect call — the return value (text output) is discarded.
     The real goal is to ensure .tldr/cache/call_graph.json is current before
     index_story_memory reads it.  Silently no-ops if tldr is not installed.
     """
     workspace_path = Path(workspace_path)
-    args = ["structure", str(workspace_path)]
+    args = ["warm", str(workspace_path)]
     if lang:
         args += ["--lang", lang]
     output = _run_tldr(args)

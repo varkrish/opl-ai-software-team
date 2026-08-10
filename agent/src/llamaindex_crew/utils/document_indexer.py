@@ -388,35 +388,43 @@ class DocumentIndexer:
 
 
 def _capture_code_graph(workspace_path: Path) -> Optional[str]:
-    """Capture code_graph.json via tldr structure or fallback file tree scan."""
+    """Capture code_graph.json via call graph edges after warming tldr cache."""
     code_graph_file = workspace_path / "code_graph.json"
     if code_graph_file.exists():
         try:
-            return code_graph_file.read_text(encoding="utf-8", errors="replace")
+            content = code_graph_file.read_text(encoding="utf-8", errors="replace").strip()
+            if content:
+                try:
+                    parsed = json.loads(content)
+                    if isinstance(parsed, dict) and (parsed.get("edges") or parsed.get("workspace_files")):
+                        return content
+                except Exception:
+                    return content
         except OSError:
             pass
 
-    # Try tldr structure if binary exists
-    tldr_bin = "/app/venv/bin/tldr"
-    if not Path(tldr_bin).exists():
-        # Fallback to PATH tldr
-        tldr_bin = "tldr"
+    from ..tools.tldr_tools import refresh_call_graph, read_call_graph, _resolve_tldr_bin
 
-    try:
-        res = subprocess.run(
-            [tldr_bin, "structure", str(workspace_path)],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        if res.returncode == 0 and res.stdout.strip():
-            graph_content = res.stdout.strip()
-            code_graph_file.write_text(graph_content, encoding="utf-8")
-            return graph_content
-    except Exception as e:
-        logger.debug("Could not run tldr structure for code graph: %s", e)
+    tldr_available = bool(_resolve_tldr_bin())
+    if tldr_available:
+        try:
+            refresh_call_graph(workspace_path)
+            edges = read_call_graph(workspace_path)
+            if edges:
+                content = json.dumps({"edges": edges}, indent=2)
+                try:
+                    code_graph_file.write_text(content, encoding="utf-8")
+                except OSError:
+                    pass
+                return content
+            else:
+                # tldr is available but produced 0 edges — do not store empty blueprint
+                return None
+        except Exception as e:
+            logger.debug("Could not refresh/read call graph for code graph: %s", e)
+            return None
 
-    # Fallback: scan source tree layout
+    # Fallback: scan source tree layout when tldr is unavailable
     from .vendor_paths import prune_dirnames
 
     file_list = []
