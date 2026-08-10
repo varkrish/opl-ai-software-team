@@ -475,6 +475,28 @@ def _run_job_async_impl(
                 workspace_path=job_workspace,
                 job_db=job_db,
             )
+
+            # Re-persist the solution blueprint now the job is finished.
+            #
+            # The first write happens at solution approval, which is before
+            # development, before validation and before the wiring contract is
+            # final — so it captures stack_manifest and little else, with no
+            # outcomes, no call-graph edges and no final contract. A job written
+            # only at that point can never qualify as a blueprint source,
+            # because a required check must be recorded AND passed and nothing
+            # has been checked yet.
+            #
+            # Here the workspace holds the finished contract, validation_report
+            # .json with every check's verdict, and the tldr call graph. Same
+            # job_id, so record_job upserts rather than duplicating.
+            from crew_studio.memory_hooks import write_approved_solution_memory
+
+            write_approved_solution_memory(
+                job_id,
+                config=job_config,
+                job=job_db.get_job(job_id) or job_row,
+                workspace_path=job_workspace,
+            )
         except Exception as mem_err:
             logger.warning(
                 "Context memory post-job hook raised (non-fatal) for job %s: %s",

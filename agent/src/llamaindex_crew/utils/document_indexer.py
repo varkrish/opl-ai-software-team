@@ -480,7 +480,15 @@ def index_approved_solution(
 
     # Sourced job vision & status
     job_db_env = os.getenv("JOB_DB_PATH", "/app/data/crew_jobs.db")
-    sync_job_from_sqlite(job_db_env, job_id, scope.org_id, scope.project_id, scope.domain, store=store)
+    # The workspace is passed so outcomes can come from validation_report.json,
+    # which records every check that ran. The SQLite validation_issues table
+    # holds only failures, so sourcing from it alone leaves a passing check
+    # indistinguishable from one that never ran — and a blueprint needs its
+    # required checks recorded AND passed to qualify.
+    sync_job_from_sqlite(
+        job_db_env, job_id, scope.org_id, scope.project_id, scope.domain,
+        store=store, workspace_path=workspace_path,
+    )
 
     success = store.record_job(
         job_id=job_id,

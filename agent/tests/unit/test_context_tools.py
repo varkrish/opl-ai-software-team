@@ -59,7 +59,7 @@ def test_context_tools_outcomes_and_anti_pattern_check(store):
     assert job_id not in ref_res
 
     # 4. find_fix_precedent finds recorded issue
-    fix_res = find_fix_precedent("client_endpoint_alignment")
+    fix_res = find_fix_precedent("client_server_contract")
     assert "Route mismatch" in fix_res
 
     # 5. check_known_bad catches anti-patterns

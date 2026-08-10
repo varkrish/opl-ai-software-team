@@ -190,3 +190,48 @@ def test_an_unreachable_database_yields_nothing_rather_than_raising():
     store._get_connection = lambda: None  # type: ignore[assignment]
 
     assert store.get_passed_jobs_in_scope("org", "proj", "general") == []
+
+
+# ── where outcomes come from ────────────────────────────────────────────────
+
+def test_outcomes_come_from_the_report_not_the_failures_table(tmp_path):
+    """
+    validation_issues is a FAILURES table: one row per problem, nothing for a
+    check that passed. On job 107b3d3e it held 5 rows while the report recorded
+    15 checks, 12 of them passing. Sourcing outcomes from it left a passing
+    check indistinguishable from one that never ran — and since a required
+    check must be recorded AND passed to qualify a blueprint, no job could ever
+    be reusable. The seeding path was inert.
+    """
+    import json
+    from llamaindex_crew.memory.postgres_context_store import _outcomes_from_validation_report
+
+    (tmp_path / "validation_report.json").write_text(json.dumps({"checks": {
+        "entrypoint": {"pass": True},
+        "completeness": {"pass": True},
+        "client_server_contract": {"pass": False, "unreachable_calls": ["/api/v1/stream"]},
+        "contract_conformance": {"pass": True, "skipped": True},
+    }}), encoding="utf-8")
+
+    outcomes = _outcomes_from_validation_report(tmp_path)
+    by_name = {o["check_name"]: o["passed"] for o in outcomes}
+
+    assert by_name["entrypoint"] is True, "a passing check must be recorded, not merely absent"
+    assert by_name["completeness"] is True
+    assert by_name["client_server_contract"] is False
+    assert "contract_conformance" not in by_name, (
+        "a skipped check is not evidence; recording it as passed would qualify a "
+        "blueprint on a check nobody ran"
+    )
+
+
+def test_a_missing_report_falls_back_rather_than_raising(tmp_path):
+    from llamaindex_crew.memory.postgres_context_store import _outcomes_from_validation_report
+    assert _outcomes_from_validation_report(tmp_path) == []
+    assert _outcomes_from_validation_report(None) == []
+
+
+def test_a_malformed_report_does_not_raise(tmp_path):
+    from llamaindex_crew.memory.postgres_context_store import _outcomes_from_validation_report
+    (tmp_path / "validation_report.json").write_text("{not json", encoding="utf-8")
+    assert _outcomes_from_validation_report(tmp_path) == []

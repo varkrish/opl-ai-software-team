@@ -428,6 +428,44 @@ class PostgresContextStore:
             conn.close()
 
 
+
+def _outcomes_from_validation_report(workspace_path: Optional[Path]) -> List[Dict[str, Any]]:
+    """Every check the validator ran, with its verdict, from validation_report.json.
+
+    Returns [] when there is no readable report, so the caller can fall back.
+    """
+    if not workspace_path:
+        return []
+    report_file = Path(workspace_path) / "validation_report.json"
+    if not report_file.is_file():
+        return []
+    try:
+        checks = (json.loads(report_file.read_text(encoding="utf-8")) or {}).get("checks")
+    except Exception as exc:  # noqa: BLE001 — a bad report must not fail the write
+        logger.warning("Could not read %s: %s", report_file, exc)
+        return []
+    if not isinstance(checks, dict):
+        return []
+
+    outcomes: List[Dict[str, Any]] = []
+    for name, detail in checks.items():
+        if not isinstance(detail, dict):
+            continue
+        if detail.get("skipped"):
+            # A skipped check is not evidence either way; recording it as passed
+            # would qualify a blueprint on a check nobody ran.
+            continue
+        passed = bool(detail.get("pass"))
+        outcomes.append({
+            "check_name": str(name),
+            "severity": "error" if not passed else "info",
+            "passed": passed,
+            "file_path": None,
+            "description": "" if passed else str(detail)[:500],
+        })
+    return outcomes
+
+
 def sync_job_from_sqlite(
     sqlite_db_path: Union[str, Path],
     job_id: str,
@@ -435,8 +473,23 @@ def sync_job_from_sqlite(
     scope_project: str,
     scope_domain: str,
     store: Optional[PostgresContextStore] = None,
+    workspace_path: Optional[Path] = None,
 ) -> bool:
-    """Helper to source job record and validation issues from SQLite crew_jobs.db into Postgres context plane."""
+    """Source the job record and its per-check outcomes into the context plane.
+
+    Outcomes come from ``validation_report.json`` in the workspace when it is
+    available, and fall back to the SQLite ``validation_issues`` table.
+
+    That order matters. ``validation_issues`` is a FAILURES table — it holds one
+    row per problem found and nothing at all for a check that passed. On job
+    107b3d3e it carried 5 rows while the report recorded 15 checks, 12 of them
+    passing. Sourcing outcomes from it alone means a passing check is
+    indistinguishable from a check that never ran, and since a required check
+    must be recorded AND passed to qualify a blueprint, no job could ever be
+    reusable. The whole seeding path was inert.
+
+    The report is the ground truth: report["checks"][name]["pass"] exists for
+    every check that ran."""
     db_path = Path(sqlite_db_path)
     if not db_path.is_file():
         return False
@@ -455,16 +508,20 @@ def sync_job_from_sqlite(
         issue_rows = c.fetchall()
         conn.close()
 
-        outcomes = []
-        for check_name, severity, issue_status, file_path, desc in issue_rows:
-            passed = issue_status != "pending" and severity != "error"
-            outcomes.append({
-                "check_name": check_name,
-                "severity": severity,
-                "passed": passed,
-                "file_path": file_path,
-                "description": desc,
-            })
+        outcomes = _outcomes_from_validation_report(workspace_path)
+        if not outcomes:
+            # No report on disk (older job, or it never reached validation).
+            # Fall back to the failures table, accepting that it can only ever
+            # describe what went wrong.
+            for check_name, severity, issue_status, file_path, desc in issue_rows:
+                passed = issue_status != "pending" and severity != "error"
+                outcomes.append({
+                    "check_name": check_name,
+                    "severity": severity,
+                    "passed": passed,
+                    "file_path": file_path,
+                    "description": desc,
+                })
 
         store_inst = store or PostgresContextStore()
         return store_inst.record_job(
