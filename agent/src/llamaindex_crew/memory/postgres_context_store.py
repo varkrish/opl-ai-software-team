@@ -410,6 +410,31 @@ class PostgresContextStore:
         finally:
             conn.close()
 
+    def get_prose_document(self, job_id: str, doc_type: str) -> Optional[str]:
+        """Whole prose document (solution_spec, test_plan, tech_stack) for a job.
+
+        Prose is stored for semantic search, but some of it is worth handing
+        back verbatim: test_plan.md carries the test commands and
+        preview_command, which are directly reusable for a matching stack.
+        """
+        conn = self._get_connection()
+        if not conn:
+            return None
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT text FROM prose_vectors WHERE job_id = %s AND doc_type = %s "
+                    "ORDER BY id LIMIT 1;",
+                    (job_id, doc_type),
+                )
+                row = cur.fetchone()
+                return row[0] if row and row[0] else None
+        except Exception as exc:
+            logger.error("Failed getting prose %s for job %s: %s", doc_type, job_id, exc)
+            return None
+        finally:
+            conn.close()
+
     def get_call_graph_edges(self, job_id: str) -> List[Dict[str, str]]:
         conn = self._get_connection()
         if not conn:

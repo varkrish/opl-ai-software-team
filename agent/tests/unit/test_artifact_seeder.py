@@ -96,3 +96,88 @@ def test_seed_wiring_contract_prevents_tests_only_failure(store):
     deps = seed_contract_deps_from_prior_callgraph(scope, store=store)
     assert deps is not None
     assert any(d["source_file"] == "backend/main.py" and d["target_file"] == "backend/api.py" for d in deps)
+
+
+# ── the test plan comes from test_plan.md, not stack_manifest ───────────────
+#
+# Live job e4abf072 stored a 5 683-character test_plan.md whose last nine lines
+# are the only runnable part. `preview_command` has never once been written into
+# stack_manifest.json, so the seeder that read it there could not fire even for
+# a job whose smoke_test passed.
+
+_LIVE_PLAN = """# 1. Test Strategy
+
+## 1.1 Testing Pyramid
+The service layer is the business core; unit tests give fast feedback.
+Integration tests use FastAPI's TestClient against an in-memory SQLite DB.
+
+# 3. Execution Configuration
+backend_test_command: pip install -r requirements.txt && pytest
+frontend_test_command: echo no frontend tests
+backend_test_dir: tests
+frontend_test_dir: .
+test_framework_backend: pytest
+test_framework_frontend: none
+preview_command: pip install -r requirements.txt && uvicorn main:app --port 8000
+"""
+
+
+class _ProseStore:
+    """Store stub: one qualifying job, whatever prose and artifacts are given."""
+
+    def __init__(self, prose=None, artifacts=None):
+        self._prose = prose or {}
+        self._artifacts = artifacts or {}
+
+    def get_passed_jobs_in_scope(self, **_kw):
+        return ["job-1"]
+
+    def get_prose_document(self, job_id, doc_type):
+        return self._prose.get(doc_type)
+
+    def get_artifact(self, job_id, name):
+        return self._artifacts.get(name)
+
+
+def test_the_test_plan_is_sourced_from_stored_prose():
+    seeded = seed_test_plan_from_prior(
+        MemoryScope(org_id="o", project_id="p", domain="d"),
+        store=_ProseStore(prose={"test_plan": _LIVE_PLAN}),
+    )
+
+    assert seeded is not None, "reading preview_command off stack_manifest never fired"
+    assert "uvicorn main:app --port 8000" in seeded
+    assert "pip install -r requirements.txt && pytest" in seeded
+
+
+def test_only_the_runnable_configuration_is_handed_over():
+    """
+    The narrative is the new job's to write. Replaying 5 KB of test-strategy
+    prose would spend most of a 14b model's attention saying nothing it can act
+    on — recall should shrink the prompt, not fill it.
+    """
+    seeded = seed_test_plan_from_prior(
+        MemoryScope(org_id="o", project_id="p", domain="d"),
+        store=_ProseStore(prose={"test_plan": _LIVE_PLAN}),
+    )
+
+    assert "Testing Pyramid" not in seeded
+    assert "TestClient" not in seeded
+    assert len(seeded) < 1000, f"seeded {len(seeded)} chars of a {len(_LIVE_PLAN)}-char plan"
+
+
+def test_a_plan_with_no_runnable_commands_is_not_seeded():
+    """Prose alone is not a seed — there is nothing for the next job to reuse."""
+    assert seed_test_plan_from_prior(
+        MemoryScope(org_id="o", project_id="p", domain="d"),
+        store=_ProseStore(prose={"test_plan": "# 1. Test Strategy\n\nWrite good tests.\n"}),
+    ) is None
+
+
+def test_a_record_predating_prose_storage_falls_back_to_the_manifest():
+    seeded = seed_test_plan_from_prior(
+        MemoryScope(org_id="o", project_id="p", domain="d"),
+        store=_ProseStore(artifacts={"stack_manifest": {"preview_command": "npm start"}}),
+    )
+
+    assert seeded is not None and "npm start" in seeded

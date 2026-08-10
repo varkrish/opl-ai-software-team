@@ -11,8 +11,22 @@ import logging
 from typing import Any, Dict, List, Optional
 from llamaindex_crew.memory.scope import MemoryScope
 from llamaindex_crew.memory.postgres_context_store import PostgresContextStore
+from llamaindex_crew.tools.test_tools import parse_test_plan
 
 logger = logging.getLogger(__name__)
+
+# The runnable half of a test plan — the same keys ``run_tests`` and the preview
+# runner read. Everything else in test_plan.md is narrative that a new job must
+# write for itself.
+_EXECUTION_KEYS = (
+    "backend_test_command",
+    "frontend_test_command",
+    "backend_test_dir",
+    "frontend_test_dir",
+    "test_framework_backend",
+    "test_framework_frontend",
+    "preview_command",
+)
 
 
 def _package_names(contract: Dict[str, Any]) -> List[str]:
@@ -135,17 +149,39 @@ def seed_test_plan_from_prior(
     )
 
     for job_id in passed_job_ids:
+        # The commands live in test_plan.md, not stack_manifest — reading
+        # ``preview_command`` off the manifest, where nothing has ever written
+        # it, meant this seeder could not fire even for a job whose smoke_test
+        # passed.
+        plan_text = db_store.get_prose_document(job_id, "test_plan")
+        if plan_text:
+            config = {
+                k: v for k, v in parse_test_plan(plan_text).items()
+                if k in _EXECUTION_KEYS and v
+            }
+            if config.get("backend_test_command") or config.get("preview_command"):
+                logger.info("Seeded test plan config from prior validated job %s", job_id)
+                lines = "\n".join(f"{k}: {config[k]}" for k in _EXECUTION_KEYS if k in config)
+                return (
+                    f"## PROVEN EXECUTION CONFIGURATION (job {job_id}, smoke_test passed)\n"
+                    f"These commands ran successfully against this stack. Reuse them,\n"
+                    f"adjusting only paths that genuinely differ in this project.\n\n"
+                    f"{lines}\n"
+                )
+            # A plan with prose but no runnable configuration is not a seed.
+            # Handing over 5 KB of test-strategy narrative would consume most of
+            # a 14b model's attention to say nothing it can act on.
+
+        # Older records predate prose storage; fall back to the manifest.
         stack_manifest = db_store.get_artifact(job_id, "stack_manifest")
         if isinstance(stack_manifest, dict):
             preview_cmd = stack_manifest.get("preview_command") or stack_manifest.get("test_command")
             if preview_cmd:
-                plan = (
-                    f"## SEEDED TEST PLAN & VERIFICATION (Sourced from Job {job_id})\n"
-                    f"Verified Preview Command: `{preview_cmd}`\n"
-                    "Automated Test Suite: pytest --cov\n"
+                logger.info("Seeded preview command from prior job %s", job_id)
+                return (
+                    f"## PROVEN EXECUTION CONFIGURATION (job {job_id}, smoke_test passed)\n"
+                    f"preview_command: {preview_cmd}\n"
                 )
-                logger.info("Seeded test plan from prior job %s", job_id)
-                return plan
 
     return None
 

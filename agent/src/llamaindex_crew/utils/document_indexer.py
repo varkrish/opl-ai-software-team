@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import subprocess
 import logging
 from dataclasses import dataclass
@@ -421,6 +422,44 @@ def _capture_code_graph(workspace_path: Path) -> Optional[str]:
     return None
 
 
+def _creation_manifest_paths(workspace_path: Path, job_id: str) -> List[str]:
+    """File paths the job registered, read from its tasks DB.
+
+    The creation manifest has no file on disk — it is task rows — so a seeder
+    asking for creation_manifest.json could never be satisfied. Read directly,
+    and return [] on any problem: a missing manifest costs one seeding
+    opportunity, never the job.
+    """
+    db = Path(workspace_path) / f"tasks_{job_id}.db"
+    if not db.is_file():
+        return []
+    # There is no file_path column: the path lives inside the JSON metadata of
+    # each file_creation task, e.g. {"file_path": "models.py", ...}.
+    try:
+        conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+        try:
+            rows = conn.execute(
+                "SELECT metadata FROM tasks WHERE task_type = 'file_creation';"
+            ).fetchall()
+        finally:
+            conn.close()
+    except Exception as exc:  # noqa: BLE001 — never fail a write over the manifest
+        logger.debug("Could not read creation manifest for %s: %s", job_id, exc)
+        return []
+
+    paths: List[str] = []
+    for (raw,) in rows:
+        if not raw:
+            continue
+        try:
+            path = (json.loads(raw) or {}).get("file_path")
+        except Exception:  # noqa: BLE001 — one bad row must not lose the rest
+            continue
+        if isinstance(path, str) and path.strip():
+            paths.append(path.strip())
+    return sorted(set(paths))
+
+
 def index_approved_solution(
     scope: MemoryScope,
     workspace_path: Path,
@@ -440,13 +479,19 @@ def index_approved_solution(
 
     store = PostgresContextStore()
 
-    # Read artifacts
+    # Read artifacts.
+    #
+    # These names must match what the pipeline actually writes. They did not:
+    # creation_manifest.json is never written by anything (the creation manifest
+    # lives in the per-job tasks DB), and the contract file is api_contract.YAML
+    # — 20 references to .yaml against this one .json. Both were silently
+    # absent, so the manifest seeder could never return anything even for a job
+    # that qualified on its checks, which is exactly what job e4abf072 showed:
+    # entrypoint and completeness passed, and the seed still came back empty.
     json_artifacts: Dict[str, Any] = {}
     json_files = [
         ("wiring_contract.json", "wiring_contract"),
         ("stack_manifest.json", "stack_manifest"),
-        ("creation_manifest.json", "creation_manifest"),
-        ("api_contract.json", "api_contract"),
     ]
     for filename, doc_type in json_files:
         file_path = workspace_path / filename
@@ -456,16 +501,45 @@ def index_approved_solution(
             except Exception as e:
                 logger.warning("Could not parse %s for job %s: %s", filename, job_id, e)
 
+    # api_contract is YAML. Parsed to JSON so it is queryable as jsonb like the
+    # rest; it is the only language-neutral artifact the pipeline produces, so
+    # it is worth storing structurally rather than as prose.
+    api_contract = workspace_path / "api_contract.yaml"
+    if api_contract.is_file():
+        try:
+            import yaml as _yaml
+            parsed = _yaml.safe_load(api_contract.read_text(encoding="utf-8", errors="replace"))
+            if parsed:
+                json_artifacts["api_contract"] = parsed
+        except Exception as e:
+            logger.warning("Could not parse api_contract.yaml for job %s: %s", job_id, e)
+
+    # The creation manifest is not a file — it is rows in the job's tasks DB.
+    # Reconstructed from the registered file paths so the manifest seeder has
+    # something to return.
+    manifest_paths = _creation_manifest_paths(workspace_path, job_id)
+    if manifest_paths:
+        json_artifacts["creation_manifest"] = [{"path": p} for p in manifest_paths]
+
     prose_documents: List[Dict[str, str]] = []
-    sol_spec = workspace_path / "solution_spec.md"
-    if sol_spec.is_file():
+    # test_plan carries the test commands and preview_command — the highest-value
+    # prose to reuse for a matching stack, and previously never persisted, so
+    # seed_test_plan_from_prior could never fire.
+    for filename, doc_type in (
+        ("solution_spec.md", "solution_spec"),
+        ("test_plan.md", "test_plan"),
+        ("tech_stack.md", "tech_stack"),
+    ):
+        path = workspace_path / filename
+        if not path.is_file():
+            continue
         try:
             prose_documents.append({
-                "doc_type": "solution_spec",
-                "text": sol_spec.read_text(encoding="utf-8", errors="replace"),
+                "doc_type": doc_type,
+                "text": path.read_text(encoding="utf-8", errors="replace"),
             })
         except OSError:
-            pass
+            continue
 
     # Read call graph edges
     edges: List[Dict[str, str]] = []

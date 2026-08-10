@@ -25,13 +25,16 @@ from .file_tools import _resolve_workspace
 logger = logging.getLogger(__name__)
 
 
-def _read_test_plan(workspace: Path) -> Dict[str, str]:
-    """Parse test_plan.md key-value lines. Returns {} if the file is missing."""
-    plan_file = workspace / "test_plan.md"
-    if not plan_file.is_file():
-        return {}
+def parse_test_plan(text: str) -> Dict[str, str]:
+    """Parse the ``key: value`` execution-configuration lines out of a test plan.
+
+    Split out from :func:`_read_test_plan` so the context plane can parse a plan
+    recalled from the database, where there is no file on disk. One parser, so a
+    plan means the same thing whether it is read from the workspace or replayed
+    from a prior job.
+    """
     result: Dict[str, str] = {}
-    for line in plan_file.read_text(encoding="utf-8", errors="replace").splitlines():
+    for line in text.splitlines():
         stripped = line.strip()
         if not stripped or stripped.startswith("#"):
             continue
@@ -43,6 +46,14 @@ def _read_test_plan(workspace: Path) -> Dict[str, str]:
         if key:
             result[key] = value
     return result
+
+
+def _read_test_plan(workspace: Path) -> Dict[str, str]:
+    """Parse test_plan.md key-value lines. Returns {} if the file is missing."""
+    plan_file = workspace / "test_plan.md"
+    if not plan_file.is_file():
+        return {}
+    return parse_test_plan(plan_file.read_text(encoding="utf-8", errors="replace"))
 
 
 def _find_container_runtime() -> Optional[str]:

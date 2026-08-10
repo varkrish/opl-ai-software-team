@@ -4500,6 +4500,23 @@ class SoftwareDevWorkflow:
                 skill_context=skill_context or "(none)",
             )
 
+            # Hand over the execution configuration a prior job in this scope
+            # actually ran, so the model adapts proven commands instead of
+            # inventing a preview_command that has never been executed. Only the
+            # runnable keys are replayed — the narrative is this job's to write.
+            try:
+                from llamaindex_crew.memory.scope import resolve_scope
+                from llamaindex_crew.memory.artifact_seeder import seed_test_plan_from_prior
+                scope = resolve_scope(getattr(self, "_job_data", {}) or {},
+                                      workspace_path=self.workspace_path)
+                proven = seed_test_plan_from_prior(scope)
+                if proven:
+                    prompt = f"{prompt}\n\n{proven}"
+                    logger.info("Seeded test plan config from a prior validated job in scope %s",
+                                scope.describe())
+            except Exception as exc:
+                logger.debug("Seeding test plan from prior failed: %s", exc)
+
             llm = self._get_manager_llm()
             result = str(llm.complete(prompt))
             _persist_phase_artifact(self.workspace_path, "test_plan.md", result)
