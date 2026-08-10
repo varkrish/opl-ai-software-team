@@ -462,60 +462,73 @@ def index_approved_solution(
 ) -> int:
     """
     Persist approved solution artifacts (solution_spec.md, wiring_contract.json,
-    stack_manifest.json, code_graph.json) to the persistent scope-partitioned RAG index.
+    stack_manifest.json, code_graph.json) to the Postgres crew_context database.
     """
     workspace_path = Path(workspace_path)
     if not workspace_path.exists():
         return 0
 
-    indexer = DocumentIndexer.for_scope(scope, base_dir=base_dir, fallback_workspace=workspace_path)
-    inserted_total = 0
+    from ..memory.postgres_context_store import PostgresContextStore, sync_job_from_sqlite
 
-    artifacts_to_index = [
-        ("solution_spec.md", "solution_spec"),
+    store = PostgresContextStore()
+
+    # Read artifacts
+    json_artifacts: Dict[str, Any] = {}
+    json_files = [
         ("wiring_contract.json", "wiring_contract"),
         ("stack_manifest.json", "stack_manifest"),
+        ("creation_manifest.json", "creation_manifest"),
+        ("api_contract.json", "api_contract"),
     ]
-
-    extra_meta = {
-        "job_id": job_id,
-        "approved": True,
-    }
-    if score is not None:
-        extra_meta["critique_score"] = score
-
-    for filename, doc_type in artifacts_to_index:
+    for filename, doc_type in json_files:
         file_path = workspace_path / filename
         if file_path.is_file():
-            count = indexer.index_file_at_path(
-                file_path,
-                source_label=filename,
-                doc_type=doc_type,
-                extra_metadata=extra_meta,
-                auto_persist=False,
-            )
-            inserted_total += count
+            try:
+                json_artifacts[doc_type] = json.loads(file_path.read_text(encoding="utf-8"))
+            except Exception as e:
+                logger.warning("Could not parse %s for job %s: %s", filename, job_id, e)
 
-    # Handle code_graph.json
+    prose_documents: List[Dict[str, str]] = []
+    sol_spec = workspace_path / "solution_spec.md"
+    if sol_spec.is_file():
+        try:
+            prose_documents.append({
+                "doc_type": "solution_spec",
+                "text": sol_spec.read_text(encoding="utf-8", errors="replace"),
+            })
+        except OSError:
+            pass
+
+    # Read call graph edges
+    edges: List[Dict[str, str]] = []
     graph_text = _capture_code_graph(workspace_path)
     if graph_text:
-        count = indexer.index_text(
-            graph_text,
-            source="code_graph.json",
-            doc_type="code_graph",
-            extra_metadata=extra_meta,
-            auto_persist=False,
-        )
-        inserted_total += count
+        try:
+            parsed = json.loads(graph_text)
+            if isinstance(parsed, dict) and "edges" in parsed:
+                edges = parsed["edges"]
+        except Exception:
+            pass
 
-    if inserted_total > 0:
-        indexer.finalize()
-        logger.info(
-            "Persisted %d chunk(s) from approved solution for job %s to scope %s",
-            inserted_total, job_id, scope.describe()
-        )
+    # Sourced job vision & status
+    job_db_env = os.getenv("JOB_DB_PATH", "/app/data/crew_jobs.db")
+    sync_job_from_sqlite(job_db_env, job_id, scope.org_id, scope.project_id, scope.domain, store=store)
 
-    return inserted_total
+    success = store.record_job(
+        job_id=job_id,
+        scope_org=scope.org_id,
+        scope_project=scope.project_id,
+        scope_domain=scope.domain,
+        vision="",  # sync_job_from_sqlite populates vision if present
+        json_artifacts=json_artifacts,
+        prose_documents=prose_documents,
+        call_graph_edges=edges,
+    )
+
+    if success:
+        logger.info("Persisted solution artifacts for job %s to Postgres crew_context scope %s", job_id, scope.describe())
+        return len(json_artifacts) + len(prose_documents)
+    return 0
 
 
 def recall_scoped_blueprints(
@@ -527,30 +540,46 @@ def recall_scoped_blueprints(
     base_dir: Optional[Path] = None,
 ) -> List[RetrievedChunk]:
     """
-    Recall blueprint chunks from both the framework persistent index and shared index.
+    Recall blueprint chunks from Postgres crew_context database.
+    Filter out jobs that failed validation. Fail open and log loudly if DB is unreachable.
     """
+    from ..memory.postgres_context_store import PostgresContextStore
+
+    store = PostgresContextStore()
+    passed_job_ids = store.get_passed_jobs_in_scope(
+        org_id=scope.org_id,
+        project_id=scope.project_id,
+        domain=scope.domain,
+    )
+
+    if not passed_job_ids:
+        logger.info("No validated prior jobs found in Postgres crew_context for scope %s", scope.describe())
+        return []
+
     chunks: List[RetrievedChunk] = []
     seen: set[str] = set()
 
-    # 1. Search framework-scoped index
-    fw_indexer = DocumentIndexer.for_scope(scope, base_dir=base_dir)
-    if fw_indexer.has_index:
-        for chunk in fw_indexer.retrieve(query_text, top_k=top_k, max_chars=max_chars):
-            key = f"{chunk.source}:{chunk.chunk_index}:{hash(chunk.text[:100])}"
-            if key not in seen:
-                seen.add(key)
-                chunks.append(chunk)
+    for jid in passed_job_ids:
+        for doc_type, label in [("solution_spec", "solution_spec.md"), ("wiring_contract", "wiring_contract.json"), ("stack_manifest", "stack_manifest.json")]:
+            artifact = store.get_artifact(jid, doc_type)
+            if not artifact:
+                continue
 
-    # 2. Search shared-scoped index (for reference docs indexed before framework was chosen)
-    from dataclasses import replace
-    shared_scope = replace(scope, project_id="shared-context")
-    shared_indexer = DocumentIndexer.for_scope(shared_scope, base_dir=base_dir)
-    if shared_indexer.has_index:
-        for chunk in shared_indexer.retrieve(query_text, top_k=top_k, max_chars=max_chars):
-            key = f"{chunk.source}:{chunk.chunk_index}:{hash(chunk.text[:100])}"
-            if key not in seen:
-                seen.add(key)
-                chunks.append(chunk)
+            text_content = json.dumps(artifact, indent=2) if isinstance(artifact, (dict, list)) else str(artifact)
+            if not text_content.strip():
+                continue
+
+            chunk_key = f"{jid}:{doc_type}"
+            if chunk_key not in seen:
+                seen.add(chunk_key)
+                chunks.append(RetrievedChunk(
+                    text=text_content.strip(),
+                    source=label,
+                    chunk_index=0,
+                    score=1.0,
+                    job_id=jid,
+                    doc_type=doc_type,
+                ))
 
     # Respect total max_chars budget
     if max_chars and chunks:
