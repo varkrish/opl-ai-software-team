@@ -15,6 +15,32 @@ from llamaindex_crew.memory.postgres_context_store import PostgresContextStore
 logger = logging.getLogger(__name__)
 
 
+def _package_names(contract: Dict[str, Any]) -> List[str]:
+    """Package names from a wiring contract, whichever shape it was stored in.
+
+    Current contracts use a mapping of name -> {files, owns}; some stored
+    artifacts and fixtures use a list of {"name": ...}. Reading only one shape
+    is what let a tests-only contract slip past the guard below.
+    """
+    packages = contract.get("packages")
+    if isinstance(packages, dict):
+        return sorted(str(k) for k in packages)
+    if isinstance(packages, list):
+        return [
+            str(p.get("name")) if isinstance(p, dict) else str(p)
+            for p in packages
+        ]
+    return []
+
+
+# Check names below must match the keys the validator writes into
+# report["checks"] — wiring_reconciliation, entrypoint, client_server_contract,
+# completeness, smoke_test and so on. They were originally invented
+# ("wiring_contract", "client_endpoint_alignment", "pytest"), which no validator
+# emits, so once a required check had to be *recorded* to count as passed, three
+# of the four seeders could never fire against real job data.
+
+
 def seed_wiring_contract_from_prior(
     scope: MemoryScope,
     vision: str = "",
@@ -31,19 +57,29 @@ def seed_wiring_contract_from_prior(
         org_id=scope.org_id,
         project_id=scope.project_id,
         domain=scope.domain,
-        required_checks=["wiring_contract", "entrypoint", "client_endpoint_alignment"],
+        required_checks=["wiring_reconciliation", "entrypoint", "client_server_contract"],
     )
 
     for job_id in passed_job_ids:
         artifact = db_store.get_artifact(job_id, "wiring_contract")
         if isinstance(artifact, dict) and artifact:
-            # Check structure: contract containing only "tests" package or no entrypoint is rejected
-            packages = artifact.get("packages", [])
-            if isinstance(packages, list) and packages:
-                pkg_names = [p.get("name") if isinstance(p, dict) else str(p) for p in packages]
-                if set(pkg_names) == {"tests"} or set(pkg_names) == {"test"}:
-                    logger.warning("Rejected prior candidate wiring contract for job %s: contains only tests package", job_id)
-                    continue
+            # Reject a contract that declares nothing but tests — the job
+            # 1cec01ad shape, where the whole application was missing.
+            #
+            # A real wiring contract stores packages as a MAPPING of
+            # name -> {files, owns}. Checking only `isinstance(packages, list)`
+            # meant this guard was skipped for every genuine contract, so the
+            # one thing it exists to catch would have been seeded anyway. Both
+            # shapes are handled because stored artifacts predate the fix.
+            pkg_names = _package_names(artifact)
+            if pkg_names and all(
+                n.strip("/").split("/")[0] in ("tests", "test") for n in pkg_names
+            ):
+                logger.warning(
+                    "Rejected prior wiring contract from job %s: declares only tests (%s)",
+                    job_id, pkg_names,
+                )
+                continue
             logger.info("Seeded wiring_contract from validated prior job %s", job_id)
             return artifact
 
@@ -95,7 +131,7 @@ def seed_test_plan_from_prior(
         org_id=scope.org_id,
         project_id=scope.project_id,
         domain=scope.domain,
-        required_checks=["pytest", "smoke"],
+        required_checks=["smoke_test"],
     )
 
     for job_id in passed_job_ids:
@@ -129,7 +165,7 @@ def seed_contract_deps_from_prior_callgraph(
         org_id=scope.org_id,
         project_id=scope.project_id,
         domain=scope.domain,
-        required_checks=["wiring_contract"],
+        required_checks=["wiring_reconciliation"],
     )
 
     for job_id in passed_job_ids:

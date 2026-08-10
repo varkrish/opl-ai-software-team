@@ -6,6 +6,8 @@ Verifies:
 3. Reference implementations fail closed.
 4. check_known_bad catches anti-patterns (tests-only contract, bad dependency, route mismatch).
 """
+import uuid
+
 import pytest
 from llamaindex_crew.memory.postgres_context_store import PostgresContextStore
 from llamaindex_crew.tools.context_tools import (
@@ -26,7 +28,7 @@ def store():
 
 
 def test_context_tools_outcomes_and_anti_pattern_check(store):
-    job_id = "test-job-stage4"
+    job_id = "test-job-stage4-" + uuid.uuid4().hex[:8]
     store.record_job(
         job_id=job_id,
         scope_org="testorg",
@@ -34,8 +36,8 @@ def test_context_tools_outcomes_and_anti_pattern_check(store):
         scope_domain="web",
         vision="Build Express and React fullstack dashboard",
         outcomes=[
-            {"check_name": "wiring_contract", "passed": True},
-            {"check_name": "client_endpoint_alignment", "passed": False, "severity": "error", "description": "Route mismatch: /api/v1/stream vs /events"},
+            {"check_name": "wiring_reconciliation", "passed": True},
+            {"check_name": "client_server_contract", "passed": False, "severity": "error", "description": "Route mismatch: /api/v1/stream vs /events"},
         ],
         json_artifacts={
             "wiring_contract": {"language": "typescript", "packages": [{"name": "express"}, {"name": "react"}]},
@@ -45,7 +47,7 @@ def test_context_tools_outcomes_and_anti_pattern_check(store):
     # 1. find_similar_solutions carries outcome
     solutions = find_similar_solutions("dashboard", limit=2)
     assert job_id in solutions
-    assert "FAILED CHECKS: client_endpoint_alignment" in solutions
+    assert "FAILED CHECKS: client_server_contract" in solutions
 
     # 2. get_prior_artifact returns intact artifact with outcome header
     artifact_res = get_prior_artifact(job_id, "wiring_contract")

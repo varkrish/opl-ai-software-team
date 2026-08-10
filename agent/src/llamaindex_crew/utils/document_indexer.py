@@ -34,12 +34,6 @@ DEFAULT_RAG_TOP_K = 6
 DEFAULT_MAX_RAG_CONTEXT_CHARS = 32_000
 
 
-def get_default_doc_index_base_dir() -> Path:
-    """Get root directory for persistent document index storage."""
-    env_dir = os.getenv("CREW_DOCUMENT_INDEX_DIR")
-    if env_dir:
-        return Path(env_dir)
-    return Path(os.path.expanduser("~/.crew/doc_index"))
 
 
 @dataclass
@@ -124,31 +118,6 @@ class DocumentIndexer:
 
         _init_embeddings()
         self._try_load_persisted_index()
-
-    @classmethod
-    def for_scope(
-        cls,
-        scope: MemoryScope,
-        *,
-        base_dir: Optional[Path] = None,
-        chunk_size: int = DEFAULT_CHUNK_SIZE,
-        chunk_overlap: int = DEFAULT_CHUNK_OVERLAP,
-        fallback_workspace: Optional[Path] = None,
-    ) -> DocumentIndexer:
-        """Construct a persistent DocumentIndexer bound to a MemoryScope."""
-        root = base_dir or get_default_doc_index_base_dir()
-        scoped_dir = root / slugify(scope.org_id, "default") / slugify(scope.project_id, "shared-context") / slugify(scope.domain, "general")
-        scoped_dir.mkdir(parents=True, exist_ok=True)
-        
-        ws_path = fallback_workspace or scoped_dir
-        return cls(
-            workspace_path=ws_path,
-            project_id=scope.project_id,
-            chunk_size=chunk_size,
-            chunk_overlap=chunk_overlap,
-            index_dir=scoped_dir,
-            scope=scope,
-        )
 
     def _try_load_persisted_index(self) -> None:
         if not self.index_path.is_dir() or not (self.index_path / "docstore.json").is_file():
@@ -458,7 +427,6 @@ def index_approved_solution(
     job_id: str,
     *,
     score: Optional[int] = None,
-    base_dir: Optional[Path] = None,
 ) -> int:
     """
     Persist approved solution artifacts (solution_spec.md, wiring_contract.json,
@@ -547,7 +515,6 @@ def recall_scoped_blueprints(
     *,
     top_k: int = DEFAULT_RAG_TOP_K,
     max_chars: int = DEFAULT_MAX_RAG_CONTEXT_CHARS,
-    base_dir: Optional[Path] = None,
 ) -> List[RetrievedChunk]:
     """
     Recall blueprint chunks from Postgres crew_context database.

@@ -12,17 +12,24 @@ from llamaindex_crew.utils.document_indexer import (
 
 
 class TestPersistentDocumentIndexer:
-    def test_for_scope_creates_partitioned_directory(self, tmp_path):
-        scope = MemoryScope(org_id="team_acme", project_id="spring-boot", domain="finance")
-        indexer = DocumentIndexer.for_scope(scope, base_dir=tmp_path)
-        
-        expected_dir = tmp_path / "team-acme" / "spring-boot" / "finance"
-        assert indexer.index_path == expected_dir
-        assert expected_dir.is_dir()
+    def test_the_per_job_index_lives_in_the_workspace(self, tmp_path):
+        """
+        Cross-job persistence moved to Postgres; DocumentIndexer.for_scope and
+        the ~/.crew/doc_index tree are gone. What remains is the per-job index,
+        which lives beside the job it serves and dies with it — product_owner
+        and refinement_context query it within a run.
+        """
+        indexer = DocumentIndexer(tmp_path, "job_123")
+
+        assert indexer.index_path == tmp_path / "index_job_123"
+        assert not hasattr(DocumentIndexer, "for_scope"), (
+            "for_scope wrote a second copy of every artifact to ~/.crew that "
+            "nothing reads any more"
+        )
 
     def test_index_text_attaches_scope_metadata(self, tmp_path):
         scope = MemoryScope(org_id="team_acme", project_id="spring-boot", domain="finance")
-        indexer = DocumentIndexer.for_scope(scope, base_dir=tmp_path)
+        indexer = DocumentIndexer(tmp_path, "spring-boot", scope=scope)
         
         count = indexer.index_text(
             "Spring Boot Finance API specification with OpenAPI contract.",
@@ -126,5 +133,5 @@ class TestPersistentDocumentIndexer:
     def test_fail_open_on_nonexistent_workspace(self, tmp_path):
         scope = MemoryScope(org_id="org_1", project_id="spring-boot", domain="task-mgmt")
         non_existent = tmp_path / "does_not_exist"
-        count = index_approved_solution(scope, non_existent, job_id="job_999", base_dir=tmp_path / "storage")
+        count = index_approved_solution(scope, non_existent, job_id="job_999")
         assert count == 0

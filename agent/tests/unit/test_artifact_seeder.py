@@ -5,6 +5,8 @@ Verifies that:
 2. A tests-only contract (job 1cec01ad failure) is rejected and never seeded.
 3. Creation manifests, test plans, and call-graph dependencies are seeded cleanly.
 """
+import uuid
+
 import pytest
 from llamaindex_crew.memory.scope import MemoryScope
 from llamaindex_crew.memory.postgres_context_store import PostgresContextStore
@@ -25,7 +27,7 @@ def store():
 
 
 def test_seed_wiring_contract_prevents_tests_only_failure(store):
-    scope = MemoryScope(org_id="testorg", project_id="fastapi-app", domain="web")
+    scope = MemoryScope(org_id="testorg", project_id="fastapi-app", domain="seeder-" + uuid.uuid4().hex[:8])
 
     # 1. Bad job 1cec01ad: produced tests-only contract
     store.record_job(
@@ -34,11 +36,11 @@ def test_seed_wiring_contract_prevents_tests_only_failure(store):
         scope_project=scope.project_id,
         scope_domain=scope.domain,
         vision="Test app with bad contract",
-        outcomes=[{"check_name": "wiring_contract", "passed": False, "severity": "error"}],
+        outcomes=[{"check_name": "wiring_reconciliation", "passed": False, "severity": "error"}],
         json_artifacts={
             "wiring_contract": {
                 "language": "python",
-                "packages": [{"name": "tests"}],
+                "packages": {"tests": {"files": ["tests/test_a.py"], "owns": []}},
                 "entrypoint": None,
             }
         },
@@ -47,7 +49,7 @@ def test_seed_wiring_contract_prevents_tests_only_failure(store):
     # 2. Good job: proven FastAPI contract
     proven_contract = {
         "language": "python",
-        "packages": [{"name": "fastapi"}, {"name": "uvicorn"}],
+        "packages": {"app": {"files": ["backend/main.py"]}, "api": {"files": ["backend/api.py"]}},
         "entrypoint": "backend/main.py",
     }
     store.record_job(
@@ -57,9 +59,11 @@ def test_seed_wiring_contract_prevents_tests_only_failure(store):
         scope_domain=scope.domain,
         vision="FastAPI microservice",
         outcomes=[
-            {"check_name": "wiring_contract", "passed": True},
+            {"check_name": "wiring_reconciliation", "passed": True},
             {"check_name": "entrypoint", "passed": True},
-            {"check_name": "client_endpoint_alignment", "passed": True},
+            {"check_name": "client_server_contract", "passed": True},
+            {"check_name": "completeness", "passed": True},
+            {"check_name": "smoke_test", "passed": True},
         ],
         json_artifacts={
             "wiring_contract": proven_contract,
@@ -74,9 +78,9 @@ def test_seed_wiring_contract_prevents_tests_only_failure(store):
     # Test seed_wiring_contract_from_prior
     seeded = seed_wiring_contract_from_prior(scope, store=store)
     assert seeded is not None
-    pkg_names = [p["name"] for p in seeded.get("packages", [])]
-    assert "fastapi" in pkg_names
-    assert pkg_names != ["tests"]
+    pkg_names = sorted(seeded.get("packages", {}))
+    assert "app" in pkg_names
+    assert pkg_names != ["tests"], "the 1cec01ad shape must never be seeded"
 
     # Test seed_creation_manifest_from_prior
     manifest = seed_creation_manifest_from_prior(scope, store=store)

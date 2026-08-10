@@ -260,20 +260,32 @@ def write_reference_doc_memory(
         )
         memory.close()
 
-        # Also index full document into persistent RAG indexer (shared scope)
+        # Persist the full document to the context plane under the shared scope.
+        # This used to embed into a per-scope directory under ~/.crew/doc_index,
+        # which no reader consults any more — recall_scoped_blueprints reads
+        # Postgres. Embedding twice and writing JSON nobody loads was pure cost.
         try:
-            from llamaindex_crew.utils.document_indexer import DocumentIndexer
             from dataclasses import replace
+            from llamaindex_crew.memory.postgres_context_store import PostgresContextStore
+
             shared_scope = replace(memory.scope, project_id="shared-context")
-            doc_indexer = DocumentIndexer.for_scope(shared_scope)
-            doc_indexer.index_file_at_path(
-                stored_path,
-                source_label=original_name,
-                doc_type="reference_doc",
-                extra_metadata={"job_id": job_id, "filename": original_name},
+            text = Path(stored_path).read_text(encoding="utf-8", errors="replace")
+            stored = PostgresContextStore().record_job(
+                job_id=job_id,
+                scope_org=shared_scope.org_id,
+                scope_project=shared_scope.project_id,
+                scope_domain=shared_scope.domain,
+                prose_documents=[{"doc_type": "reference_doc", "text": text,
+                                  "source": original_name}],
             )
+            if not stored:
+                logger.warning(
+                    "Reference doc %r for job %s was not persisted to the context "
+                    "plane; it will not be recallable by later jobs.",
+                    original_name, job_id,
+                )
         except Exception as e:
-            logger.debug("Could not index reference doc into persistent RAG: %s", e)
+            logger.warning("Could not persist reference doc to the context plane: %s", e)
 
         return wrote
     except Exception as exc:  # noqa: BLE001

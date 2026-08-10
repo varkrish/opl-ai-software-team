@@ -45,7 +45,18 @@ def find_similar_solutions(vision: str, stack: str = "", limit: int = 3) -> str:
             outcomes = store.get_job_outcomes(jid)
             failed = [o for o in outcomes if not o["passed"]]
 
-            outcome_str = "PASSED ALL CHECKS" if not failed else f"FAILED CHECKS: {', '.join(f['check_name'] for f in failed)}"
+            # "No failures recorded" and "no outcomes recorded" are different
+            # claims. Reporting an unverified job as PASSED ALL CHECKS is how a
+            # tests-only contract came to sit in the old index at 9/10 — the
+            # model reading this must be able to tell evidence from silence.
+            if not outcomes:
+                outcome_str = "NOT VALIDATED — no checks recorded, do not treat as proven"
+            elif failed:
+                outcome_str = f"FAILED CHECKS: {', '.join(f['check_name'] for f in failed)}"
+            else:
+                outcome_str = (
+                    "PASSED: " + ", ".join(sorted({o["check_name"] for o in outcomes}))
+                )
             summary = f"Job ID: {jid}\nVision: {vis}\nStatus: {status}\nValidation Outcome: {outcome_str}"
             results.append(summary)
             count += 1
