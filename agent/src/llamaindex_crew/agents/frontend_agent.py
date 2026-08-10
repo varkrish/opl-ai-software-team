@@ -44,8 +44,13 @@ You create reusable components and ensure responsive design."""
 
         backstory = custom_backstory or default_backstory
 
+        try:
+            config = ConfigLoader.load()
+        except Exception:
+            config = None
+
         # Determine capability mode for the worker model
-        self.supports_react = get_supports_react("worker")
+        self.supports_react = get_supports_react("worker", config=config)
         logger.info("FrontendAgent: supports_react=%s", self.supports_react)
 
         if self.supports_react:

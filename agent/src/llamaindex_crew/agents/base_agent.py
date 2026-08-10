@@ -8,7 +8,19 @@ import logging
 import time
 import nest_asyncio
 from typing import List, Optional, Callable, Any, Dict
-from llama_index.core.agent import ReActAgent, FunctionCallingAgentWorker, AgentRunner
+from llama_index.core.agent import ReActAgent
+try:
+    from llama_index.core.agent import AgentRunner
+except ImportError:
+    AgentRunner = None
+
+try:
+    from llama_index.core.agent import FunctionCallingAgentWorker
+except ImportError:
+    try:
+        from llama_index.agent.openai import FunctionCallingAgentWorker
+    except ImportError:
+        FunctionCallingAgentWorker = None
 from llama_index.core.llms import LLM
 from llama_index.core.tools import FunctionTool
 

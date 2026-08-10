@@ -50,16 +50,16 @@ You verify and use the technology stack defined by the Technical Architect."""
 
         backstory = custom_backstory or default_backstory
 
-        # Determine capability mode for the worker model
-        self.supports_react = get_supports_react("worker")
-        logger.info("DevAgent: supports_react=%s", self.supports_react)
-
         tool_config = config
         if tool_config is None:
             try:
                 tool_config = ConfigLoader.load()
             except Exception:
                 tool_config = None
+
+        # Determine capability mode for the worker model
+        self.supports_react = get_supports_react("worker", config=tool_config)
+        logger.info("DevAgent: supports_react=%s", self.supports_react)
 
         if self.supports_react:
             if workspace_path is not None:
