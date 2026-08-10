@@ -291,8 +291,11 @@ class MemoryConfig(BaseModel):
             "project in addition to the framework project."
         ),
     )
-    write_job_outcome: bool = Field(
-        True, description="Write a job outcome summary when a job reaches a terminal state."
+    write_corrections: bool = Field(
+        True, description="Write a correction entry when human feedback or review rejects a plan."
+    )
+    max_doc_recall_chars: int = Field(
+        4000, description="Max character budget for doc & blueprint recall context."
     )
     write_reference_docs: bool = Field(
         True, description="Write a summary for each uploaded reference document."
