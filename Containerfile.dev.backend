@@ -44,6 +44,21 @@ RUN cd /app/agent && \
         "litellm>=1.0.0" \
         "cryptography>=41.0.0"
 
+# Context memory plane (Postgres). Installed explicitly rather than relying on
+# the pyproject install above, because that line ends in
+# `2>/dev/null || <explicit list>` — when the editable install fails for any
+# reason the fallback list is used and every pyproject-only dependency is
+# silently dropped. psycopg was declared in pyproject and installed nowhere,
+# which is why the whole context-plane code path had never once executed
+# against a real database.
+#
+# Without these the plane is unreachable: blueprints are never persisted and
+# recall returns nothing, logged but not fatal, so a deployment looks healthy
+# while learning nothing between jobs.
+RUN pip install --no-cache-dir \
+    "psycopg[binary]>=3.1" \
+    "llama-index-vector-stores-postgres>=0.1.14"
+
 # ASGI stack + dev extras
 RUN pip install --no-cache-dir \
     "fastapi>=0.115.0" \
