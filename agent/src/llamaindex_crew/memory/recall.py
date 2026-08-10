@@ -36,6 +36,45 @@ def build_recall_query(vision: str, scope: Any) -> str:
     )
 
 
+def recall_solution_blueprints(
+    config: Any,
+    *,
+    vision: str,
+    job: Optional[Dict[str, Any]] = None,
+    workspace_path: Optional[Path] = None,
+    max_chars: int = 16_000,
+) -> str:
+    """
+    Recall prior approved solution specs, wiring contracts, stack manifests, code graphs,
+    and reference document chunks from the persistent scoped document index.
+    """
+    try:
+        from llamaindex_crew.memory.scope import resolve_scope
+        from llamaindex_crew.utils.document_indexer import (
+            format_retrieved_chunks,
+            recall_scoped_blueprints,
+        )
+
+        scope = resolve_scope(job, workspace_path=workspace_path)
+        query = f"{vision[:400]} {scope.project_id} {scope.domain}".strip()
+        chunks = recall_scoped_blueprints(scope, query, max_chars=max_chars)
+        if not chunks:
+            return ""
+
+        formatted_chunks = format_retrieved_chunks(chunks, max_chars=max_chars)
+        if not formatted_chunks:
+            return ""
+
+        return (
+            "## REUSED BLUEPRINTS & REFERENCE DOCUMENTS — prior solution specs, wiring contracts, "
+            "and reference docs in this domain (from persistent RAG index)\n\n"
+            f"{formatted_chunks}\n"
+        )
+    except Exception as exc:
+        logger.warning("Blueprint RAG recall failed (non-fatal): %s", exc)
+        return ""
+
+
 def recall_solutioning_context(
     config: Any,
     *,
@@ -47,6 +86,7 @@ def recall_solutioning_context(
     """
     Recall past-job context for injection into the solutioning research prompt.
 
+    Combines MemMachine short facts/corrections with persistent blueprint RAG chunks.
     Returns "" when the memory plane is disabled, unreachable, or has nothing
     relevant — callers can concatenate the result unconditionally.
     """
@@ -56,13 +96,12 @@ def recall_solutioning_context(
     if not getattr(memory_config, "read_at_solutioning", True):
         return ""
 
+    context_parts: list[str] = []
+
+    # 1. MemMachine episode recall
     try:
         from .context_memory import get_context_memory
 
-        # Two projects are searched: the framework project (job outcomes for this
-        # stack) and the shared project (Jira context and reference docs, written
-        # before a stack was chosen). Searching only one would silently miss half
-        # the plane — see MemoryConfig.shared_project_id.
         episodes: list = []
         seen: set = set()
         scope_labels: list = []
@@ -88,22 +127,40 @@ def recall_solutioning_context(
             scope_labels.append(memory.scope.describe())
             memory.close()
 
-        if not episodes:
-            return ""
-
-        block = _render_block(
-            episodes,
-            max_chars=int(getattr(memory_config, "max_recall_chars", 4000) or 4000),
-        )
-        if block:
-            logger.info(
-                "Injected %d chars of recalled context into solutioning (%s)",
-                len(block), "; ".join(scope_labels),
+        if episodes:
+            raw_mem_max = getattr(memory_config, "max_recall_chars", 4000)
+            mem_max = int(raw_mem_max) if isinstance(raw_mem_max, (int, str, float)) else 4000
+            mem_block = _render_block(
+                episodes,
+                max_chars=mem_max,
             )
-        return block
+            if mem_block:
+                context_parts.append(mem_block)
+                logger.info(
+                    "Injected %d chars of recalled MemMachine context into solutioning (%s)",
+                    len(mem_block), "; ".join(scope_labels),
+                )
     except Exception as exc:  # noqa: BLE001 — recall is never load-bearing
-        logger.warning("Solutioning recall failed (non-fatal): %s", exc)
-        return ""
+        logger.warning("Solutioning MemMachine recall failed (non-fatal): %s", exc)
+
+    # 2. Persistent Blueprint RAG Chunk Recall
+    try:
+        raw_doc_max = getattr(memory_config, "max_doc_recall_chars", 16_000)
+        max_doc_chars = int(raw_doc_max) if isinstance(raw_doc_max, (int, str, float)) else 16_000
+        blueprint_block = recall_solution_blueprints(
+            config,
+            vision=vision,
+            job=job,
+            workspace_path=workspace_path,
+            max_chars=max_doc_chars,
+        )
+        if blueprint_block:
+            context_parts.append(blueprint_block)
+            logger.info("Injected %d chars of blueprint RAG context into solutioning", len(blueprint_block))
+    except Exception as exc:
+        logger.warning("Solutioning Blueprint RAG recall failed (non-fatal): %s", exc)
+
+    return "\n\n".join(context_parts) if context_parts else ""
 
 
 def _render_block(episodes: list, *, max_chars: int) -> str:
@@ -139,3 +196,4 @@ def _render_block(episodes: list, *, max_chars: int) -> str:
     if len(block) > max_chars:
         block = block[:max_chars].rstrip() + "\n- … (truncated)"
     return block + "\n"
+

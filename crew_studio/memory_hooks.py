@@ -259,6 +259,22 @@ def write_reference_doc_memory(
             },
         )
         memory.close()
+
+        # Also index full document into persistent RAG indexer (shared scope)
+        try:
+            from llamaindex_crew.utils.document_indexer import DocumentIndexer
+            from dataclasses import replace
+            shared_scope = replace(memory.scope, project_id="shared-context")
+            doc_indexer = DocumentIndexer.for_scope(shared_scope)
+            doc_indexer.index_file_at_path(
+                stored_path,
+                source_label=original_name,
+                doc_type="reference_doc",
+                extra_metadata={"job_id": job_id, "filename": original_name},
+            )
+        except Exception as e:
+            logger.debug("Could not index reference doc into persistent RAG: %s", e)
+
         return wrote
     except Exception as exc:  # noqa: BLE001
         logger.warning(
@@ -266,6 +282,35 @@ def write_reference_doc_memory(
             original_name, exc,
         )
         return False
+
+
+def write_approved_solution_memory(
+    job_id: str,
+    *,
+    config: Any,
+    job: Optional[Dict[str, Any]] = None,
+    workspace_path: Optional[Path] = None,
+    score: Optional[int] = None,
+) -> int:
+    """
+    Persist an approved solution (solution_spec.md, wiring_contract.json, stack_manifest.json, code_graph.json)
+    to the persistent scoped document index.
+    """
+    if not workspace_path:
+        return 0
+    try:
+        from llamaindex_crew.memory.scope import resolve_scope
+        from llamaindex_crew.utils.document_indexer import index_approved_solution
+
+        scope = resolve_scope(job, workspace_path=workspace_path)
+        count = index_approved_solution(scope, Path(workspace_path), job_id, score=score)
+        if count > 0:
+            logger.info("Persisted %d approved solution blueprint chunk(s) for job %s", count, job_id)
+        return count
+    except Exception as exc:
+        logger.warning("Approved solution memory write failed (non-fatal) for %s: %s", job_id, exc)
+        return 0
+
 
 
 def write_correction_memories(
