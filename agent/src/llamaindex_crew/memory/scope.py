@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -204,6 +205,21 @@ def resolve_scope(
 
     ``team_id`` wins over ``owner_id`` for the customer boundary so that
     teammates share one memory pool rather than each building a private one.
+
+    That intent did not survive contact with the data: nothing populates
+    ``team_id`` — it is an optional field on job creation and null on every live
+    job — so the boundary collapsed to ``owner_id`` and each developer built a
+    private pool. An org of a hundred developers would produce a hundred pools
+    that never see each other's approved plans, which is the opposite of the
+    point.
+
+    ``CREW_ORG_ID`` sits between the two: set it and the whole deployment shares
+    one pool, which is what a single-org install wants. Left unset, behaviour is
+    unchanged, so this cannot silently merge pools that were meant to be
+    separate.
+
+    Sharing widens only the org. ``project_id`` (the framework) and ``domain``
+    still narrow retrieval, so a Java plan is not offered to a Python job.
     """
     job = job or {}
     if metadata is None:
@@ -216,7 +232,12 @@ def resolve_scope(
     if not isinstance(metadata, dict):
         metadata = {}
 
-    org_raw = job.get("team_id") or job.get("owner_id") or metadata.get("customer_id")
+    org_raw = (
+        job.get("team_id")
+        or os.getenv("CREW_ORG_ID")
+        or job.get("owner_id")
+        or metadata.get("customer_id")
+    )
     org_id = slugify(org_raw, default_org_id)
 
     project_id = resolve_framework(

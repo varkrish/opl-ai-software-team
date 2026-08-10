@@ -102,13 +102,28 @@ def find_reference_implementation(role: str, stack: str = "") -> str:
         if not conn:
             return "No reference implementation found (database unreachable)."
 
+        # partially_completed is not a lesser job — it is the normal terminal
+        # state here, outnumbering completed 32 to 9 in the live database, and
+        # what matters is whether the checks passed rather than how the run
+        # ended. Gating on status='completed' alone discarded most of the
+        # corpus, the same defect already fixed in get_passed_jobs_in_scope.
         with conn:
             with conn.cursor() as cur:
-                cur.execute("SELECT job_id FROM jobs WHERE status = 'completed' ORDER BY created_at DESC LIMIT 10;")
+                cur.execute(
+                    "SELECT job_id FROM jobs "
+                    "WHERE status IN ('completed', 'partially_completed', 'completed_with_errors') "
+                    "ORDER BY created_at DESC LIMIT 10;"
+                )
                 rows = cur.fetchall()
 
         for (jid,) in rows:
             outcomes = store.get_job_outcomes(jid)
+            # any(...) over an empty list is False, so a job with nothing
+            # recorded used to sail through the check below and be offered as a
+            # reference implementation. No evidence is not evidence of passing,
+            # and this function's contract is to fail closed.
+            if not outcomes:
+                continue
             if any(not o["passed"] for o in outcomes):
                 continue  # Fail closed: skip any job with failing validation checks
 

@@ -451,51 +451,15 @@ def _run_job_async_impl(
         # Only fires for terminal states — pauses returned above. Fail-open:
         # write_job_outcome_memory swallows its own errors.
         try:
-            from crew_studio.memory_hooks import (
-                write_correction_memories,
-                write_job_outcome_memory,
-            )
-            job_row = job_db.get_job(job_id)
-            write_job_outcome_memory(
+            from crew_studio.memory_hooks import persist_job_context
+
+            persist_job_context(
                 job_id,
                 config=job_config,
-                job=job_row,
+                job_db=job_db,
                 workspace_path=job_workspace,
                 results=results,
-                job_db=job_db,
                 final_status=terminal_status,
-            )
-            # Corrections: what humans and verifiers actually had to fix. Runs
-            # for every mode, and after the outcome write so the resolved
-            # framework/domain scope is already pinned to the job row.
-            write_correction_memories(
-                job_id,
-                config=job_config,
-                job=job_db.get_job(job_id) or job_row,
-                workspace_path=job_workspace,
-                job_db=job_db,
-            )
-
-            # Re-persist the solution blueprint now the job is finished.
-            #
-            # The first write happens at solution approval, which is before
-            # development, before validation and before the wiring contract is
-            # final — so it captures stack_manifest and little else, with no
-            # outcomes, no call-graph edges and no final contract. A job written
-            # only at that point can never qualify as a blueprint source,
-            # because a required check must be recorded AND passed and nothing
-            # has been checked yet.
-            #
-            # Here the workspace holds the finished contract, validation_report
-            # .json with every check's verdict, and the tldr call graph. Same
-            # job_id, so record_job upserts rather than duplicating.
-            from crew_studio.memory_hooks import write_approved_solution_memory
-
-            write_approved_solution_memory(
-                job_id,
-                config=job_config,
-                job=job_db.get_job(job_id) or job_row,
-                workspace_path=job_workspace,
             )
         except Exception as mem_err:
             logger.warning(

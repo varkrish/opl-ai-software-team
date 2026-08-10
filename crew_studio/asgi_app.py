@@ -59,7 +59,12 @@ if not logging.getLogger("llamaindex_crew").handlers:
         _log = logging.getLogger(_name)
         _log.setLevel(_LOG_LEVEL)
         _log.addHandler(_handler)
-        _log.propagate = False
+        # propagate stays on. Setting it False stops records reaching the root
+        # logger, which is exactly where pytest's caplog attaches its handler —
+        # it silently broke every test that asserts on a log record as soon as
+        # anything imported this module. Nothing configures the root logger
+        # here (uvicorn configures only its own loggers), so propagating costs
+        # no duplicate output.
 
 # ---------------------------------------------------------------------------
 # Database & workspace setup (mirrors Flask app's init logic)

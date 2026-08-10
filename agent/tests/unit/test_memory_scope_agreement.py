@@ -102,3 +102,58 @@ def test_an_unreadable_job_db_does_not_raise(tmp_path):
             raise RuntimeError("database is locked")
 
     assert _workflow(_Broken(), tmp_path)._memory_scope().org_id == "default"
+
+
+# ── org-wide sharing ────────────────────────────────────────────────────────
+#
+# The boundary was meant to be the team, so teammates share one pool. Nothing
+# populates team_id — it is optional at job creation and null on every live job
+# — so it collapsed to owner_id and each developer built a private pool. An org
+# of a hundred developers would produce a hundred pools that never see each
+# other's approved plans.
+
+
+def test_one_org_id_pools_every_developer(tmp_path, monkeypatch):
+    monkeypatch.setenv("CREW_ORG_ID", "acme")
+
+    alice = resolve_scope({"owner_id": "alice", "vision": "v"}, workspace_path=tmp_path)
+    bob = resolve_scope({"owner_id": "bob", "vision": "v"}, workspace_path=tmp_path)
+
+    assert alice.org_id == bob.org_id == "acme", (
+        "without this each developer reads and writes a pool of their own"
+    )
+
+
+def test_sharing_widens_only_the_org(tmp_path, monkeypatch):
+    """A Java plan must still not be offered to a Python job."""
+    monkeypatch.setenv("CREW_ORG_ID", "acme")
+    (tmp_path / "pom.xml").write_text("<project/>", encoding="utf-8")
+
+    java = resolve_scope({"owner_id": "alice", "vision": "v"}, workspace_path=tmp_path)
+    python = resolve_scope(
+        {"owner_id": "alice", "vision": "v"}, workspace_path=tmp_path,
+        metadata={"framework": "fastapi"},
+    )
+
+    assert java.org_id == python.org_id
+    assert java.project_id != python.project_id
+
+
+def test_an_explicit_team_still_wins(tmp_path, monkeypatch):
+    monkeypatch.setenv("CREW_ORG_ID", "acme")
+
+    scope = resolve_scope(
+        {"team_id": "platform", "owner_id": "alice", "vision": "v"},
+        workspace_path=tmp_path,
+    )
+
+    assert scope.org_id == "platform"
+
+
+def test_leaving_it_unset_changes_nothing(tmp_path, monkeypatch):
+    """Never silently merge pools that were meant to be separate."""
+    monkeypatch.delenv("CREW_ORG_ID", raising=False)
+
+    scope = resolve_scope({"owner_id": "alice", "vision": "v"}, workspace_path=tmp_path)
+
+    assert scope.org_id == "alice"

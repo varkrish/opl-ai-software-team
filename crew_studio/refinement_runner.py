@@ -1098,19 +1098,45 @@ def _complete_refinement(workspace_path, job_db, job_id, refinement_id, progress
     # Written here because refinements are issued after the job's terminal state,
     # so the post-job hook has already run. Fail-open.
     try:
-        from crew_studio.memory_hooks import write_refinement_correction_memory
+        from crew_studio.memory_hooks import (
+            persist_job_context,
+            write_refinement_correction_memory,
+        )
         from src.llamaindex_crew.config import ConfigLoader
 
+        _config = ConfigLoader.load()
         write_refinement_correction_memory(
             job_id,
-            config=ConfigLoader.load(),
+            config=_config,
             job=job_db.get_job(job_id),
             workspace_path=Path(workspace_path),
             job_db=job_db,
         )
+
+        # Re-persist the blueprint from the refined workspace.
+        #
+        # Refinement only ever wrote the correction, so the plane learned what
+        # was wrong with a build and never that it had been put right. The
+        # refined tree is the better blueprint — same contract, defects fixed —
+        # and its artifacts, outcomes and call graph all belong to this job_id,
+        # so record_job upserts over the build's own record rather than adding
+        # a second one.
+        #
+        # write_outcome is off: the refinement leaves the job on its previous
+        # status and runs no validation of its own, so there is no new verdict
+        # to record. index_approved_solution still re-reads validation_report
+        # .json from the refined workspace, which is where the outcomes come
+        # from.
+        persist_job_context(
+            job_id,
+            config=_config,
+            job_db=job_db,
+            workspace_path=Path(workspace_path),
+            write_outcome=False,
+        )
     except Exception as mem_err:
         logger.warning(
-            "Refinement correction memory hook raised (non-fatal) for %s: %s",
+            "Refinement memory hook raised (non-fatal) for %s: %s",
             job_id, mem_err,
         )
 

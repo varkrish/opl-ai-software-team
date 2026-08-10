@@ -296,6 +296,85 @@ def write_reference_doc_memory(
         return False
 
 
+def persist_job_context(
+    job_id: str,
+    *,
+    config: Any,
+    job_db: Any,
+    workspace_path: Optional[Path],
+    results: Optional[Dict[str, Any]] = None,
+    final_status: Optional[str] = None,
+    write_outcome: bool = True,
+) -> None:
+    """Record everything a finished job leaves behind, for every flow.
+
+    The build flow reached this through three calls inlined in
+    ``_run_job_async_impl``; refine and import reached none of them, so the
+    plane only ever learned from first drafts. A refine that ends validating
+    clean is a *better* blueprint than the build it came from — same contract,
+    with the defects fixed — and discarding it was the largest gap in what the
+    plane could know.
+
+    Order matters: the outcome write pins the resolved framework/domain scope
+    onto the job row, so the correction and blueprint writes that follow resolve
+    the same scope. Every step is fail-open; recall is never worth failing a
+    job over.
+    """
+    if not workspace_path:
+        return
+
+    workspace_path = Path(workspace_path)
+    job_row = job_db.get_job(job_id) if job_db is not None else None
+
+    if write_outcome:
+        try:
+            write_job_outcome_memory(
+                job_id,
+                config=config,
+                job=job_row,
+                workspace_path=workspace_path,
+                results=results or {},
+                job_db=job_db,
+                final_status=final_status,
+            )
+        except Exception as exc:
+            logger.warning("Job outcome memory failed (non-fatal) for %s: %s", job_id, exc)
+
+    def _fresh_row():
+        try:
+            return (job_db.get_job(job_id) if job_db is not None else None) or job_row
+        except Exception:
+            return job_row
+
+    try:
+        write_correction_memories(
+            job_id,
+            config=config,
+            job=_fresh_row(),
+            workspace_path=workspace_path,
+            job_db=job_db,
+        )
+    except Exception as exc:
+        logger.warning("Correction memory failed (non-fatal) for %s: %s", job_id, exc)
+
+    # Re-persist the blueprint now the workspace is final.
+    #
+    # The build flow's first write happens at solution approval — before
+    # development, before validation, before the wiring contract is settled — so
+    # it captures stack_manifest and little else, with no outcomes and no
+    # call-graph edges. A job written only at that point can never qualify as a
+    # blueprint source, because a required check must be recorded AND passed and
+    # nothing has been checked yet. Here the workspace holds the finished
+    # contract, validation_report.json with every verdict, and the call graph.
+    # Same job_id, so record_job upserts rather than duplicating.
+    write_approved_solution_memory(
+        job_id,
+        config=config,
+        job=_fresh_row(),
+        workspace_path=workspace_path,
+    )
+
+
 def write_approved_solution_memory(
     job_id: str,
     *,
