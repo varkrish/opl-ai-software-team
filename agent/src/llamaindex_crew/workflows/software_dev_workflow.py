@@ -653,6 +653,45 @@ class SoftwareDevWorkflow:
         # Emit/Extract wiring_contract early
         self._ensure_wiring_contract_locked()
 
+    def _memory_scope(self):
+        """The scope this job reads prior context from.
+
+        It must be the same scope the write path records under. It was not:
+        both seeders resolved from ``self._job_data``, an attribute nothing
+        ever assigns, so ``resolve_scope`` fell back to org ``default`` while
+        memory_hooks recorded jobs under the real ``owner_id``. Reads and
+        writes therefore addressed different scopes and no live job could ever
+        recall another — the wiring-contract seeder included, which had looked
+        wired since it was written.
+
+        The job row is the same one the write path uses, fetched from the
+        job_db this workflow already holds rather than threaded through five
+        construction sites.
+        """
+        from llamaindex_crew.memory.scope import resolve_scope
+
+        cached = getattr(self, "_memory_scope_cache", None)
+        if cached is not None:
+            return cached
+
+        job: Dict[str, Any] = {}
+        if self.job_db is not None:
+            try:
+                job = self.job_db.get_job(self.project_id) or {}
+            except Exception as exc:  # noqa: BLE001 — recall is never worth failing a build
+                logger.debug("Could not load job row for scope resolution: %s", exc)
+        if not job:
+            # Without the row the org falls back to "default", which no writer
+            # uses. Say so rather than silently reading an empty scope.
+            logger.warning(
+                "No job row for %s — memory scope falls back to org 'default' and "
+                "will not match recorded jobs", self.project_id,
+            )
+
+        scope = resolve_scope(job, workspace_path=self.workspace_path)
+        self._memory_scope_cache = scope
+        return scope
+
     def _ensure_wiring_contract_locked(self, *, skip_tech_stack_reseed: bool = False) -> None:
         """Lock wiring_contract.json: JSON emit, jq patch on path seed, or path-only fallback."""
         from ..utils.wiring_contract import (
@@ -683,10 +722,8 @@ class SoftwareDevWorkflow:
         )
         if not self._wiring_contract or tests_only:
             try:
-                from llamaindex_crew.memory.scope import resolve_scope
                 from llamaindex_crew.memory.artifact_seeder import seed_wiring_contract_from_prior, seed_contract_deps_from_prior_callgraph
-                job_data = getattr(self, "_job_data", {}) or {}
-                scope = resolve_scope(job_data, workspace_path=self.workspace_path)
+                scope = self._memory_scope()
                 seeded = seed_wiring_contract_from_prior(scope)
                 if seeded:
                     deps = seed_contract_deps_from_prior_callgraph(scope)
@@ -4505,10 +4542,8 @@ class SoftwareDevWorkflow:
             # inventing a preview_command that has never been executed. Only the
             # runnable keys are replayed — the narrative is this job's to write.
             try:
-                from llamaindex_crew.memory.scope import resolve_scope
                 from llamaindex_crew.memory.artifact_seeder import seed_test_plan_from_prior
-                scope = resolve_scope(getattr(self, "_job_data", {}) or {},
-                                      workspace_path=self.workspace_path)
+                scope = self._memory_scope()
                 proven = seed_test_plan_from_prior(scope)
                 if proven:
                     prompt = f"{prompt}\n\n{proven}"
