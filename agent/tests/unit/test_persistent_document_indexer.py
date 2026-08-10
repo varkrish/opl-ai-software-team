@@ -41,24 +41,64 @@ class TestPersistentDocumentIndexer:
         assert chunks[0].job_id == "job_123"
         assert chunks[0].doc_type == "solution_spec"
 
-    def test_index_approved_solution(self, tmp_path):
+    def test_index_approved_solution_persists_to_the_context_store(self, tmp_path, monkeypatch):
+        """
+        Artifacts now go to the Postgres context plane, not a local index. The
+        store is faked here because the assertion worth making is *what is
+        handed to it* — a real DB round-trip belongs in an integration test.
+        """
         ws = tmp_path / "workspace"
         ws.mkdir()
-        
         (ws / "solution_spec.md").write_text("# Solution Spec\nSpring Boot task service architecture.", encoding="utf-8")
         (ws / "wiring_contract.json").write_text(json.dumps({"package": "com.example.task"}), encoding="utf-8")
         (ws / "stack_manifest.json").write_text(json.dumps({"chosen_stack": ["Spring Boot 3", "PostgreSQL"]}), encoding="utf-8")
 
-        storage_root = tmp_path / "storage"
+        captured = {}
+
+        class _FakeStore:
+            def record_job(self, **kwargs):
+                captured.update(kwargs)
+                return True
+
+        from llamaindex_crew.memory import postgres_context_store as pcs
+        monkeypatch.setattr(pcs, "PostgresContextStore", lambda *a, **k: _FakeStore())
+        monkeypatch.setattr(pcs, "sync_job_from_sqlite", lambda *a, **k: None)
+
         scope = MemoryScope(org_id="org_1", project_id="spring-boot", domain="task-mgmt")
+        count = index_approved_solution(scope, ws, job_id="b13dde92", score=9)
 
-        count = index_approved_solution(scope, ws, job_id="b13dde92", score=9, base_dir=storage_root)
-        assert count >= 3
+        assert count >= 3, "spec, contract and manifest should all be persisted"
+        assert captured["job_id"] == "b13dde92"
+        assert captured["scope_org"] == "org_1"
+        assert "wiring_contract" in captured["json_artifacts"]
+        assert any(d["doc_type"] == "solution_spec" for d in captured["prose_documents"])
 
-        recalled = recall_scoped_blueprints(scope, "task service architecture", base_dir=storage_root)
-        assert len(recalled) > 0
-        sources = {c.source for c in recalled}
-        assert "solution_spec.md" in sources or "wiring_contract.json" in sources
+    def test_a_failed_context_store_write_is_loud(self, tmp_path, monkeypatch, caplog):
+        """
+        Recall may go quiet when the plane is unreachable; a write may not. A
+        silent 0 means this job's blueprint is lost and the next job re-derives
+        an architecture that already existed.
+        """
+        ws = tmp_path / "workspace"
+        ws.mkdir()
+        (ws / "solution_spec.md").write_text("# Spec", encoding="utf-8")
+
+        class _DeadStore:
+            def record_job(self, **kwargs):
+                return False
+
+        from llamaindex_crew.memory import postgres_context_store as pcs
+        monkeypatch.setattr(pcs, "PostgresContextStore", lambda *a, **k: _DeadStore())
+        monkeypatch.setattr(pcs, "sync_job_from_sqlite", lambda *a, **k: None)
+
+        scope = MemoryScope(org_id="org_1", project_id="p", domain="d")
+        with caplog.at_level("ERROR"):
+            count = index_approved_solution(scope, ws, job_id="j1")
+
+        assert count == 0
+        assert any("context plane write failed" in r.message.lower() for r in caplog.records), (
+            f"an unreachable plane must be reported, got: {[r.message for r in caplog.records]}"
+        )
 
     def test_format_retrieved_chunks_truncation(self):
         chunks = [

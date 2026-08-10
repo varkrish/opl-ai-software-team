@@ -528,6 +528,16 @@ def index_approved_solution(
     if success:
         logger.info("Persisted solution artifacts for job %s to Postgres crew_context scope %s", job_id, scope.describe())
         return len(json_artifacts) + len(prose_documents)
+
+    # Recall is allowed to go quiet when the plane is unreachable — a write is
+    # not. A silent 0 here means this job's blueprint is simply lost, and the
+    # next job re-derives an architecture that already existed.
+    logger.error(
+        "Context plane write FAILED for job %s (scope %s): %d artifact(s) and %d "
+        "document(s) were not persisted. Check CREW_DOC_INDEX_DSN and that the "
+        "crew_context database is reachable.",
+        job_id, scope.describe(), len(json_artifacts), len(prose_documents),
+    )
     return 0
 
 

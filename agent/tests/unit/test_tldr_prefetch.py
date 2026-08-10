@@ -82,7 +82,7 @@ class TestRunTldr:
         from llamaindex_crew.tools import tldr_tools
         tldr_tools._TLDR_BIN_CACHE = None
 
-        with patch("shutil.which", return_value=None):
+        with patch.object(tldr_tools, "_resolve_tldr_bin", return_value=None):
             result = run_tldr(["structure", "/tmp/ws"])
 
         assert "not installed" in result.lower() or "not in PATH" in result
@@ -367,7 +367,7 @@ class TestPrefetchTldrContext:
         from llamaindex_crew.tools import tldr_tools
         tldr_tools._TLDR_BIN_CACHE = None
 
-        with patch("shutil.which", return_value=None):
+        with patch.object(tldr_tools, "_resolve_tldr_bin", return_value=None):
             result = prefetch_tldr_context(
                 workspace_path=tmp_path,
                 file_path="src/calculator.py",
@@ -474,7 +474,7 @@ class TestPrefetchTldrContext:
         from llamaindex_crew.tools import tldr_tools
         tldr_tools._TLDR_BIN_CACHE = None
 
-        with patch("shutil.which", return_value=None):
+        with patch.object(tldr_tools, "_resolve_tldr_bin", return_value=None):
             result = prefetch_tldr_context(
                 workspace_path=tmp_path,
                 file_path="src/calculator.py",

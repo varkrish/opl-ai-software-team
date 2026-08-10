@@ -291,11 +291,16 @@ class MemoryConfig(BaseModel):
             "project in addition to the framework project."
         ),
     )
-    write_corrections: bool = Field(
-        True, description="Write a correction entry when human feedback or review rejects a plan."
+    write_job_outcome: bool = Field(
+        True, description="Write a job outcome summary when a job reaches a terminal state."
     )
     max_doc_recall_chars: int = Field(
-        4000, description="Max character budget for doc & blueprint recall context."
+        16_000,
+        description=(
+            "Character budget for document and blueprint recall. Matches the "
+            "default recall.py already assumed via getattr, so declaring the "
+            "field does not silently shrink the budget from 16k to 4k."
+        ),
     )
     write_reference_docs: bool = Field(
         True, description="Write a summary for each uploaded reference document."

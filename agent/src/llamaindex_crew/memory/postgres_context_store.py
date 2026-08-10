@@ -358,10 +358,18 @@ class PostgresContextStore:
             return []
         try:
             with conn.cursor() as cur:
+                # Any job that reached a terminal state is a candidate. Gating on
+                # status = 'completed' here would discard most of the corpus
+                # before the per-check logic ever runs: in the live database
+                # partially_completed outnumbers completed 32 to 9, and job
+                # 107b3d3e was partially_completed with five failing checks but
+                # ZERO wiring or package issues — its contract is reusable even
+                # though the job as a whole was not clean. Judging per check is
+                # the entire point of storing outcomes per check.
                 cur.execute("""
                     SELECT job_id FROM jobs
                     WHERE scope_org = %s AND scope_project = %s AND scope_domain = %s
-                    AND status = 'completed';
+                    AND status IN ('completed', 'partially_completed', 'completed_with_errors');
                 """, (org_id, project_id, domain))
                 job_ids = [r[0] for r in cur.fetchall()]
 
@@ -372,19 +380,27 @@ class PostgresContextStore:
                 for jid in job_ids:
                     outcomes = self.get_job_outcomes(jid)
                     if not outcomes:
-                        # Job recorded with no outcome failures is considered passed
-                        passed_jobs.append(jid)
+                        # No recorded outcomes means UNKNOWN, not good. Handing
+                        # back an unverified blueprint is the failure this whole
+                        # design exists to prevent — critique_score 9 on a
+                        # contract containing only tests. Fail closed.
+                        logger.debug(
+                            "Skipping job %s as a blueprint source: no recorded outcomes", jid
+                        )
                         continue
 
-                    # If required_checks is specified, check if those checks passed
-                    failed = False
-                    for out in outcomes:
-                        if not out["passed"]:
-                            cname = out["check_name"]
-                            if required_checks is None or cname in required_checks:
-                                failed = True
-                                break
-                    if not failed:
+                    recorded = {out["check_name"] for out in outcomes}
+                    failed_checks = {out["check_name"] for out in outcomes if not out["passed"]}
+
+                    if required_checks is None:
+                        # No specific ask: require a clean sweep of what was recorded.
+                        if not failed_checks:
+                            passed_jobs.append(jid)
+                        continue
+
+                    # Every required check must have been recorded AND passed.
+                    # Absent evidence is not evidence of passing.
+                    if all(c in recorded and c not in failed_checks for c in required_checks):
                         passed_jobs.append(jid)
 
                 return passed_jobs

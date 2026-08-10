@@ -666,10 +666,22 @@ class SoftwareDevWorkflow:
         if not self._wiring_contract:
             self._wiring_contract = load_wiring_contract(self.workspace_path)
 
-        # Check if contract is missing or tests-only, seed from prior validated job if available
-        pkg_list = self._wiring_contract.get("packages", []) if isinstance(self._wiring_contract, dict) else []
-        pkg_names = [p.get("name") if isinstance(p, dict) else str(p) for p in pkg_list] if isinstance(pkg_list, list) else []
-        if not self._wiring_contract or pkg_names in (["tests"], ["test"]):
+        # Seed from a prior validated job when this contract is missing, or when
+        # it declares nothing but tests — the job 1cec01ad shape, where the whole
+        # application was absent and only `tests` survived.
+        #
+        # packages is a MAPPING of name -> {files, owns}, not a list. Treating it
+        # as a list made pkg_names always [], so the tests-only branch never
+        # fired and seeding only ever happened when the contract was absent
+        # entirely — i.e. never for the case it was written for.
+        if isinstance(self._wiring_contract, dict):
+            pkg_names = sorted((self._wiring_contract.get("packages") or {}).keys())
+        else:
+            pkg_names = []
+        tests_only = bool(pkg_names) and all(
+            name.strip("/").split("/")[0] in ("tests", "test") for name in pkg_names
+        )
+        if not self._wiring_contract or tests_only:
             try:
                 from llamaindex_crew.memory.scope import resolve_scope
                 from llamaindex_crew.memory.artifact_seeder import seed_wiring_contract_from_prior, seed_contract_deps_from_prior_callgraph
