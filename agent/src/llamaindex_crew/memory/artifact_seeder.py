@@ -1,9 +1,13 @@
 """
 Deterministic pipeline artifact seeding from validated prior job context.
 
-Hands the pipeline proven starting blueprints (wiring contract, creation manifest,
-test plan, call-graph dependencies) sourced ONLY from jobs whose relevant checks passed,
-allowing the model to edit a known-good blueprint rather than inventing from scratch.
+Hands the pipeline proven starting blueprints (wiring contract, test plan
+execution configuration, call-graph dependencies) sourced ONLY from jobs whose
+relevant checks passed, allowing the model to edit a known-good blueprint rather
+than inventing from scratch.
+
+Seed only what the pipeline would otherwise author. Anything it derives — the
+creation manifest, from the contract — must be left to the derivation.
 """
 from __future__ import annotations
 
@@ -100,34 +104,24 @@ def seed_wiring_contract_from_prior(
     return None
 
 
-def seed_creation_manifest_from_prior(
-    scope: MemoryScope,
-    vision: str = "",
-    stack: str = "",
-    store: Optional[PostgresContextStore] = None,
-) -> Optional[List[Dict[str, Any]]]:
-    """
-    Seed creation manifest candidate file entries from prior job in scope.
-    Requires job to have passed completeness and entrypoint validation.
-    """
-    db_store = store or PostgresContextStore()
-    passed_job_ids = db_store.get_passed_jobs_in_scope(
-        org_id=scope.org_id,
-        project_id=scope.project_id,
-        domain=scope.domain,
-        required_checks=["entrypoint", "completeness"],
-    )
-
-    for job_id in passed_job_ids:
-        artifact = db_store.get_artifact(job_id, "creation_manifest")
-        if isinstance(artifact, list) and artifact:
-            logger.info("Seeded creation_manifest (%d files) from prior job %s", len(artifact), job_id)
-            return artifact
-        elif isinstance(artifact, dict) and "files" in artifact:
-            logger.info("Seeded creation_manifest (%d files) from prior job %s", len(artifact["files"]), job_id)
-            return artifact["files"]
-
-    return None
+# There is deliberately no creation-manifest seeder.
+#
+# The manifest is not authored — build_creation_manifest() derives it from the
+# wiring contract plus supplementary paths. Seeding the contract therefore
+# already carries the structure forward, and seeding a file list on top of a
+# freshly derived one would override a deterministic derivation with a list
+# belonging to a different vision.
+#
+# The version that existed here was worse than redundant. It required only
+# entrypoint and completeness, while the contract seeder requires
+# wiring_reconciliation as well — so it fired precisely on the jobs whose
+# structure had been rejected. Job e4abf072 is that case: entrypoint and
+# completeness passed, wiring_reconciliation failed, and it would have supplied
+# a file list from a contract that did not match its own filesystem.
+#
+# Agents that want a known-good file list have find_reference_implementation,
+# which demands a job with no failing check at all and offers the list as a
+# reference rather than forcing it into the pipeline.
 
 
 def seed_test_plan_from_prior(

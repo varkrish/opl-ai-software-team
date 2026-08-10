@@ -12,7 +12,6 @@ from llamaindex_crew.memory.scope import MemoryScope
 from llamaindex_crew.memory.postgres_context_store import PostgresContextStore
 from llamaindex_crew.memory.artifact_seeder import (
     seed_wiring_contract_from_prior,
-    seed_creation_manifest_from_prior,
     seed_test_plan_from_prior,
     seed_contract_deps_from_prior_callgraph,
 )
@@ -82,10 +81,8 @@ def test_seed_wiring_contract_prevents_tests_only_failure(store):
     assert "app" in pkg_names
     assert pkg_names != ["tests"], "the 1cec01ad shape must never be seeded"
 
-    # Test seed_creation_manifest_from_prior
-    manifest = seed_creation_manifest_from_prior(scope, store=store)
-    assert manifest is not None
-    assert any(f.get("path") == "backend/main.py" for f in manifest)
+    # There is no creation-manifest seeder: the manifest is derived from the
+    # contract, so seeding the contract already carries the structure over.
 
     # Test seed_test_plan_from_prior
     test_plan = seed_test_plan_from_prior(scope, store=store)
