@@ -113,7 +113,7 @@ def _read_artifact(workspace_path: Path, name: str, max_chars: int = 24_000) -> 
 
 def _compact_file_tree(workspace_path: Path, max_lines: int = 80) -> str:
     lines: list[str] = []
-    skip = {".git", "__pycache__", "node_modules", ".pytest_cache", ".venv", "venv", ".tldr"}
+    from .vendor_paths import SKIP_DIRS as skip
     try:
         for item in sorted(workspace_path.rglob("*")):
             if any(part in skip for part in item.parts):

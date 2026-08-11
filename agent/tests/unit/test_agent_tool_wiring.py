@@ -19,6 +19,9 @@ if "llama_index.embeddings.huggingface" not in sys.modules:
     sys.modules["llama_index.embeddings.huggingface"] = MagicMock()
 
 from llama_index.core.tools import FunctionTool
+import llamaindex_crew.agents.base_agent
+import llamaindex_crew.agents.dev_agent
+import llamaindex_crew.agents.frontend_agent
 
 
 def _dummy_tool(name: str) -> FunctionTool:
@@ -29,7 +32,7 @@ def _make_config(global_tools=None, agent_tools=None, skills_url=None):
     """Build a minimal SecretConfig dict for testing."""
     from llamaindex_crew.config.secure_config import SecretConfig
     data = {
-        "llm": {"api_key": "test-key"},
+        "llm": {"api_key": "test-key", "supports_react": True},
         "tools": {},
     }
     if global_tools:

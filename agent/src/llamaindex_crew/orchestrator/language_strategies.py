@@ -26,6 +26,8 @@ from typing import Any, Dict, List, Optional, Set
 
 import yaml
 
+from ..utils.vendor_paths import SKIP_DIRS as _SHARED_SKIP_DIRS
+
 logger = logging.getLogger(__name__)
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -85,6 +87,55 @@ class LanguageStrategy(ABC):
 
         Return ``{"valid": bool, "missing_endpoints": [str], "extra_endpoints": [str]}``.
         """
+
+    # ── shared: manifest discovery (language-neutral) ─────────────────────
+
+    # Directories holding other projects' manifests, or build output copies of
+    # this project's. Language-neutral: every ecosystem has at least one.
+    # Shared definition; see utils/vendor_paths for why there is only one.
+    VENDOR_DIRS: frozenset = _SHARED_SKIP_DIRS
+
+    @classmethod
+    def find_manifests(cls, workspace: Path, *patterns: str) -> List[Path]:
+        """Every manifest matching *patterns* anywhere in the project.
+
+        Each strategy used to look only at ``workspace / <manifest>``, which
+        silently assumes the project is single-module and rooted. It is often
+        neither: job 107b3d3e split itself into ``backend/`` and ``frontend/``
+        — the layout its own wiring contract declared — so
+        ``backend/requirements.txt`` was never read and every third-party
+        import in the project came back as a broken import. Multi-module Maven
+        and npm workspaces have the same shape by convention.
+
+        Those false positives are not cosmetic: they feed the remediation loop,
+        which then spends its budget rewriting correct code to satisfy a check
+        that was wrong.
+
+        Never raises — an unreadable tree yields no manifests, not an error.
+        """
+        found: List[Path] = []
+        for pattern in patterns:
+            try:
+                candidates = workspace.rglob(pattern)
+            except OSError:
+                continue
+            for path in candidates:
+                if any(part in cls.VENDOR_DIRS for part in path.parts):
+                    continue
+                if path.is_file():
+                    found.append(path)
+        return sorted(set(found))
+
+    @classmethod
+    def read_manifests(cls, workspace: Path, *patterns: str) -> List[str]:
+        """Text of every discovered manifest; unreadable files are skipped."""
+        contents: List[str] = []
+        for path in cls.find_manifests(workspace, *patterns):
+            try:
+                contents.append(path.read_text(encoding="utf-8", errors="replace"))
+            except OSError:
+                continue
+        return contents
 
     # ── optional: configurable wiring from YAML ───────────────────────────
 
@@ -447,21 +498,87 @@ class PythonStrategy(LanguageStrategy):
         "pytest", "click", "typer", "boto3", "redis",
     })
 
+    # Distributions whose import name follows no rule. These are facts about
+    # specific packages, in the same sense as the stdlib list above — not
+    # heuristics. Without them a correct `import yaml` backed by a declared
+    # `pyyaml` is reported as a broken import.
+    _DISTRIBUTION_TO_MODULE: Dict[str, str] = {
+        "pyyaml": "yaml",
+        "pillow": "PIL",
+        "beautifulsoup4": "bs4",
+        "scikit-learn": "sklearn",
+        "scikit-image": "skimage",
+        "opencv-python": "cv2",
+        "opencv-python-headless": "cv2",
+        "psycopg2-binary": "psycopg2",
+        "attrs": "attr",
+        "protobuf": "google",
+        "pycryptodome": "Crypto",
+        "python-docx": "docx",
+        "python-pptx": "pptx",
+        "typing-extensions": "typing_extensions",
+        "mysqlclient": "MySQLdb",
+        "faker": "faker",
+    }
+
+    @classmethod
+    def _import_aliases(cls, pkg: str) -> set:
+        """Every name code might plausibly import a declared distribution under.
+
+        Beyond hyphen/underscore spelling, PyPI has a dominant convention of
+        wrapping the module name: ``python-dotenv`` provides ``dotenv``,
+        ``msgpack-python`` provides ``msgpack``. Job 107b3d3e declared
+        ``python-dotenv`` and its ``from dotenv import load_dotenv`` was
+        reported as a broken import.
+        """
+        lowered = pkg.lower()
+        aliases = {
+            pkg,
+            lowered,
+            pkg.replace("-", "_"),
+            pkg.replace("_", "-"),
+            lowered.replace("-", "_"),
+            lowered.replace("_", "-"),
+        }
+        mapped = cls._DISTRIBUTION_TO_MODULE.get(lowered)
+        if mapped:
+            aliases.add(mapped)
+        # python-x / x-python wrappers
+        stem = lowered
+        for prefix in ("python-", "python_"):
+            if stem.startswith(prefix) and len(stem) > len(prefix):
+                stem = stem[len(prefix):]
+                break
+        for suffix in ("-python", "_python"):
+            if stem.endswith(suffix) and len(stem) > len(suffix):
+                stem = stem[: -len(suffix)]
+                break
+        if stem != lowered:
+            aliases.update({stem, stem.replace("-", "_"), stem.replace("_", "-")})
+        return {a for a in aliases if a}
+
     @classmethod
     def _load_third_party_names(cls, workspace: Path) -> set:
+        """Declared third-party names, from every manifest in the project.
+
+        This used to read ``workspace/requirements.txt`` only. A backend/frontend
+        split puts it at ``backend/requirements.txt`` — the layout the model
+        chooses and its own wiring contract declares — so nothing was declared as
+        far as the validator was concerned, and every third-party import in the
+        project was reported broken. Those false positives feed the remediation
+        loop, which then spends its budget rewriting correct code.
+        """
         names: set = set(cls._KNOWN_FRAMEWORKS)
-        for manifest in ("requirements.txt", "setup.py", "setup.cfg"):
-            req_file = workspace / manifest
-            if req_file.exists():
-                for line in req_file.read_text(encoding="utf-8", errors="replace").splitlines():
-                    line = line.strip()
-                    if line and not line.startswith("#"):
-                        pkg = re.split(r"[>=<!\[;]", line)[0].strip()
-                        if pkg and pkg[0].isalpha():
-                            names.add(pkg.replace("-", "_").lower())
-                            names.add(pkg.replace("-", "_"))
-                            names.add(pkg.replace("_", "-"))
-                            names.add(pkg)
+        for content in cls.read_manifests(
+            workspace, "requirements*.txt", "setup.py", "setup.cfg",
+        ):
+            for line in content.splitlines():
+                line = line.strip()
+                if not line or line.startswith("#") or line.startswith("-"):
+                    continue
+                pkg = re.split(r"[>=<!\[;~,]", line)[0].strip()
+                if pkg and pkg[0].isalpha():
+                    names.update(cls._import_aliases(pkg))
         return names
 
     @staticmethod
@@ -680,21 +797,20 @@ class JavaStrategy(LanguageStrategy):
         return {"valid": len(missing) == 0, "framework": framework, "missing_wiring": missing}
 
     def load_declared_dependencies(self, workspace: Path) -> Set[str]:
+        # Multi-module Maven and Gradle keep the real dependency lists in the
+        # module build files, not the aggregator at the root. target/ and
+        # .gradle/ are excluded by find_manifests so stale build copies cannot
+        # reintroduce removed dependencies.
         deps: Set[str] = set()
-        pom = workspace / "pom.xml"
-        if pom.exists():
-            content = pom.read_text(encoding="utf-8", errors="replace")
+        for content in self.read_manifests(workspace, "pom.xml"):
             for m in re.finditer(
                 r"<groupId>\s*([^<]+?)\s*</groupId>\s*<artifactId>\s*([^<]+?)\s*</artifactId>",
                 content, re.DOTALL,
             ):
                 deps.add(f"{m.group(1)}:{m.group(2)}")
-        for gf in ("build.gradle", "build.gradle.kts"):
-            gradle = workspace / gf
-            if gradle.exists():
-                content = gradle.read_text(encoding="utf-8", errors="replace")
-                for m in re.finditer(r"['\"]([a-zA-Z0-9_.]+):([a-zA-Z0-9_.-]+):", content):
-                    deps.add(f"{m.group(1)}:{m.group(2)}")
+        for content in self.read_manifests(workspace, "build.gradle", "build.gradle.kts"):
+            for m in re.finditer(r"['\"]([a-zA-Z0-9_.]+):([a-zA-Z0-9_.-]+):", content):
+                deps.add(f"{m.group(1)}:{m.group(2)}")
         return deps
 
     def validate_contract_conformance(
@@ -930,16 +1046,22 @@ class JavaScriptStrategy(LanguageStrategy):
         return {"valid": len(missing) == 0, "framework": framework, "missing_wiring": missing}
 
     def load_declared_dependencies(self, workspace: Path) -> Set[str]:
+        # Every package.json in the project, not just the root one: an npm
+        # workspace or a backend/frontend split keeps the real dependency list
+        # one directory down. node_modules is excluded by find_manifests, so
+        # transitive vendored manifests cannot leak in.
         names: set = set()
-        pkg_file = workspace / "package.json"
-        if pkg_file.exists():
+        for content in self.read_manifests(workspace, "package.json"):
             try:
-                data = _json.loads(pkg_file.read_text(encoding="utf-8", errors="replace"))
-                for key in ("dependencies", "devDependencies", "peerDependencies"):
-                    if key in data:
-                        names.update(data[key].keys())
+                data = _json.loads(content)
             except Exception:
-                pass
+                continue
+            if not isinstance(data, dict):
+                continue
+            for key in ("dependencies", "devDependencies", "peerDependencies"):
+                section = data.get(key)
+                if isinstance(section, dict):
+                    names.update(section.keys())
         return names
 
     def validate_contract_conformance(

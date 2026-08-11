@@ -8,7 +8,7 @@ from typing import List, Optional
 from ..tools.tldr_tools import read_call_graph
 
 # Generated/tooling paths — never offer these to the refinement agent
-_NON_EDITABLE_PARTS = frozenset({".tldr", ".git", "__pycache__", "node_modules"})
+from .vendor_paths import SKIP_DIRS as _NON_EDITABLE_PARTS  # one shared definition
 
 
 def _is_editable_source(relative_path: str) -> bool:

@@ -32,6 +32,40 @@ from crew_studio.auth import get_current_user, CurrentUser, decode_and_verify_to
 
 logger = logging.getLogger(__name__)
 
+# basicConfig lives in llamaindex_crew.main, which is the CLI entry point — the
+# served backend never ran it. With no handler on the root logger, every
+# logger.info in the pipeline was discarded and only warnings reached stderr via
+# lastResort, so a phase could run, seed nothing and report nothing. Several
+# defects in the context plane survived precisely because the log lines that
+# would have exposed them were never emitted.
+#
+# Scoped to our own loggers rather than the root, so raising the level does not
+# also turn on httpx, urllib3 and the LlamaIndex internals.
+#
+# "src.llamaindex_crew" is the same package reached through a second import
+# path: build_runner and refinement_runner use `from src.llamaindex_crew...`,
+# so those modules' __name__ — and therefore their logger names — sit in a
+# separate tree. Configuring only "llamaindex_crew" left the entire workflow
+# silent while the modules imported without the prefix logged normally, which
+# is why job 69b142f3 showed the seeder's own line and nothing from the phase
+# that called it.
+_LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+if not logging.getLogger("llamaindex_crew").handlers:
+    _handler = logging.StreamHandler()
+    _handler.setFormatter(
+        logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+    )
+    for _name in ("llamaindex_crew", "src.llamaindex_crew", "crew_studio"):
+        _log = logging.getLogger(_name)
+        _log.setLevel(_LOG_LEVEL)
+        _log.addHandler(_handler)
+        # propagate stays on. Setting it False stops records reaching the root
+        # logger, which is exactly where pytest's caplog attaches its handler —
+        # it silently broke every test that asserts on a log record as soon as
+        # anything imported this module. Nothing configures the root logger
+        # here (uvicorn configures only its own loggers), so propagating costs
+        # no duplicate output.
+
 # ---------------------------------------------------------------------------
 # Database & workspace setup (mirrors Flask app's init logic)
 # ---------------------------------------------------------------------------
@@ -459,6 +493,24 @@ async def create_job(request: Request, user: CurrentUser = Depends(get_current_u
         owner_email=user.email,
         team_id=body.team_id,
     )
+
+    # Jira context → context memory plane. This is the primary job-creation
+    # route (the Flask handler has the same hook but only serves multipart
+    # posts), so the Jira connector's JSON posts land here. Fail-open.
+    try:
+        from crew_studio.memory_hooks import write_jira_context_memory
+        from src.llamaindex_crew.config import ConfigLoader
+
+        write_jira_context_memory(
+            job_id,
+            config=ConfigLoader.load(),
+            job=job_db.get_job(job_id),
+            workspace_path=job_workspace,
+        )
+    except Exception as mem_err:
+        logger.warning(
+            "Jira context memory hook raised (non-fatal) for job %s: %s", job_id, mem_err
+        )
 
     if effective_mode in ("migration", "refactor", "import"):
         if effective_mode == "import":

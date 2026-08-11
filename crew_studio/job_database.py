@@ -10,6 +10,26 @@ from pathlib import Path
 from typing import Dict, Any, List, Optional
 from contextlib import contextmanager
 
+# Agent replies are occasionally enormous (a model that dumps a whole file into
+# its response). Clip rather than reject: a truncated reply still pairs usefully
+# with the instruction, whereas a failed UPDATE would lose the outcome entirely.
+_MAX_REFINEMENT_RESPONSE_CHARS = 10_000
+
+
+def _clip_refinement_response(response: Any) -> Optional[str]:
+    """Coerce an agent response of any type to a bounded string, or None."""
+    if response is None:
+        return None
+    text = response if isinstance(response, str) else str(response)
+    text = text.strip()
+    if not text:
+        return None
+    if len(text) > _MAX_REFINEMENT_RESPONSE_CHARS:
+        # Budget the marker inside the cap so the stored value never exceeds it.
+        marker = " …[truncated]"
+        text = text[: _MAX_REFINEMENT_RESPONSE_CHARS - len(marker)].rstrip() + marker
+    return text
+
 
 class JobDatabase:
     """Manages persistent job storage in a centralized SQLite database."""
@@ -106,6 +126,14 @@ class JobDatabase:
             """)
             conn.execute("CREATE INDEX IF NOT EXISTS idx_refinements_job ON refinements(job_id)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_refinements_status ON refinements(status)")
+            # The human instruction was stored without the agent's reply, leaving
+            # every refinement a half-recorded exchange. These columns complete the
+            # pair so corrections can be recalled across jobs.
+            for col, col_type in (("response", "TEXT"), ("files_changed", "TEXT")):
+                try:
+                    conn.execute(f"ALTER TABLE refinements ADD COLUMN {col} {col_type}")
+                except sqlite3.OperationalError:
+                    pass
             # ── Migration issues table ────────────────────────────────────
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS migration_issues (
@@ -808,23 +836,49 @@ class JobDatabase:
             'error': None,
         }
 
-    def complete_refinement(self, refinement_id: str) -> bool:
-        """Mark refinement as completed."""
+    def complete_refinement(
+        self,
+        refinement_id: str,
+        response: Any = None,
+        files_changed: Optional[List[str]] = None,
+    ) -> bool:
+        """
+        Mark refinement as completed, recording what the agent actually did.
+
+        ``response`` is the agent's own reply text and ``files_changed`` the paths
+        it touched. Both are optional so existing call sites keep working, but
+        supplying them is what turns a stored human instruction into a usable
+        instruction/response pair.
+        """
         now = datetime.now().isoformat()
         with self._get_conn() as conn:
             cursor = conn.execute(
-                "UPDATE refinements SET status = 'completed', completed_at = ? WHERE id = ?",
-                (now, refinement_id)
+                "UPDATE refinements SET status = 'completed', completed_at = ?, "
+                "response = ?, files_changed = ? WHERE id = ?",
+                (
+                    now,
+                    _clip_refinement_response(response),
+                    json.dumps(files_changed) if files_changed else None,
+                    refinement_id,
+                ),
             )
             return cursor.rowcount > 0
 
-    def fail_refinement(self, refinement_id: str, error: str) -> bool:
-        """Mark refinement as failed with error message."""
+    def fail_refinement(
+        self, refinement_id: str, error: str, response: Any = None
+    ) -> bool:
+        """
+        Mark refinement as failed with error message.
+
+        A failure is a negative training example — what the agent could not do is
+        as instructive as what it did — so the agent's response is recorded too.
+        """
         now = datetime.now().isoformat()
         with self._get_conn() as conn:
             cursor = conn.execute(
-                "UPDATE refinements SET status = 'failed', completed_at = ?, error = ? WHERE id = ?",
-                (now, error, refinement_id)
+                "UPDATE refinements SET status = 'failed', completed_at = ?, "
+                "error = ?, response = ? WHERE id = ?",
+                (now, error, _clip_refinement_response(response), refinement_id),
             )
             return cursor.rowcount > 0
 
@@ -1200,17 +1254,24 @@ class JobDatabase:
         file_path: Optional[str],
         line_number: Optional[int],
         description: str,
+        fix_strategy: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Create a validation issue record (status=pending)."""
+        """
+        Create a validation issue record (status=pending).
+
+        ``fix_strategy`` was declared in the schema but never written by this
+        INSERT, so the column was always NULL — the table advertised a signal the
+        code did not record.
+        """
         now = datetime.now().isoformat()
         with self._get_conn() as conn:
             conn.execute("""
                 INSERT INTO validation_issues
                     (id, job_id, check_name, severity, file_path, line_number,
-                     description, status, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?)
+                     description, fix_strategy, status, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)
             """, (issue_id, job_id, check_name, severity, file_path,
-                  line_number, description, now))
+                  line_number, description, fix_strategy, now))
         return {
             'id': issue_id,
             'job_id': job_id,

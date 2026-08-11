@@ -237,6 +237,124 @@ class PlanReviewConfig(BaseModel):
     enabled: bool = Field(False, description="Enable human-in-the-loop plan review gate")
 
 
+class MemoryConfig(BaseModel):
+    """
+    Cross-job context memory plane (MemMachine) configuration.
+
+    This is the P3 "historical" knowledge plane: job outcomes, Jira context, and
+    reference-doc summaries are written at lifecycle hooks and recalled at
+    solutioning time. Raw files stay per-job in the workspace; only compact,
+    searchable summaries go here.
+
+    Every integration point is fail-open — when the memory plane is disabled or
+    unreachable, jobs run exactly as they do today.
+    """
+    enabled: bool = Field(
+        False,
+        description="Enable the cross-job context memory plane (MemMachine).",
+    )
+    base_url: Optional[str] = Field(
+        None,
+        description=(
+            "MemMachine server base URL (e.g. http://memmachine-app:8180). "
+            "Falls back to the MEMMACHINE_BASE_URL or MEMORY_BACKEND_URL env var."
+        ),
+    )
+    api_key: Optional[str] = Field(
+        None, description="API key for the MemMachine server (optional for local dev)."
+    )
+    timeout_seconds: int = Field(
+        15, description="Per-request timeout for memory reads and writes."
+    )
+    default_org_id: str = Field(
+        "default",
+        description=(
+            "Fallback org_id (customer scope) when a job has no owner/team. "
+            "MemMachine requires a non-empty org_id."
+        ),
+    )
+    default_project_id: str = Field(
+        "unknown-framework",
+        description=(
+            "Fallback project_id (framework scope) when the framework cannot be "
+            "resolved from the stack contract or job metadata."
+        ),
+    )
+    shared_project_id: str = Field(
+        "shared-context",
+        description=(
+            "Project holding memories written before a stack is chosen — Jira issue "
+            "context and reference-doc summaries. These are framework-agnostic: a Jira "
+            "issue describes WHAT to build, not which framework. Keeping them in a "
+            "fixed project stops them being stranded under 'unknown-framework' where "
+            "later framework-scoped reads could never find them. Recall queries this "
+            "project in addition to the framework project."
+        ),
+    )
+    write_job_outcome: bool = Field(
+        True, description="Write a job outcome summary when a job reaches a terminal state."
+    )
+    max_doc_recall_chars: int = Field(
+        16_000,
+        description=(
+            "Character budget for document and blueprint recall. Matches the "
+            "default recall.py already assumed via getattr, so declaring the "
+            "field does not silently shrink the budget from 16k to 4k."
+        ),
+    )
+    write_reference_docs: bool = Field(
+        True, description="Write a summary for each uploaded reference document."
+    )
+    write_corrections: bool = Field(
+        True,
+        description=(
+            "Write one episode per correction — what humans and verifiers had to "
+            "fix, verbatim. Spans every job mode: plan/solution review feedback "
+            "and critique passes (build), refinement prompt+response (refine and "
+            "import/fix), migration issues, and refactor instructions. This is the "
+            "highest-signal recall the plane produces; disable only if a customer "
+            "forbids storing reviewer wording."
+        ),
+    )
+    max_corrections_per_job: int = Field(
+        25,
+        description=(
+            "Cap on correction episodes written per job. Human corrections are "
+            "kept in preference to machine critique when trimming."
+        ),
+    )
+    read_at_solutioning: bool = Field(
+        True, description="Query past memories during the solutioning research phase."
+    )
+    search_limit: int = Field(
+        5, description="Max memories retrieved per recall query."
+    )
+    search_score_threshold: Optional[float] = Field(
+        None,
+        description=(
+            "Minimum relevance score for recalled memories (None = server default). "
+            "Raise this if recall starts injecting weakly-related context."
+        ),
+    )
+    max_recall_chars: int = Field(
+        4000,
+        description="Max characters of recalled memory text injected into a prompt.",
+    )
+    summary_max_chars: int = Field(
+        1200, description="Max characters of a generated summary written to memory."
+    )
+    summary_agent_type: str = Field(
+        "reviewer",
+        description=(
+            "Which LLM tier generates memory summaries: manager|worker|reviewer. "
+            "Summaries are cheap 2-3 sentence calls, so point this at your smallest "
+            "model — set llm.model_reviewer to a small model and leave this as "
+            "'reviewer'. Set to 'none' to disable LLM summaries entirely and use "
+            "deterministic template summaries only."
+        ),
+    )
+
+
 class SolutioningConfig(BaseModel):
     """Solutioning loop configuration (research + architect + critique before PO)."""
     enabled: bool = Field(False, description="Enable solutioning loop before PO phase")
@@ -264,6 +382,7 @@ class SecretConfig(BaseModel):
     tools: ToolsConfig = Field(default_factory=ToolsConfig)
     plan_review: PlanReviewConfig = Field(default_factory=PlanReviewConfig)
     solutioning: SolutioningConfig = Field(default_factory=SolutioningConfig)
+    memory: MemoryConfig = Field(default_factory=MemoryConfig)
     generation: GenerationConfig = Field(default_factory=GenerationConfig)
     workflows: Dict[str, List[Any]] = Field(default_factory=dict, description="Dynamic workflow phase mappings")
     
@@ -370,6 +489,11 @@ class ConfigLoader:
                 "  8. LLM_API_KEY environment variable (legacy)"
             )
         
+        # Context memory plane: env overrides so the compose 'memory' profile can
+        # be toggled without editing config.yaml (the file is often mounted
+        # read-only). Env wins over file, matching how MEMORY_ENABLED reads.
+        ConfigLoader._apply_memory_env_overrides(config_data)
+
         # Load encryption key if provided
         enc_key_bytes = None
         if encryption_key:
@@ -384,6 +508,57 @@ class ConfigLoader:
         logger.info(f"✅ Configuration loaded successfully from: {config_source}")
         return config
     
+    @staticmethod
+    def _apply_memory_env_overrides(config_data: Dict[str, Any]) -> None:
+        """
+        Overlay context-memory settings from environment variables.
+
+        Mutates ``config_data`` in place. Only keys that are actually set in the
+        environment are applied, so a value in config.yaml is never clobbered by
+        an unset variable.
+        """
+        memory = config_data.get("memory")
+        if not isinstance(memory, dict):
+            memory = {}
+
+        enabled_raw = os.getenv("MEMORY_ENABLED")
+        if enabled_raw is not None:
+            memory["enabled"] = enabled_raw.strip().lower() in ("1", "true", "yes", "on")
+
+        base_url = os.getenv("MEMMACHINE_BASE_URL") or os.getenv("MEMORY_BACKEND_URL")
+        if base_url:
+            memory["base_url"] = base_url
+
+        api_key = os.getenv("MEMMACHINE_API_KEY")
+        if api_key:
+            memory["api_key"] = api_key
+
+        corrections_raw = os.getenv("MEMORY_WRITE_CORRECTIONS")
+        if corrections_raw is not None:
+            memory["write_corrections"] = corrections_raw.strip().lower() in (
+                "1", "true", "yes", "on",
+            )
+
+        for env_name, key, caster in (
+            ("MEMORY_MAX_CORRECTIONS", "max_corrections_per_job", int),
+            ("MEMORY_SEARCH_LIMIT", "search_limit", int),
+            ("MEMORY_TIMEOUT_SECONDS", "timeout_seconds", int),
+            ("MEMORY_MAX_RECALL_CHARS", "max_recall_chars", int),
+            ("MEMORY_SUMMARY_AGENT_TYPE", "summary_agent_type", str),
+            ("MEMORY_SHARED_PROJECT_ID", "shared_project_id", str),
+            ("MEMORY_DEFAULT_ORG_ID", "default_org_id", str),
+        ):
+            raw = os.getenv(env_name)
+            if not raw:
+                continue
+            try:
+                memory[key] = caster(raw)
+            except (TypeError, ValueError):
+                logger.warning("Ignoring invalid %s=%r", env_name, raw)
+
+        if memory:
+            config_data["memory"] = memory
+
     @staticmethod
     def _load_file(path: Path) -> Dict[str, Any]:
         """

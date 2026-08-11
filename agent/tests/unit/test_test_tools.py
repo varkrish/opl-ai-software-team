@@ -58,9 +58,13 @@ class TestRunFeatureTests(unittest.TestCase):
         finally:
             tmp.rmdir()
 
-    @patch("src.llamaindex_crew.tools.test_tools._parse_test_output_with_llm")
     @patch("src.llamaindex_crew.tools.test_tools._run_test_command_in_container")
-    def test_run_feature_tests_parses_output(self, mock_run, mock_parse):
+    def test_run_feature_tests_parses_output(self, mock_run):
+        """The runner's exit code and output are parsed by code, not a model.
+
+        No LLM is patched here because none is reachable — parsing is a pure
+        function of (exit_code, raw_output).
+        """
         tmp = Path("tests/unit/_tmp_run_tests")
         tmp.mkdir(parents=True, exist_ok=True)
         try:
@@ -68,19 +72,42 @@ class TestRunFeatureTests(unittest.TestCase):
                 "backend_test_command: pytest tests/ -v\n",
                 encoding="utf-8",
             )
-            mock_run.return_value = (1, "FAILED tests/test_invoice.py")
-            mock_parse.return_value = {
-                "passed": False,
-                "total": 1,
-                "passed_count": 0,
-                "failed_count": 1,
-                "failures": [{"test": "test_invoice", "error": "AssertionError"}],
-            }
+            mock_run.return_value = (
+                1,
+                "FAILED tests/test_invoice.py::test_total - AssertionError\n"
+                "========== 1 failed, 2 passed in 0.10s ==========\n",
+            )
             with patch.dict("os.environ", {"SMOKE_TEST_BACKEND": "podman"}, clear=False):
                 result = run_feature_tests("backend", str(tmp))
             self.assertFalse(result["passed"])
             self.assertEqual(result["failed_count"], 1)
-            mock_parse.assert_called_once()
+            self.assertEqual(result["passed_count"], 2)
+            self.assertEqual(result["layer"], "backend")
+            self.assertIn("AssertionError", result["raw_output"])
+        finally:
+            (tmp / "test_plan.md").unlink(missing_ok=True)
+            tmp.rmdir()
+
+    @patch("src.llamaindex_crew.tools.test_tools._run_test_command_in_container")
+    def test_run_feature_tests_survives_unrecognised_runner(self, mock_run):
+        """An unknown runner must still yield a usable verdict.
+
+        This is the shape of the crash that took down a job: the old path made
+        an LLM call here, and a null completion response propagated out as an
+        exception. There is nothing left to throw.
+        """
+        tmp = Path("tests/unit/_tmp_unknown_runner")
+        tmp.mkdir(parents=True, exist_ok=True)
+        try:
+            (tmp / "test_plan.md").write_text(
+                "backend_test_command: zig build test\n", encoding="utf-8",
+            )
+            mock_run.return_value = (1, "error: unable to build test runner\n")
+            with patch.dict("os.environ", {"SMOKE_TEST_BACKEND": "podman"}, clear=False):
+                result = run_feature_tests("backend", str(tmp))
+            self.assertFalse(result["passed"])
+            self.assertNotIn("total", result)
+            self.assertTrue(result["failures"])
         finally:
             (tmp / "test_plan.md").unlink(missing_ok=True)
             tmp.rmdir()

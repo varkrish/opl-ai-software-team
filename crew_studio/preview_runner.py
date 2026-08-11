@@ -13,8 +13,10 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse, urlunparse
+
+from llamaindex_crew.utils.vendor_paths import SKIP_DIRS as _SHARED_SKIP_DIRS
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +37,9 @@ PREVIEW_IMAGES = {
     "java_maven": "registry.access.redhat.com/ubi9/openjdk-21:latest",
     "java_gradle": "registry.access.redhat.com/ubi9/openjdk-21:latest",
     "go": "registry.access.redhat.com/ubi9/go-toolset:latest",
+    # Reuses the python image already pulled for "python" — no extra image to
+    # fetch just to serve static files.
+    "static": "registry.access.redhat.com/ubi9/python-311:latest",
 }
 
 DEFAULT_PORT = 8000
@@ -44,41 +49,184 @@ class PreviewError(RuntimeError):
     """Raised when a preview cannot be started."""
 
 
+_PLACEHOLDER_RE = re.compile(r"<[^>]+>|\.\.\.|TODO|FIXME", re.IGNORECASE)
+# Paths the command names, e.g. `python3 backend/main.py`, `-r req/base.txt`.
+_COMMAND_PATH_RE = re.compile(r"(?<![\w/.-])([\w.-]+(?:/[\w.-]+)+\.[A-Za-z0-9]+)")
+
+
 def _read_start_command(workspace: Path) -> str:
-    """Honour an explicit ``preview_command`` in test_plan.md when present."""
+    """Honour an explicit ``preview_command`` in test_plan.md, if it holds up.
+
+    The model that writes this line is the same one that pinned a nonexistent
+    ``memmachine-client==0.1.5`` and emitted ``jq '...'`` where a jq filter was
+    required, so a declaration is preferred but not taken on trust: it is
+    dropped when it is a placeholder, or when it names a file the project does
+    not contain. Falling through to detection beats starting a container that
+    cannot work.
+    """
     plan = workspace / "test_plan.md"
     if not plan.is_file():
         return ""
+    command = ""
     for line in plan.read_text(encoding="utf-8", errors="replace").splitlines():
         key, _, value = line.strip().partition(":")
         if key.strip() == "preview_command":
-            return value.strip()
-    return ""
+            command = value.strip()
+            break
+    if not command or command.lower() in ("none", "n/a", "-"):
+        return ""
+    if _PLACEHOLDER_RE.search(command):
+        logger.warning("Ignoring placeholder preview_command: %r", command)
+        return ""
+    for referenced in _COMMAND_PATH_RE.findall(command):
+        if not (workspace / referenced).exists():
+            logger.warning(
+                "Ignoring preview_command %r: it names %r, which is not in the "
+                "project; falling back to detection",
+                command, referenced,
+            )
+            return ""
+    return command
 
 
 _MAIN_GUARD_RE = re.compile(r"^if\s+__name__\s*==\s*['\"]__main__['\"]", re.M)
 
 
-def _python_entrypoint(workspace: Path) -> Optional[str]:
-    """Find the file to run: conventional names first, then self-declared ones.
+_CONVENTIONAL_ENTRYPOINTS = ("main.py", "app.py", "server.py", "run.py", "wsgi.py")
 
-    Generated projects frequently name their entrypoint after the domain
-    (``todo.py``, ``inventory_api.py``), so falling back to a ``__main__``
-    guard catches far more real projects than a fixed name list.
+# Directories that never hold the thing to run: the shared skip set, plus test
+# and migration directories. Those last are NOT vendored — they are this
+# project's own code — so they stay listed here rather than polluting the
+# shared definition other callers rely on.
+_TEST_DIRS = frozenset({"test", "tests", "__tests__", "spec", "specs", "testing", "migrations"})
+_SKIP_DIRS = _SHARED_SKIP_DIRS | _TEST_DIRS
+
+
+def _is_skipped(rel: Path) -> bool:
+    return any(part in _SKIP_DIRS for part in rel.parts[:-1])
+
+
+def _entrypoint_groups(workspace: Path) -> Tuple[List[str], List[str]]:
+    """``(conventional, main_guard)`` candidates, workspace-relative, root first.
+
+    Kept apart because they carry different weight. A file *named* main.py is
+    the project stating its entrypoint, so the conventional preference order
+    settles a tie. A ``__main__`` guard only says a file is runnable, and two
+    runnable files are a genuine ambiguity — guessing starts the wrong app.
+
+    Both used to be root-only, which assumes the project is single-module and
+    rooted. Job 107b3d3e put its API in ``backend/main.py`` — the layout its own
+    wiring contract declared — and Start Preview answered "No Python entrypoint
+    found", while ``validate_entrypoint``, which walks the tree with ``rglob``,
+    passed on the same workspace.
     """
-    for candidate in ("main.py", "app.py", "server.py", "run.py", "wsgi.py"):
-        if (workspace / candidate).is_file():
-            return candidate
+    conventional: List[tuple] = []
+    declared: List[str] = []
 
-    declared = []
-    for src in sorted(workspace.glob("*.py")):
+    for src in sorted(workspace.rglob("*.py")):
+        if not src.is_file():
+            continue
+        try:
+            rel = src.relative_to(workspace)
+        except ValueError:
+            continue
+        if _is_skipped(rel):
+            continue
+        rel_str = rel.as_posix()
+        depth = len(rel.parts) - 1
+        if src.name in _CONVENTIONAL_ENTRYPOINTS:
+            conventional.append((depth, _CONVENTIONAL_ENTRYPOINTS.index(src.name), rel_str))
+            continue
         try:
             if _MAIN_GUARD_RE.search(src.read_text(encoding="utf-8", errors="replace")):
-                declared.append(src.name)
+                declared.append(rel_str)
         except OSError:
             continue
-    # Only unambiguous when exactly one file claims to be runnable.
-    return declared[0] if len(declared) == 1 else None
+
+    return (
+        [rel for _d, _pref, rel in sorted(conventional)],
+        sorted(declared, key=lambda p: (p.count("/"), p)),
+    )
+
+
+def _python_entrypoint_candidates(workspace: Path) -> List[str]:
+    """The candidates a caller should show when the choice is ambiguous."""
+    conventional, declared = _entrypoint_groups(workspace)
+    return conventional or declared
+
+
+def _python_entrypoint(workspace: Path) -> Optional[str]:
+    """The single file to run, or None when the choice is not obvious.
+
+    A conventionally named file at the root wins outright — that is the project
+    naming its own entrypoint, and the preference order settles main.py against
+    app.py. Everywhere else only a single candidate is accepted: two runnable
+    files are a real ambiguity, and starting the wrong half of a two-service
+    project is worse than saying so.
+    """
+    conventional, declared = _entrypoint_groups(workspace)
+
+    for group in (conventional, declared):
+        if not group:
+            continue
+        root_level = [c for c in group if "/" not in c]
+        if root_level:
+            # Conventional names are ranked, so the first is the project's
+            # answer; runnable-by-guard files are not, so two is ambiguous.
+            if group is conventional:
+                return root_level[0]
+            return root_level[0] if len(root_level) == 1 else None
+        return group[0] if len(group) == 1 else None
+    return None
+
+
+def _pip_install_prefix(workspace: Path, entry: str) -> str:
+    """Install from the requirements.txt nearest the entrypoint.
+
+    Only ``workspace/requirements.txt`` used to count, so a discovered
+    subdirectory entrypoint would start without its dependencies and crash on
+    the first import.
+
+    Install output is no longer sent to /dev/null. A failed install used to be
+    invisible, surfacing later as an unexplained ImportError from the app —
+    while the real cause (on job 107b3d3e, a pin for a version that does not
+    exist) sat in the suppressed output.
+    """
+    entry_dir = Path(entry).parent
+    preferred = [entry_dir / "requirements.txt", Path("requirements.txt")]
+    for rel in preferred:
+        if (workspace / rel).is_file():
+            return f"pip install --no-cache-dir -r {rel.as_posix()} 2>&1; "
+    for found in sorted(workspace.rglob("requirements.txt")):
+        try:
+            rel = found.relative_to(workspace)
+        except ValueError:
+            continue
+        if _is_skipped(rel) or not found.is_file():
+            continue
+        return f"pip install --no-cache-dir -r {rel.as_posix()} >/dev/null 2>&1; "
+    return ""
+
+
+def _node_package_json(workspace: Path) -> Optional[Path]:
+    """The package.json that declares how to start the app, root preferred."""
+    root = workspace / "package.json"
+    if root.is_file():
+        return root
+    for found in sorted(workspace.rglob("package.json")):
+        try:
+            rel = found.relative_to(workspace)
+        except ValueError:
+            continue
+        if _is_skipped(rel) or not found.is_file():
+            continue
+        try:
+            scripts = json.loads(found.read_text(encoding="utf-8")).get("scripts", {})
+        except (json.JSONDecodeError, OSError, AttributeError):
+            continue
+        if isinstance(scripts, dict) and ("start" in scripts or "dev" in scripts):
+            return found
+    return None
 
 
 def detect_preview(workspace: Path, project_type: str) -> Tuple[str, int]:
@@ -87,36 +235,71 @@ def detect_preview(workspace: Path, project_type: str) -> Tuple[str, int]:
     Generated projects vary too much to detect perfectly; ``preview_command``
     in test_plan.md always wins so a project can state its own.
     """
+    # Best first: what the project says about itself, then what it declares
+    # structurally, then inference. Detection only runs when the project has
+    # told us nothing usable.
     explicit = _read_start_command(workspace)
     if explicit:
         return explicit, _port_from_command(explicit) or DEFAULT_PORT
 
+    # Imported here so this module keeps working when it is loaded as a
+    # top-level module rather than as part of the crew_studio package.
+    try:
+        from .compose_preview import compose_preview_command, read_dev_compose_preview
+    except ImportError:  # pragma: no cover - direct-module import path
+        from compose_preview import compose_preview_command, read_dev_compose_preview
+
+    declared = read_dev_compose_preview(workspace)
+    if declared is not None:
+        logger.info(
+            "Preview from dev-compose.yaml: service %r of %s",
+            declared.service, declared.services,
+        )
+        return compose_preview_command(declared), declared.port
+
     if project_type == "node":
-        pkg = workspace / "package.json"
-        if pkg.is_file():
+        pkg = _node_package_json(workspace)
+        if pkg is not None:
             try:
                 scripts = json.loads(pkg.read_text(encoding="utf-8")).get("scripts", {})
             except (json.JSONDecodeError, OSError):
                 scripts = {}
+            # cd into the package when it is not at the root, so npm resolves
+            # the right manifest.
+            rel_dir = pkg.parent.relative_to(workspace).as_posix()
+            prefix = "" if rel_dir in ("", ".") else f"cd {rel_dir} && "
             if "start" in scripts:
-                return "npm install --ignore-scripts && npm start", DEFAULT_PORT
+                return f"{prefix}npm install --ignore-scripts && npm start", DEFAULT_PORT
             if "dev" in scripts:
-                return "npm install --ignore-scripts && npm run dev", DEFAULT_PORT
+                return f"{prefix}npm install --ignore-scripts && npm run dev", DEFAULT_PORT
         raise PreviewError("No 'start' or 'dev' script found in package.json")
 
     if project_type == "python":
         entry = _python_entrypoint(workspace)
         if not entry:
+            candidates = _python_entrypoint_candidates(workspace)
+            if len(candidates) > 1:
+                raise PreviewError(
+                    f"Several runnable entrypoints found ({', '.join(candidates)}). "
+                    f"Preview runs one process, so add a 'preview_command:' line to "
+                    f"test_plan.md naming the one to start."
+                )
             raise PreviewError(
-                "No Python entrypoint found (looked for main.py, app.py, server.py, run.py)"
+                "No Python entrypoint found (looked for "
+                f"{', '.join(_CONVENTIONAL_ENTRYPOINTS)} and any file with a "
+                "__main__ guard, in the project root and its subdirectories)"
             )
-        install = ""
-        if (workspace / "requirements.txt").is_file():
-            install = "pip install --no-cache-dir -r requirements.txt >/dev/null 2>&1; "
+        install = _pip_install_prefix(workspace, entry)
         return f"{install}python3 {entry}", DEFAULT_PORT
 
     if project_type == "go":
         return "go run ./...", DEFAULT_PORT
+
+    if project_type == "static":
+        # http.server binds all interfaces by default (no loopback-only trap)
+        # and needs no dependency install — index.html is already confirmed
+        # present by _detect_project_type.
+        return f"python3 -m http.server {DEFAULT_PORT}", DEFAULT_PORT
 
     if project_type in ("java_maven", "java_gradle"):
         raise PreviewError(

@@ -25,11 +25,7 @@ WORKSPACE_DIR = "/workspace"
 # Directories that must never be shipped into a sandbox: caches, VCS metadata,
 # and vendored dependencies. Excluding them keeps uploads small and avoids
 # leaking host-specific build state into the run.
-_EXCLUDED_DIRS = {
-    ".git", ".venv", "venv", "node_modules", "__pycache__", ".pytest_cache",
-    ".mypy_cache", ".ruff_cache", ".tldr", "target", "dist", "build",
-    ".gradle", ".idea", ".vscode",
-}
+from .vendor_paths import SKIP_DIRS as _EXCLUDED_DIRS  # one shared definition
 
 
 def resolve_sandbox_api_url() -> Optional[str]:

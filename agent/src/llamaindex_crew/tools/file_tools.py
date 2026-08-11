@@ -505,8 +505,9 @@ def file_lister(directory: str = ".", workspace_path: Optional[str] = None, **kw
         if not full_path.is_dir():
             return f"❌ Not a directory: {directory}"
         
-        # Skip hidden dirs, __pycache__, node_modules, .git, etc.
-        _skip_dirs = {'.git', '__pycache__', 'node_modules', '.pytest_cache', 'htmlcov', '.tox', 'venv', '.venv'}
+        # Shared definition — see utils/vendor_paths for why this is one set
+        # and not eleven.
+        from ..utils.vendor_paths import SKIP_DIRS as _skip_dirs
         
         files = []
         for item in sorted(full_path.rglob("*")):

@@ -241,3 +241,88 @@ class TestGenericLlamaLLM(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class TestReasoningModelNullContent(unittest.TestCase):
+    """
+    Reasoning models return ``content: null`` when they exhaust max_tokens
+    mid-reasoning, putting their partial output in ``reasoning_content`` with
+    ``finish_reason: "length"``.
+
+    Reproduced live against gpt-oss-120b on the MaaS gateway. Every one of the
+    three response-construction sites passed that None straight into a pydantic
+    model, so the job did not degrade — it raised
+    ``ValidationError: text Input should be a valid string`` and the whole run
+    died. Two real jobs were lost to this: one crashed outright ("failed"), the
+    other burned its remediation budget on the chat-path variant of the same
+    error. An LLM returning an unhelpful answer must never crash the pipeline.
+    """
+
+    def setUp(self):
+        self.llm = GenericLlamaLLM(
+            model="gpt-oss-120b",
+            api_key="test-key",
+            api_base="https://api.test.com/v1",
+            context_window=4096,
+        )
+
+    # ── chat() ───────────────────────────────────────────────────────────────
+
+    def test_chat_survives_null_content(self):
+        messages = [ChatMessage(role=MessageRole.USER, content="Hi")]
+        payload = {"choices": [{"message": {"content": None, "role": "assistant"},
+                                "finish_reason": "length"}]}
+        with patch('httpx.Client.post') as mock_post:
+            mock_post.return_value = MagicMock(status_code=200, json=lambda: payload)
+            response = self.llm.chat(messages)
+        self.assertIsInstance(response.message.content, str)
+
+    def test_chat_falls_back_to_reasoning_content(self):
+        """The partial reasoning text is the only output there is — keep it."""
+        messages = [ChatMessage(role=MessageRole.USER, content="Hi")]
+        payload = {"choices": [{
+            "message": {"content": None, "role": "assistant",
+                        "reasoning_content": "We need to parse the test output"},
+            "finish_reason": "length",
+        }]}
+        with patch('httpx.Client.post') as mock_post:
+            mock_post.return_value = MagicMock(status_code=200, json=lambda: payload)
+            response = self.llm.chat(messages)
+        self.assertIn("parse the test output", response.message.content)
+
+    def test_chat_prefers_real_content_over_reasoning(self):
+        messages = [ChatMessage(role=MessageRole.USER, content="Hi")]
+        payload = {"choices": [{"message": {
+            "content": "the real answer", "role": "assistant",
+            "reasoning_content": "internal musing",
+        }}]}
+        with patch('httpx.Client.post') as mock_post:
+            mock_post.return_value = MagicMock(status_code=200, json=lambda: payload)
+            response = self.llm.chat(messages)
+        self.assertEqual(response.message.content, "the real answer")
+
+    # ── complete() ───────────────────────────────────────────────────────────
+
+    def test_complete_survives_null_text(self):
+        payload = {"choices": [{"text": None, "finish_reason": "length"}]}
+        with patch('httpx.Client.post') as mock_post:
+            mock_post.return_value = MagicMock(status_code=200, json=lambda: payload)
+            response = self.llm.complete("prompt")
+        self.assertIsInstance(response.text, str)
+
+    def test_complete_survives_missing_text_key(self):
+        """Chat-shaped response returned from a /completions call."""
+        payload = {"choices": [{"message": {"content": None, "role": "assistant",
+                                            "reasoning_content": "partial"}}]}
+        with patch('httpx.Client.post') as mock_post:
+            mock_post.return_value = MagicMock(status_code=200, json=lambda: payload)
+            response = self.llm.complete("prompt")
+        self.assertIsInstance(response.text, str)
+        self.assertIn("partial", response.text)
+
+    def test_complete_returns_normal_text_unchanged(self):
+        payload = {"choices": [{"text": "hello world"}]}
+        with patch('httpx.Client.post') as mock_post:
+            mock_post.return_value = MagicMock(status_code=200, json=lambda: payload)
+            response = self.llm.complete("prompt")
+        self.assertEqual(response.text, "hello world")

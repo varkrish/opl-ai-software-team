@@ -16,6 +16,7 @@ sys.path.insert(0, str(_ROOT / "crew_studio"))
 sys.path.insert(0, str(_ROOT / "agent" / "src"))
 
 import preview_runner as pr
+from llamaindex_crew.tools.test_tools import _detect_project_type
 
 
 # ── start-command detection ──────────────────────────────────────────────────
@@ -112,6 +113,121 @@ def test_unsupported_types_are_explicit(tmp_path):
     for project_type in ("java_maven", "java_gradle", "unknown"):
         with pytest.raises(pr.PreviewError):
             pr.detect_preview(tmp_path, project_type)
+
+
+# ── static HTML/CSS/JS projects ──────────────────────────────────────────────
+#
+# _detect_project_type only recognised manifest-driven stacks (package.json,
+# pom.xml, requirements.txt, *.go/*.py/*.java). A workspace containing nothing
+# but index.html — the simplest possible generated app, and a common DevAgent
+# output for plain-HTML visions — matched none of those and fell through to
+# "unknown", which has no PREVIEW_IMAGES entry. Every static-HTML job's Live
+# Preview button failed with "Cannot preview project type 'unknown'".
+
+def test_bare_index_html_is_detected_as_static(tmp_path):
+    (tmp_path / "index.html").write_text("<html></html>", encoding="utf-8")
+    assert _detect_project_type(tmp_path) == "static"
+
+
+def test_static_with_css_and_js_still_detected(tmp_path):
+    (tmp_path / "index.html").write_text("<html></html>", encoding="utf-8")
+    (tmp_path / "style.css").write_text("", encoding="utf-8")
+    (tmp_path / "main.js").write_text("", encoding="utf-8")
+    assert _detect_project_type(tmp_path) == "static"
+
+
+def test_manifest_driven_stacks_still_win_over_html(tmp_path):
+    # An index.html can coexist with a real Node app (e.g. served by Express);
+    # the manifest is the stronger signal and must not be shadowed by "static".
+    (tmp_path / "index.html").write_text("<html></html>", encoding="utf-8")
+    (tmp_path / "package.json").write_text("{}", encoding="utf-8")
+    assert _detect_project_type(tmp_path) == "node"
+
+
+def test_html_without_index_at_root_is_still_unknown(tmp_path):
+    # Deliberately narrow: only a root-level index.html is treated as directly
+    # servable. A nested index.html implies a build step this detector cannot
+    # infer, and misdetecting it would serve the wrong thing rather than fail
+    # loudly.
+    (tmp_path / "pages").mkdir()
+    (tmp_path / "pages" / "index.html").write_text("<html></html>", encoding="utf-8")
+    assert _detect_project_type(tmp_path) == "unknown"
+
+
+# ── stack_manifest.json takes priority over file sniffing ───────────────────
+#
+# The project's own AI-derived stack contract (written by the solutioning
+# loop, before a single file is generated) already knows the intended stack.
+# Re-deriving it by guessing from output files is both redundant and strictly
+# weaker: it depends on generation happening to produce a file this detector
+# recognises. forbidden_tiers containing "application_server" is a strong,
+# already-existing signal — it means the job was explicitly locked out of a
+# backend runtime, so nothing "unknown" on disk should override that.
+
+def _write_manifest(workspace, **overrides):
+    import json
+    manifest = {
+        "chosen_stack": ["html"],
+        "forbidden_tiers": ["application_server", "database", "cms_platform"],
+    }
+    manifest.update(overrides)
+    (workspace / "stack_manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+
+def test_manifest_forbidding_application_server_means_static(tmp_path):
+    # No index.html at all yet — e.g. detection runs before generation
+    # finishes, or the entry file landed somewhere this check doesn't guess.
+    _write_manifest(tmp_path)
+    assert _detect_project_type(tmp_path) == "static"
+
+
+def test_manifest_allowing_a_server_does_not_force_static(tmp_path):
+    # No application_server restriction — a Python file present is a real
+    # backend signal and must win, not be overridden by an unrelated manifest.
+    _write_manifest(tmp_path, forbidden_tiers=["database"], chosen_stack=["python"])
+    (tmp_path / "main.py").write_text("", encoding="utf-8")
+    assert _detect_project_type(tmp_path) == "python"
+
+
+def test_manifest_signal_does_not_override_a_real_manifest_file(tmp_path):
+    # A stray leftover stack_manifest.json (e.g. copied from another job by a
+    # human, or the workspace is mid-migration) must never outrank an actual
+    # package.json/pom.xml sitting right there.
+    _write_manifest(tmp_path)
+    (tmp_path / "package.json").write_text("{}", encoding="utf-8")
+    assert _detect_project_type(tmp_path) == "node"
+
+
+def test_malformed_manifest_falls_back_to_file_sniffing(tmp_path):
+    (tmp_path / "stack_manifest.json").write_text("{not json", encoding="utf-8")
+    (tmp_path / "index.html").write_text("<html></html>", encoding="utf-8")
+    assert _detect_project_type(tmp_path) == "static"
+
+
+def test_missing_manifest_falls_back_to_file_sniffing(tmp_path):
+    # Import/migration jobs never run solutioning and have no manifest at all.
+    (tmp_path / "package.json").write_text("{}", encoding="utf-8")
+    assert _detect_project_type(tmp_path) == "node"
+
+
+def test_static_has_a_preview_image():
+    assert "static" in pr.PREVIEW_IMAGES
+
+
+def test_static_preview_command_serves_the_workspace(tmp_path):
+    (tmp_path / "index.html").write_text("<html></html>", encoding="utf-8")
+    command, port = pr.detect_preview(tmp_path, "static")
+    assert "http.server" in command
+    assert port == pr.DEFAULT_PORT
+
+
+def test_static_explicit_preview_command_still_wins(tmp_path):
+    (tmp_path / "index.html").write_text("<html></html>", encoding="utf-8")
+    (tmp_path / "test_plan.md").write_text(
+        "preview_command: python3 -m http.server --port 9002\n", encoding="utf-8"
+    )
+    command, port = pr.detect_preview(tmp_path, "static")
+    assert port == 9002
 
 
 @pytest.mark.parametrize("command,expected", [

@@ -77,6 +77,13 @@ from .epic_story_loop import (
 
 logger = logging.getLogger(__name__)
 
+# Bounds for the post-generation compile-feedback pass. The cap exists so a
+# build that fails in fifty files cannot turn a single bounded pass into a de
+# facto loop; the remainder are left to the post-build loop, which is designed
+# to iterate.
+_COMPILE_FEEDBACK_MAX_FILES = 8
+_COMPILE_FEEDBACK_SRC_EXT = {".py", ".java", ".kt", ".js", ".jsx", ".ts", ".tsx", ".go"}
+
 # File references in build/runtime error output, by ecosystem:
 # Python tracebacks, Maven [ERROR] lines, and the generic path:line:col form
 # used by Go, Node, and TypeScript.
@@ -646,6 +653,45 @@ class SoftwareDevWorkflow:
         # Emit/Extract wiring_contract early
         self._ensure_wiring_contract_locked()
 
+    def _memory_scope(self):
+        """The scope this job reads prior context from.
+
+        It must be the same scope the write path records under. It was not:
+        both seeders resolved from ``self._job_data``, an attribute nothing
+        ever assigns, so ``resolve_scope`` fell back to org ``default`` while
+        memory_hooks recorded jobs under the real ``owner_id``. Reads and
+        writes therefore addressed different scopes and no live job could ever
+        recall another — the wiring-contract seeder included, which had looked
+        wired since it was written.
+
+        The job row is the same one the write path uses, fetched from the
+        job_db this workflow already holds rather than threaded through five
+        construction sites.
+        """
+        from llamaindex_crew.memory.scope import resolve_scope
+
+        cached = getattr(self, "_memory_scope_cache", None)
+        if cached is not None:
+            return cached
+
+        job: Dict[str, Any] = {}
+        if self.job_db is not None:
+            try:
+                job = self.job_db.get_job(self.project_id) or {}
+            except Exception as exc:  # noqa: BLE001 — recall is never worth failing a build
+                logger.debug("Could not load job row for scope resolution: %s", exc)
+        if not job:
+            # Without the row the org falls back to "default", which no writer
+            # uses. Say so rather than silently reading an empty scope.
+            logger.warning(
+                "No job row for %s — memory scope falls back to org 'default' and "
+                "will not match recorded jobs", self.project_id,
+            )
+
+        scope = resolve_scope(job, workspace_path=self.workspace_path)
+        self._memory_scope_cache = scope
+        return scope
+
     def _ensure_wiring_contract_locked(self, *, skip_tech_stack_reseed: bool = False) -> None:
         """Lock wiring_contract.json: JSON emit, jq patch on path seed, or path-only fallback."""
         from ..utils.wiring_contract import (
@@ -658,6 +704,36 @@ class SoftwareDevWorkflow:
 
         if not self._wiring_contract:
             self._wiring_contract = load_wiring_contract(self.workspace_path)
+
+        # Seed from a prior validated job when this contract is missing, or when
+        # it declares nothing but tests — the job 1cec01ad shape, where the whole
+        # application was absent and only `tests` survived.
+        #
+        # packages is a MAPPING of name -> {files, owns}, not a list. Treating it
+        # as a list made pkg_names always [], so the tests-only branch never
+        # fired and seeding only ever happened when the contract was absent
+        # entirely — i.e. never for the case it was written for.
+        if isinstance(self._wiring_contract, dict):
+            pkg_names = sorted((self._wiring_contract.get("packages") or {}).keys())
+        else:
+            pkg_names = []
+        tests_only = bool(pkg_names) and all(
+            name.strip("/").split("/")[0] in ("tests", "test") for name in pkg_names
+        )
+        if not self._wiring_contract or tests_only:
+            try:
+                from llamaindex_crew.memory.artifact_seeder import seed_wiring_contract_from_prior, seed_contract_deps_from_prior_callgraph
+                scope = self._memory_scope()
+                seeded = seed_wiring_contract_from_prior(scope)
+                if seeded:
+                    deps = seed_contract_deps_from_prior_callgraph(scope)
+                    if deps:
+                        seeded["deps"] = deps
+                    write_wiring_contract(self.workspace_path, seeded)
+                    self._wiring_contract = seeded
+                    logger.info("Seeded wiring_contract.json from prior validated job in scope %s", scope.describe())
+            except Exception as e:
+                logger.debug("Seeding wiring contract from prior failed: %s", e)
 
         if skip_tech_stack_reseed or should_skip_contract_reseed_from_tech_stack(
             self._wiring_contract
@@ -1077,6 +1153,7 @@ class SoftwareDevWorkflow:
             max_github = int(getattr(sol_cfg, "max_github_searches", 10) or 10)
 
         github_token = None
+        job = None
         if self.job_db:
             job = self.job_db.get_job(self.project_id)
             owner_id = job.get("owner_id") if job else None
@@ -1085,9 +1162,27 @@ class SoftwareDevWorkflow:
                 if gh_cfg:
                     github_token = gh_cfg.get("token")
 
+        # Context memory plane (P3): recall what past jobs on this stack/domain
+        # learned and prepend it to the research context. Returns "" when the
+        # plane is disabled or unreachable, so this is safe to concatenate.
+        project_context = self._enrich_project_context_for_solutioning()
+        try:
+            from ..memory.recall import recall_solutioning_context
+
+            recalled = recall_solutioning_context(
+                self.config,
+                vision=self.vision or "",
+                job=job,
+                workspace_path=self.workspace_path,
+            )
+            if recalled:
+                project_context = f"{recalled}\n{project_context}"
+        except Exception:
+            logger.warning("Context memory recall failed (non-fatal)", exc_info=True)
+
         result = run_solutioning_loop(
             vision=self.vision,
-            project_context=self._enrich_project_context_for_solutioning(),
+            project_context=project_context,
             workspace_path=self.workspace_path,
             config=self.config,
             budget_tracker=self.budget_tracker,
@@ -1107,6 +1202,23 @@ class SoftwareDevWorkflow:
             max_passes=max_passes,
             approved_by_critique=result.approved,
         )
+
+        if result.approved:
+            try:
+                from crew_studio.memory_hooks import write_approved_solution_memory
+                score = None
+                if result.critique_history and isinstance(result.critique_history[-1], dict):
+                    score = result.critique_history[-1].get("score")
+                write_approved_solution_memory(
+                    self.project_id,
+                    config=self.config,
+                    job=job,
+                    workspace_path=self.workspace_path,
+                    score=score,
+                )
+            except Exception:
+                logger.warning("Approved solution memory write failed (non-fatal)", exc_info=True)
+
         self._report_progress(
             "solutioning",
             28,
@@ -1145,7 +1257,7 @@ class SoftwareDevWorkflow:
 
         metadata = self._load_job_metadata()
         history = metadata.get("solution_feedback_history") or []
-        history.append({"feedback": feedback, "at": _json.dumps(datetime.now(timezone.utc).isoformat())})
+        history.append({"feedback": feedback, "at": datetime.now(timezone.utc).isoformat()})
         metadata["solution_feedback_history"] = history
         self._update_job_metadata(metadata)
 
@@ -1291,7 +1403,7 @@ class SoftwareDevWorkflow:
         # Record feedback round
         metadata = self._load_job_metadata()
         history = metadata.get("plan_feedback_history") or []
-        history.append({"feedback": feedback, "at": _json.dumps(datetime.now(timezone.utc).isoformat())})
+        history.append({"feedback": feedback, "at": datetime.now(timezone.utc).isoformat()})
         metadata["plan_feedback_history"] = history
         metadata["pending_review"] = True
         self._update_job_metadata(metadata)
@@ -1766,6 +1878,87 @@ class SoftwareDevWorkflow:
             except Exception as e:
                 logger.warning("Failed to auto-fix pom.xml at %s: %s", pom_rel, e)
 
+        # ── Scaffold missing Java type files ──
+        # javac reports "cannot find symbol: class X" against the *referencing*
+        # file.  The fix loop can only edit existing files, so without a stub
+        # on disk the loop spins uselessly.  Scaffold a compilable stub so the
+        # per-file pass can then ask DevAgent to flesh it out.
+        java_types_to_scaffold: Dict[str, Dict[str, str]] = {}  # rel_path -> {type_name, symbol_line, location_line}
+        for issue in issues:
+            if issue.get("check") != "smoke_test":
+                continue
+            desc = issue.get("description", "")
+            # Use the issue's already-normalised workspace-relative file path
+            # for directory derivation, not the raw container-absolute path
+            # from the parser (e.g. /app/src/main/java/...).
+            ref_file = issue.get("file", "")
+            if not ref_file or not ref_file.endswith(".java"):
+                continue
+            for parsed in self._parse_javac_missing_symbols(desc):
+                type_name = parsed["type_name"]
+                ref_dir = Path(ref_file).parent
+                target_rel = str(ref_dir / f"{type_name}.java")
+                if target_rel not in java_types_to_scaffold:
+                    java_types_to_scaffold[target_rel] = parsed
+
+        for target_rel, parsed in java_types_to_scaffold.items():
+            target = self.workspace_path / target_rel
+            if target.exists():
+                continue
+            # Safety: only scaffold if the directory contains at least one
+            # existing .java file — validates that our path derivation landed
+            # inside a real Java source tree.
+            if not any(target.parent.glob("*.java")):
+                logger.debug(
+                    "Skipping Java stub for %s: no .java siblings in %s",
+                    target_rel, target.parent,
+                )
+                continue
+
+            # Derive the package from the directory structure.
+            # e.g. src/main/java/com/example/task -> com.example.task
+            rel_dir = str(target.parent.relative_to(self.workspace_path))
+            package = ""
+            for marker in ("src/main/java/", "src/test/java/"):
+                if marker in rel_dir + "/":
+                    package = rel_dir.split(marker, 1)[1].replace("/", ".")
+                    break
+            if not package:
+                # Fallback: use all directory components after 'java/'
+                parts = Path(rel_dir).parts
+                if "java" in parts:
+                    idx = parts.index("java")
+                    package = ".".join(parts[idx + 1:])
+
+            type_name = parsed["type_name"]
+            symbol_line = parsed.get("symbol_line", f"class {type_name}")
+            location_line = parsed.get("location_line", "")
+
+            stub_lines = []
+            if package:
+                stub_lines.append(f"package {package};")
+                stub_lines.append("")
+            stub_lines.append("// TODO: Implement this type. The compiler reported:")
+            stub_lines.append(f"//   symbol:   {symbol_line}")
+            if location_line:
+                stub_lines.append(f"//   location: {location_line}")
+            stub_lines.append("// This file was auto-scaffolded so the per-file fix loop can fill it in.")
+            stub_lines.append(f"public class {type_name} {{")
+            stub_lines.append("}")
+            stub_lines.append("")  # trailing newline
+
+            try:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text("\n".join(stub_lines), encoding="utf-8")
+                fixed.append({
+                    "check": "missing_java_type",
+                    "file": target_rel,
+                    "description": f"Scaffolded stub for missing type {type_name}",
+                })
+                logger.info("Auto-fixed: scaffolded %s for missing type %s", target_rel, type_name)
+            except Exception as e:
+                logger.warning("Failed to scaffold Java stub %s: %s", target_rel, e)
+
         return fixed
 
     def _find_nearest_package_json(self, file_path: str) -> str:
@@ -2137,6 +2330,21 @@ class SoftwareDevWorkflow:
             "duplicates": dup_code_result.get("duplicates", []),
         }
 
+        # 13b. Client calls vs server routes. Every other check asks whether the
+        # code is arranged correctly; this one asks whether the endpoints the UI
+        # depends on exist. Job 107b3d3e passed completeness, entrypoint and
+        # wiring_reconciliation while its dashboard called /api/v1/stream and
+        # /api/v1/infrastructure against a server offering /events and /infra.
+        contract_result = CodeCompletenessValidator.validate_client_server_contract(
+            self.workspace_path
+        )
+        report["checks"]["client_server_contract"] = {
+            "pass": contract_result["valid"],
+            "unreachable_calls": contract_result.get("unreachable_calls", []),
+            "routes": contract_result.get("routes", 0),
+            "skipped": contract_result.get("skipped", False),
+        }
+
         # 14. Maven pom.xml completeness (Java imports vs declared deps)
         pom_result = CodeCompletenessValidator.validate_pom_xml_completeness(
             self.workspace_path
@@ -2200,6 +2408,77 @@ class SoftwareDevWorkflow:
         }
 
     @staticmethod
+    def _parse_javac_missing_symbols(output: str) -> List[Dict[str, str]]:
+        """Parse javac 'cannot find symbol' blocks for missing *type* names.
+
+        Returns a list of dicts with keys: type_name, referencing_file,
+        symbol_line, location_line.  Only type symbols (class/interface/enum)
+        are returned — method and variable symbols cannot be fixed by
+        scaffolding a new file.
+
+        Deduplicates by type_name so the same missing type referenced from
+        multiple call sites produces only one scaffold request.
+        """
+        import re as _re
+
+        results: List[Dict[str, str]] = []
+        seen_types: set = set()
+        lines = output.splitlines()
+
+        # Pattern: [ERROR] <path>.java:[line,col] cannot find symbol
+        error_re = _re.compile(
+            r"\[ERROR\]\s+(\S+\.java):\[\d+,\d+\]\s+cannot find symbol"
+        )
+        # The next two lines after the error carry the symbol and location:
+        #   symbol:   class TaskDto
+        #   location: class com.example.task.TaskService
+        symbol_re = _re.compile(r"^\s*symbol:\s+(.+)$")
+        location_re = _re.compile(r"^\s*location:\s+(.+)$")
+
+        i = 0
+        while i < len(lines):
+            m = error_re.search(lines[i])
+            if not m:
+                i += 1
+                continue
+
+            ref_file = m.group(1)
+            symbol_text = ""
+            location_text = ""
+
+            # Look ahead for the symbol and location lines (up to 2 lines)
+            for j in range(i + 1, min(i + 3, len(lines))):
+                sm = symbol_re.match(lines[j])
+                if sm:
+                    symbol_text = sm.group(1).strip()
+                    continue
+                lm = location_re.match(lines[j])
+                if lm:
+                    location_text = lm.group(1).strip()
+
+            # Only scaffold for type symbols, not methods or variables
+            type_match = _re.match(r"(?:class|interface|enum)\s+(\w+)", symbol_text)
+            if not type_match:
+                i += 1
+                continue
+
+            type_name = type_match.group(1)
+            if type_name in seen_types:
+                i += 1
+                continue
+            seen_types.add(type_name)
+
+            results.append({
+                "type_name": type_name,
+                "referencing_file": ref_file,
+                "symbol_line": symbol_text,
+                "location_line": location_text,
+            })
+            i += 1
+
+        return results
+
+    @staticmethod
     def _normalize_execution_path(raw: str, workspace: Path) -> Optional[str]:
         """Map a path from container error output to a workspace-relative path.
 
@@ -2234,7 +2513,11 @@ class SoftwareDevWorkflow:
         a runtime failure has nowhere to go.
         """
         by_file: Dict[str, List[str]] = {}
-        for line in output.splitlines():
+        lines = output.splitlines()
+        i = 0
+        while i < len(lines):
+            line = lines[i]
+            matched_rel = None
             for pattern in _EXECUTION_ERROR_PATTERNS:
                 match = pattern.search(line)
                 if not match:
@@ -2245,19 +2528,243 @@ class SoftwareDevWorkflow:
                     text = line.strip()
                     if text and text not in messages and len(messages) < 10:
                         messages.append(text)
+                    matched_rel = rel
                 break
+
+            # Capture indented continuation lines that follow a matched error.
+            # javac emits "  symbol:   class X" and "  location: class Y" on
+            # the two lines after "cannot find symbol" — the agent needs both
+            # to know WHICH symbol is missing, and the scaffolding parser needs
+            # them to create the right stub file.
+            if matched_rel is not None:
+                messages = by_file[matched_rel]
+                for j in range(i + 1, min(i + 3, len(lines))):
+                    cont = lines[j]
+                    # Continuation lines are indented (start with whitespace)
+                    # and contain structured info like "symbol:" or "location:"
+                    if cont and cont[0] in (' ', '\t'):
+                        text = cont.strip()
+                        if text and text not in messages and len(messages) < 12:
+                            messages.append(text)
+                    else:
+                        break
+
+            i += 1
 
         # Interpreters put the actual error on the last line, separate from the
         # frame that names the file — without it the agent sees a location but
         # not what went wrong.
         tail = next(
-            (ln.strip() for ln in reversed(output.splitlines()) if ln.strip()), ""
+            (ln.strip() for ln in reversed(lines) if ln.strip()), ""
         )
         if tail:
             for messages in by_file.values():
                 if tail not in messages:
                     messages.append(tail)
         return by_file
+
+    def _run_post_dev_gap_fill(self) -> None:
+        """
+        Ask DevAgent to close entrypoint and structural gaps — with the write
+        guard IN FORCE.
+
+        This step previously disabled the guard outright
+        (``set_allowed_file_paths(None)``) before invoking the agent. Told only
+        that "something structural is missing" and given free rein over the
+        filesystem, the agent answered by creating the layout it would have
+        chosen itself, alongside the one that already existed:
+
+            Python job 76f2138d — dev phase produced app/{models,schemas,
+            service,router,main}.py; gap-fill then added api/, core/, db/,
+            models/, schemas/, services/ and a duplicate test module. Nothing
+            failed, because compileall is happy to compile both trees, so the
+            job was graded healthy while carrying an unwired second project.
+
+            Java job d32dcaf7 — dev phase produced src/main/java/...; gap-fill
+            then added model/, controller/, service/, repository/, util/ at the
+            workspace root, outside the Maven source root entirely.
+
+        The guard is not Java- or Python-specific and neither is the failure:
+        the fix is simply to leave it on. Gap-fill can still create any file the
+        plan registered, and can still edit anything on disk — it just cannot
+        invent a new top-level package tree.
+        """
+        from ..tools.file_tools import set_allowed_file_paths
+        from ..utils.manifest_guard import remediation_write_allowlist
+
+        try:
+            registered = self.task_manager.get_registered_file_paths()
+            allowed = remediation_write_allowlist(registered, self.workspace_path)
+            if allowed:
+                set_allowed_file_paths(allowed, workspace=str(self.workspace_path))
+
+            try:
+                from ..orchestrator.code_validator import CodeCompletenessValidator
+
+                entry_check = CodeCompletenessValidator.validate_entrypoint(
+                    self.workspace_path, self.tech_stack or ""
+                )
+                if not entry_check.get("valid", True):
+                    missing = entry_check.get("missing_wiring") or []
+                    detail = missing[0] if missing else "entrypoint wiring incomplete"
+                    logger.warning("Post-dev gap-fill: entrypoint issue — %s", detail)
+                    self.dev_agent.run(
+                        [
+                            "Create or fix the application entrypoint/bootstrap file "
+                            f"by editing the files that already exist. {detail}"
+                        ],
+                        self.tech_stack or "",
+                        self.user_stories,
+                    )
+
+                structure_gaps = self.task_manager.detect_workspace_structure_gaps(
+                    self.workspace_path
+                )
+                if structure_gaps:
+                    logger.warning(
+                        "Post-dev gap-fill: %d structural gap(s) — %s",
+                        len(structure_gaps), structure_gaps[0][:120],
+                    )
+                    self.dev_agent.run(
+                        structure_gaps, self.tech_stack or "", self.user_stories
+                    )
+            finally:
+                # Always lift the guard: leaving it set would silently constrain
+                # every later phase in this workspace.
+                set_allowed_file_paths(None, workspace=str(self.workspace_path))
+        except Exception as e:  # noqa: BLE001 — gap-fill is best-effort
+            logger.warning("Post-dev completeness check failed: %s", e)
+
+    def _record_non_convergence(
+        self, current: int, best: int, iteration: int
+    ) -> None:
+        """
+        Record that the fix loop gave up because it stopped making progress.
+
+        Without this the stop is silent, and a job that quit early looks
+        identical in the UI to one that finished — the user sees a lower issue
+        count and no explanation for why nothing more was attempted.
+        """
+        if not self.job_db:
+            return
+        try:
+            import uuid as _uuid
+
+            self.job_db.create_validation_issue(
+                str(_uuid.uuid4()),
+                self.project_id,
+                "fix_loop_not_converging",
+                "warning",
+                None,
+                None,
+                (
+                    f"The automated fix loop stopped after iteration {iteration}: "
+                    f"{current} issue(s) remain and no round improved on the best "
+                    f"of {best}. Continuing would have rewritten code without "
+                    f"reducing the problem. The remaining issues need review — "
+                    f"they are often caused by a single upstream defect that the "
+                    f"per-file fix loop cannot reach."
+                ),
+                fix_strategy=(
+                    "Inspect the earliest failing check rather than the issue "
+                    "count; a build-level failure makes every file look broken."
+                ),
+            )
+        except Exception as exc:  # noqa: BLE001 — bookkeeping must not fail a job
+            logger.debug("Could not record non-convergence: %s", exc)
+
+    def _repair_build_manifest(self) -> bool:
+        """
+        Deterministically repair an invalid build manifest. True when repaired.
+
+        A broken manifest is invisible to the fix loop: the errors surface in
+        every source file, so issues are attributed to code that is fine while
+        the file actually at fault is never dispatched. Worse, a small model
+        reading "Could not find artifact … in central" pattern-matches it to a
+        network outage — observed live, where DevAgent began reasoning toward
+        deleting the dependency list. Both the diagnosis and the repair are
+        mechanical, so neither should cost a model call.
+
+        Defects that cannot be repaired by rule (arbitrarily malformed JSON,
+        an undefined property) are recorded so the reason is visible, then left
+        to the normal loop rather than guessed at.
+        """
+        try:
+            from ..utils.manifest_repair import repair_pom_parent_version, validate_manifests
+
+            defect = validate_manifests(self.workspace_path)
+            if not defect:
+                return False
+
+            if defect.repairable and defect.file == "pom.xml":
+                repairs = repair_pom_parent_version(self.workspace_path / "pom.xml")
+                if repairs:
+                    for line in repairs:
+                        logger.info("🔧 Auto-repaired build manifest — %s", line)
+                    self._report_progress(
+                        "validation", 95,
+                        f"Auto-repaired {defect.file}; re-validating...",
+                    )
+                    return True
+
+            logger.error(
+                "⛔ Build manifest %s is invalid and cannot be repaired by rule: %s",
+                defect.file, defect.description,
+            )
+            self._record_infrastructure_issue(f"{defect.file}: {defect.description}")
+            return False
+        except Exception as exc:  # noqa: BLE001 — must never fail a job
+            logger.debug("Manifest repair pass errored (non-fatal): %s", exc)
+            return False
+
+    def _detect_infrastructure_failure(self, report: Dict[str, Any]) -> Optional[str]:
+        """
+        Return a reason string when a failing check is a platform problem.
+
+        Only build/run checks are considered — those are the ones that execute
+        inside the sandbox and can therefore fail for environmental reasons.
+        Static checks (completeness, wiring, manifests) run in-process and a
+        failure there is always about the generated code.
+        """
+        from ..utils.failure_classifier import classify_failure
+
+        checks = report.get("checks", {}) or {}
+        for check_name in ("smoke_test", "feature_test_bed"):
+            check = checks.get(check_name) or {}
+            if check.get("pass", True):
+                continue
+            verdict = classify_failure(str(check.get("result", "")))
+            if verdict.is_infrastructure:
+                return f"{check_name}: {verdict.reason}"
+        return None
+
+    def _record_infrastructure_issue(self, reason: str) -> None:
+        """
+        Persist the platform failure so the UI explains it as an environment
+        problem rather than leaving the user to infer it from a code-shaped
+        issue list. Best-effort: never let bookkeeping break the job.
+        """
+        if not self.job_db:
+            return
+        try:
+            import uuid as _uuid
+
+            self.job_db.create_validation_issue(
+                str(_uuid.uuid4()),
+                self.project_id,
+                "infrastructure",
+                "error",
+                None,
+                None,
+                (
+                    f"Build environment problem, not a code defect: {reason}. "
+                    "The fix loop was stopped because rewriting source cannot "
+                    "resolve this."
+                ),
+                fix_strategy="Resolve the platform issue, then re-run the job.",
+            )
+        except Exception as exc:  # noqa: BLE001 — bookkeeping must not fail a job
+            logger.debug("Could not record infrastructure issue: %s", exc)
 
     def _collect_fixable_issues(self, report: Dict[str, Any]) -> List[Dict[str, Any]]:
         """Distil validation report into a list of actionable file-level issues."""
@@ -2344,6 +2851,24 @@ class SoftwareDevWorkflow:
                     "file": affected_file,
                     "check": "package_json_completeness",
                     "description": f"Package '{pkg_name}' imported but not declared in any package.json",
+                })
+
+        for call in report.get("checks", {}).get("client_server_contract", {}).get(
+            "unreachable_calls", []
+        ):
+            # Attributed to the calling file because that is the side we can
+            # point at with certainty; the fix may equally be to add the route,
+            # and the description says so rather than presuming.
+            for caller in (call.get("files") or [""])[:1]:
+                issues.append({
+                    "file": caller,
+                    "check": "client_server_contract",
+                    "description": (
+                        f"The client requests '{call.get('url', '')}' but no server "
+                        f"route answers it. Either add the endpoint on the server or "
+                        f"correct the URL here to match an existing route — do not "
+                        f"remove the call unless the feature is genuinely dropped."
+                    ),
                 })
 
         for dup_block in report.get("checks", {}).get("duplicate_code_blocks", {}).get("duplicates", []):
@@ -2435,6 +2960,120 @@ class SoftwareDevWorkflow:
             related = dict(list(related.items())[:max_files])
 
         return related
+
+    def _run_compile_feedback_turn(self) -> None:
+        """Compile once after generation, hand the errors back for ONE pass.
+
+        Generation currently finishes with nobody having tried to build the
+        result; the first compile happens inside the post-build loop, several
+        phases after the code was written.
+
+        Giving the model a compile tool and a ReAct loop performs best and is
+        the option a sovereign 14b deployment can least afford — the ReAct
+        parser already fails on this model tier, which is why TechArchitect runs
+        tool-less. This takes the cheap part of that benefit: compile, scaffold
+        what is deterministically missing, revise once, hand off. The post-build
+        loop still runs afterwards and remains the thing that iterates.
+
+        Deliberately NOT a loop: no re-validation, no convergence check, no
+        second round. And deliberately narrow: only the files the compiler
+        actually named, because a whole-workspace prompt crowds the error text
+        out of a 14b's usable context.
+
+        Never raises. This is an optimisation and must never be the reason a
+        job fails.
+        """
+        if os.getenv("COMPILE_FEEDBACK_TURN", "1").strip().lower() in ("0", "false", "no"):
+            return
+        if not self.dev_agent:
+            return
+
+        try:
+            from ..tools.test_tools import smoke_test_runner
+
+            smoke_msg = str(smoke_test_runner("auto"))
+        except Exception as exc:
+            logger.debug("Compile feedback turn: smoke test unavailable: %s", exc)
+            return
+
+        if "✅" in smoke_msg:
+            logger.info("Compile feedback turn: build is green, nothing to revise")
+            return
+
+        by_file = self._extract_failing_files(smoke_msg, self.workspace_path)
+        if not by_file:
+            # No file attribution — a missing dependency or a broken toolchain.
+            # Nothing for a per-file pass to act on; the post-build loop's
+            # infrastructure detector owns those.
+            logger.info(
+                "Compile feedback turn: build failed with no file attribution, skipping"
+            )
+            return
+
+        issues = [
+            {
+                "check": "smoke_test",
+                "file": rel_path,
+                "description": (
+                    "This file failed to build/run. Fix the code so the project "
+                    "compiles and starts cleanly:\n" + "\n".join(messages)
+                ),
+            }
+            for rel_path, messages in by_file.items()
+        ]
+
+        # Deterministic fixes BEFORE the model is asked anything. javac blames
+        # the file that REFERENCES a missing type, so without a stub on disk the
+        # model is told to fix a file that is already correct and cannot create
+        # the missing type from inside it.
+        try:
+            auto_fixed = self._auto_fix_issues(issues)
+            if auto_fixed:
+                logger.info(
+                    "Compile feedback turn: auto-fixed %d issue(s) before revision",
+                    len(auto_fixed),
+                )
+        except Exception as exc:
+            logger.warning("Compile feedback turn: auto-fix failed: %s", exc)
+            auto_fixed = []
+
+        from ..tools.file_tools import set_allowed_file_paths
+
+        targets = list(by_file.items())[:_COMPILE_FEEDBACK_MAX_FILES]
+        if len(by_file) > _COMPILE_FEEDBACK_MAX_FILES:
+            logger.info(
+                "Compile feedback turn: revising %d of %d failing files (cap %d); "
+                "the rest are left to the post-build loop",
+                len(targets), len(by_file), _COMPILE_FEEDBACK_MAX_FILES,
+            )
+
+        allowed = {rel for rel, _ in targets}
+        allowed.update(f.get("file", "") for f in auto_fixed if f.get("file"))
+        allowed.discard("")
+
+        # File tree for import paths only — never the file bodies.
+        all_files: Dict[str, str] = {}
+        for src in sorted(self.workspace_path.rglob("*")):
+            if src.is_file() and src.suffix in _COMPILE_FEEDBACK_SRC_EXT:
+                all_files[str(src.relative_to(self.workspace_path))] = ""
+
+        try:
+            set_allowed_file_paths(allowed, workspace=str(self.workspace_path))
+            for rel_path, messages in targets:
+                try:
+                    self._run_post_build_fix_with_context(
+                        rel_path, list(messages), all_files,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "Compile feedback turn: revision failed for %s: %s", rel_path, exc,
+                    )
+        finally:
+            set_allowed_file_paths(None, workspace=str(self.workspace_path))
+
+        logger.info(
+            "Compile feedback turn: one revision pass over %d file(s) complete", len(targets),
+        )
 
     def _run_post_build_fix_with_context(
         self,
@@ -2658,6 +3297,19 @@ class SoftwareDevWorkflow:
         prev_signatures = None
         stagnant_rounds = 0
 
+        # Set-identity alone misses churn: job d32dcaf7 ran 48 -> 67 -> 52 -> 56
+        # touching different files every pass, so the set always differed and
+        # the loop spent its whole budget rewriting correct code.
+        #
+        # Counting downward is not the answer either — see the docstring: a
+        # rising count often *is* progress, because fixing a parse error lets
+        # the build reach errors it could not previously see. What distinguishes
+        # the two is whether the run ever improves on its best: real progress
+        # sets a new low eventually, churn orbits one.
+        max_rounds_without_improvement = 3
+        best_issue_count: Optional[int] = None
+        rounds_without_improvement = 0
+
         for iteration in range(1, max_iterations + 1):
             report = self._run_validation_suite()
             self._validation_report = report
@@ -2666,12 +3318,55 @@ class SoftwareDevWorkflow:
                 logger.info("✅ Post-build validation PASS (iteration %d)", iteration)
                 break
 
+            # A malformed build manifest breaks every source file at once, so
+            # the per-file dispatcher below rewrites correct code around a
+            # project the build tool cannot parse. Repair it deterministically
+            # and re-validate before dispatching anything: seen live as
+            # 48 → 67 → 52 → 56 issues over four iterations that never once
+            # touched the pom.xml actually at fault.
+            if self._repair_build_manifest():
+                continue
+
+            # An infrastructure failure cannot be fixed by rewriting source, so
+            # feeding it to DevAgent just burns the remaining iterations on code
+            # that was never wrong. Stop and surface it as a platform problem.
+            infra = self._detect_infrastructure_failure(report)
+            if infra:
+                logger.error(
+                    "⛔ Post-build validation blocked by an INFRASTRUCTURE failure, "
+                    "not a code defect: %s. Stopping the fix loop after iteration %d — "
+                    "rewriting code cannot resolve this.",
+                    infra, iteration,
+                )
+                self._record_infrastructure_issue(infra)
+                break
+
             fixable = self._collect_fixable_issues(report)
             if not fixable:
                 logger.info(
                     "Post-build validation: ISSUES_FOUND but no actionable file issues to fix"
                 )
                 break
+
+            # Convergence check: has this run ever bettered its own best count?
+            if best_issue_count is None or len(fixable) < best_issue_count:
+                best_issue_count = len(fixable)
+                rounds_without_improvement = 0
+            else:
+                rounds_without_improvement += 1
+                if rounds_without_improvement >= max_rounds_without_improvement:
+                    logger.warning(
+                        "⏹️ Post-build fix is not converging: %d issue(s) this round, "
+                        "best was %d, no improvement in %d rounds. Stopping after "
+                        "iteration %d rather than spending the remaining budget "
+                        "rewriting code that is not getting better.",
+                        len(fixable), best_issue_count,
+                        rounds_without_improvement, iteration,
+                    )
+                    self._record_non_convergence(
+                        len(fixable), best_issue_count, iteration
+                    )
+                    break
 
             signatures = self._issue_signatures(fixable)
             if prev_signatures is not None and signatures == prev_signatures:
@@ -3842,12 +4537,40 @@ class SoftwareDevWorkflow:
                 skill_context=skill_context or "(none)",
             )
 
+            # Hand over the execution configuration a prior job in this scope
+            # actually ran, so the model adapts proven commands instead of
+            # inventing a preview_command that has never been executed. Only the
+            # runnable keys are replayed — the narrative is this job's to write.
+            try:
+                from llamaindex_crew.memory.artifact_seeder import seed_test_plan_from_prior
+                scope = self._memory_scope()
+                proven = seed_test_plan_from_prior(scope)
+                if proven:
+                    prompt = f"{prompt}\n\n{proven}"
+                    logger.info("Seeded test plan config from a prior validated job in scope %s",
+                                scope.describe())
+            except Exception as exc:
+                logger.debug("Seeding test plan from prior failed: %s", exc)
+
             llm = self._get_manager_llm()
             result = str(llm.complete(prompt))
             _persist_phase_artifact(self.workspace_path, "test_plan.md", result)
             logger.info("✅ test_plan.md generated")
         except Exception as exc:
             logger.warning("Test plan generation failed (non-fatal): %s", exc)
+
+    @staticmethod
+    def _format_test_tally(result: Dict[str, Any]) -> str:
+        """Render a layer's outcome, distinguishing "none passed" from "unknown".
+
+        The parser omits counts for runners it has no pattern for. Printing the
+        old ``0/? passed`` for those states a measured zero the code never
+        measured — and the model downstream cannot tell the two apart.
+        """
+        verdict = "PASSED" if result.get("passed") else "FAILED"
+        if "total" not in result:
+            return f"{verdict} (test counts unavailable — runner output not recognised)"
+        return f"{verdict} — {result.get('passed_count', 0)}/{result['total']} passed"
 
     def _build_test_critique(
         self,
@@ -3856,16 +4579,10 @@ class SoftwareDevWorkflow:
         failures: List[Dict[str, Any]],
     ) -> str:
         lines = ["TEST FAILURES — fix these before continuing:"]
-        if not backend_result.get("skipped"):
-            lines.append(
-                f"Backend: {backend_result.get('passed_count', 0)}/"
-                f"{backend_result.get('total', '?')} passed"
-            )
-        if not frontend_result.get("skipped"):
-            lines.append(
-                f"Frontend: {frontend_result.get('passed_count', 0)}/"
-                f"{frontend_result.get('total', '?')} passed"
-            )
+        for label, result in (("Backend", backend_result), ("Frontend", frontend_result)):
+            if result.get("skipped"):
+                continue
+            lines.append(f"{label}: {self._format_test_tally(result)}")
         for failure in failures[:20]:
             lines.append(
                 f"  - {failure.get('test', 'unknown')}: "
@@ -3873,10 +4590,78 @@ class SoftwareDevWorkflow:
             )
         return "\n".join(lines)
 
+    def _handle_blocked_test_run(
+        self,
+        backend_result: Dict[str, Any],
+        frontend_result: Dict[str, Any],
+    ) -> bool:
+        """Deal with a run that never reached the tests. Returns True to retry.
+
+        Sets ``_dependency_blocked_test_run`` when the blockage is real but not
+        repairable here, so the caller stops instead of spending DevAgent passes
+        on test code that was never executed.
+        """
+        from ..utils.manifest_repair import (
+            detect_dependency_resolution_failure,
+            repair_unresolvable_pins,
+        )
+
+        self._dependency_blocked_test_run = False
+        parts: List[str] = []
+        for result in (backend_result, frontend_result):
+            parts.append(str(result.get("raw_output") or ""))
+            for failure in result.get("failures") or []:
+                parts.append(str(failure.get("error") or ""))
+        output = "\n".join(p for p in parts if p)
+
+        try:
+            repairs = repair_unresolvable_pins(self.workspace_path, output)
+        except Exception as exc:  # noqa: BLE001 — never fail a job on a repair
+            logger.debug("Dependency pin repair errored: %s", exc)
+            return False
+
+        if repairs:
+            for repair in repairs:
+                logger.warning("[test-bed] %s", repair)
+            return True
+
+        defect = detect_dependency_resolution_failure(output)
+        if not defect:
+            return False
+
+        # Named but unrepairable — usually npm, which reports the bad target
+        # without listing what it would accept. Inventing one would rewrite a
+        # manifest on a guess, so escalate with the real cause instead.
+        self._dependency_blocked_test_run = True
+        description = (
+            f"Tests never ran: the {defect.ecosystem} install failed because "
+            f"'{defect.package}{('==' + defect.requested) if defect.requested else ''}' "
+            f"is not available on the registry. The test command installs before it "
+            f"runs, so nothing was executed — this is a dependency manifest defect, "
+            f"not a test failure. Pin '{defect.package}' to a version that exists."
+        )
+        logger.warning("[test-bed] %s", description)
+        if self.job_db:
+            try:
+                import uuid as _uuid
+                self.job_db.create_validation_issue(
+                    issue_id=str(_uuid.uuid4()),
+                    job_id=self.project_id,
+                    check_name="dependency_manifest",
+                    severity="error",
+                    file_path=None,
+                    line_number=None,
+                    description=description,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("Could not record dependency defect: %s", exc)
+        return False
+
     def _run_feature_test_bed_loop(self) -> None:
         """Run container-isolated tests after file tasks; loop DevAgent on RED."""
         if os.getenv("SMOKE_TEST_BACKEND", "syntax_only") == "syntax_only":
             return
+        self._dependency_blocked_test_run = False
 
         from ..tools.test_tools import run_feature_tests
 
@@ -3897,6 +4682,18 @@ class SoftwareDevWorkflow:
 
             failures = list(backend_result.get("failures") or [])
             failures.extend(frontend_result.get("failures") or [])
+
+            # A test command is usually `install && run`, so a failed install
+            # short-circuits and nothing is ever executed. The runner still
+            # exits non-zero, and treating that as "the tests failed" sends
+            # DevAgent to patch test code over a bad version pin — job 107b3d3e
+            # spent its whole budget that way and then recorded "Tests still
+            # failing after 3 iterations".
+            if self._handle_blocked_test_run(backend_result, frontend_result):
+                continue
+            if self._dependency_blocked_test_run:
+                return
+
             critique = self._build_test_critique(
                 backend_result, frontend_result, failures,
             )
@@ -5200,6 +5997,10 @@ class SoftwareDevWorkflow:
 
         self._export_registry = export_registry
 
+        # Compile once and hand the errors straight back — one bounded pass,
+        # while the code is freshly written, before any other phase runs.
+        self._run_compile_feedback_turn()
+
         # Feature test bed — opt-in via SMOKE_TEST_BACKEND != syntax_only
         self._run_feature_test_bed_loop()
 
@@ -5243,34 +6044,7 @@ class SoftwareDevWorkflow:
                                 )
         
         # ── Post-development completeness check ──
-        try:
-            from ..tools.file_tools import set_allowed_file_paths
-            set_allowed_file_paths(None, workspace=str(self.workspace_path))
-
-            from ..orchestrator.code_validator import CodeCompletenessValidator
-            entry_check = CodeCompletenessValidator.validate_entrypoint(
-                self.workspace_path, self.tech_stack or ""
-            )
-            if not entry_check.get("valid", True):
-                missing = entry_check.get("missing_wiring") or []
-                detail = missing[0] if missing else "entrypoint wiring incomplete"
-                logger.warning("Post-dev gap-fill: entrypoint issue — %s", detail)
-                self.dev_agent.run(
-                    [f"Create or fix the application entrypoint/bootstrap file. {detail}"],
-                    self.tech_stack or "",
-                    self.user_stories,
-                )
-
-            structure_gaps = self.task_manager.detect_workspace_structure_gaps(self.workspace_path)
-            if structure_gaps:
-                logger.warning(
-                    "Post-dev gap-fill: %d structural gap(s) — %s",
-                    len(structure_gaps),
-                    structure_gaps[0][:120],
-                )
-                self.dev_agent.run(structure_gaps, self.tech_stack or "", self.user_stories)
-        except Exception as e:
-            logger.warning("Post-dev completeness check failed: %s", e)
+        self._run_post_dev_gap_fill()
 
         # ── Post-development validation suite (delegates to reusable method) ──
         report = self._run_validation_suite()

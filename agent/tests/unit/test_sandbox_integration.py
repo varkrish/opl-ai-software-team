@@ -270,6 +270,105 @@ def test_backend_surfaces_unreachable_service(monkeypatch, workspace):
     assert str(result).startswith("❌")
 
 
+# ── static HTML/CSS/JS smoke test ────────────────────────────────────────────
+#
+# _detect_project_type can return "static" (a bare index.html, no build step),
+# but CONTAINER_IMAGES/CONTAINER_COMMANDS had no entry for it, so every static
+# job run with SMOKE_TEST_BACKEND=sandbox_api failed smoke_test unconditionally
+# with "No container image configured for project type 'static'" — confirmed
+# live: two real jobs landed in validation_issues with exactly that message.
+
+def test_static_has_a_container_image():
+    assert "static" in test_tools.CONTAINER_IMAGES
+
+
+def test_static_has_a_container_command():
+    assert "static" in test_tools.CONTAINER_COMMANDS
+
+
+def test_static_sandbox_command_targets_the_upload_mount():
+    assert "cd /app" not in test_tools.SANDBOX_API_COMMANDS["static"]
+    assert "cd /workspace" in test_tools.SANDBOX_API_COMMANDS["static"]
+
+
+@pytest.fixture
+def static_workspace(tmp_path):
+    (tmp_path / "index.html").write_text("<html><body>hi</body></html>", encoding="utf-8")
+    return tmp_path
+
+
+def test_static_smoke_test_passes_when_entry_point_exists(mock_api, monkeypatch, static_workspace):
+    monkeypatch.setenv("SANDBOX_API_URL", "http://sandbox:18080")
+    mock_api(_Recorder(stdout=("static entry point present: index.html",)))
+    result = test_tools.SandboxAPIBackend().run(static_workspace, "static")
+    assert str(result).startswith("✅")
+
+
+def test_static_smoke_test_fails_on_missing_entry_point(mock_api, monkeypatch, static_workspace):
+    # The command itself must actually check for the file rather than always
+    # exiting 0 — simulate what `test -s index.html` reports when it's absent.
+    monkeypatch.setenv("SANDBOX_API_URL", "http://sandbox:18080")
+    mock_api(_Recorder(exit_code=1, stdout=()))
+    result = test_tools.SandboxAPIBackend().run(static_workspace, "static")
+    assert str(result).startswith("❌")
+
+
+# ── toolchain commands must work under the sandbox's constraints ─────────────
+#
+# The sandbox root filesystem is read-only and the container user's real home
+# (/home/default) is not writable. Every toolchain that caches under $HOME has
+# to be redirected somewhere inside the writable workspace mount.
+
+def test_maven_does_not_rely_on_home_for_its_local_repo():
+    """
+    Maven resolves its local repo from the OS passwd home, NOT $HOME, so
+    exporting HOME is not enough — verified live: a real Java job failed with
+    "Could not create local repository at /home/default/.m2/repository" on
+    every remediation iteration, because that path is on the read-only root.
+    The repo must be pinned explicitly with -Dmaven.repo.local.
+    """
+    cmd = test_tools.CONTAINER_COMMANDS["java_maven"]
+    assert "-Dmaven.repo.local=" in cmd
+
+
+def test_maven_local_repo_path_is_relative_not_absolute():
+    """
+    Relative so it lands under whichever workspace dir the command cd's into.
+    An absolute /app path would break the sandbox variant, which rewrites
+    `cd /app` to the upload mount but would leave a hardcoded path untouched.
+    """
+    cmd = test_tools.CONTAINER_COMMANDS["java_maven"]
+    repo_arg = [a for a in cmd.split() if a.startswith("-Dmaven.repo.local=")][0]
+    value = repo_arg.split("=", 1)[1]
+    assert not value.startswith("/"), f"must be relative, got {value!r}"
+    assert "$HOME" not in value, "must not depend on $HOME — Maven ignores it here"
+
+
+def test_gradle_does_not_rely_on_home_for_its_cache():
+    cmd = test_tools.CONTAINER_COMMANDS["java_gradle"]
+    assert "--gradle-user-home" in cmd or "-g " in cmd
+
+
+def test_python_smoke_test_checks_nested_sources():
+    """
+    `py_compile *.py` only globs the workspace ROOT. A real FastAPI project
+    puts its code in app/ or src/, so the glob matched nothing — and `|| true`
+    turned that into a PASS. Verified live: a Python job reported exit_code 0
+    with output "[Errno 2] No such file or directory: '*.py'", certifying
+    nothing while looking green. compileall recurses and exits non-zero on a
+    genuine syntax error.
+    """
+    cmd = test_tools.CONTAINER_COMMANDS["python"]
+    assert "compileall" in cmd
+    assert "*.py" not in cmd
+
+
+def test_python_smoke_test_does_not_swallow_failures():
+    """`|| true` makes the check incapable of ever failing."""
+    cmd = test_tools.CONTAINER_COMMANDS["python"]
+    assert "|| true" not in cmd
+
+
 # ── agent tool ───────────────────────────────────────────────────────────────
 
 def test_tool_absent_without_url(monkeypatch, workspace):
@@ -296,3 +395,33 @@ def test_tool_rejects_empty_command(monkeypatch, workspace):
     monkeypatch.setenv("SANDBOX_API_URL", "http://sandbox:18080")
     tool = create_sandbox_tools(str(workspace))[0]
     assert "❌" in str(tool.call(command=[]))
+
+
+# ── Java honours proxies differently to everything else ─────────────────────
+#
+# curl, npm, go and pip all read http_proxy from the environment. The JVM does
+# not. Verified live: with the egress proxy working (curl reached Maven Central
+# with 200 from the same sandbox), `mvn compile` still died with
+# "repo1.maven.org: Name or service not known" because it tried to resolve the
+# host directly, and build sandboxes have no DNS of their own.
+#
+# The fix is to generate a settings.xml from $http_proxy at run time. Proven in
+# a live sandbox: "Downloaded from central: ... h2-2.2.224.jar (2.6 MB)".
+
+def test_maven_configures_a_proxy_from_the_environment():
+    cmd = test_tools.CONTAINER_COMMANDS["java_maven"]
+    assert "http_proxy" in cmd, "Maven must derive proxy settings from $http_proxy"
+    assert "settings.xml" in cmd or "-Dhttp.proxyHost" in cmd
+
+
+def test_maven_still_works_without_a_proxy():
+    """Egress is opt-in; with it off, $http_proxy is unset and mvn must still run."""
+    cmd = test_tools.CONTAINER_COMMANDS["java_maven"]
+    # Guarded so an empty proxy does not produce -Dhttp.proxyHost= or an
+    # settings.xml pointing at "".
+    assert 'if [ -n "$http_proxy" ]' in cmd or "if [ -n \"${http_proxy}\" ]" in cmd
+
+
+def test_gradle_configures_a_proxy_from_the_environment():
+    cmd = test_tools.CONTAINER_COMMANDS["java_gradle"]
+    assert "http_proxy" in cmd

@@ -50,10 +50,6 @@ You verify and use the technology stack defined by the Technical Architect."""
 
         backstory = custom_backstory or default_backstory
 
-        # Determine capability mode for the worker model
-        self.supports_react = get_supports_react("worker")
-        logger.info("DevAgent: supports_react=%s", self.supports_react)
-
         tool_config = config
         if tool_config is None:
             try:
@@ -61,17 +57,36 @@ You verify and use the technology stack defined by the Technical Architect."""
             except Exception:
                 tool_config = None
 
+        # Determine capability mode for the worker model
+        self.supports_react = get_supports_react("worker", config=tool_config)
+        logger.info("DevAgent: supports_react=%s", self.supports_react)
+
         if self.supports_react:
+            from llama_index.core.tools import FunctionTool
+            from ..tools.context_tools import (
+                find_similar_solutions,
+                get_prior_artifact,
+                find_reference_implementation,
+                find_fix_precedent,
+                check_known_bad,
+            )
+            ctx_tools = [
+                FunctionTool.from_defaults(fn=find_similar_solutions, name="find_similar_solutions", description="Find prior solution blueprints with validation outcomes"),
+                FunctionTool.from_defaults(fn=get_prior_artifact, name="get_prior_artifact", description="Get whole intact artifact for a job"),
+                FunctionTool.from_defaults(fn=find_reference_implementation, name="find_reference_implementation", description="Find reference implementation file from fully validated job"),
+                FunctionTool.from_defaults(fn=find_fix_precedent, name="find_fix_precedent", description="Find how past jobs resolved check failures"),
+                FunctionTool.from_defaults(fn=check_known_bad, name="check_known_bad", description="Check proposal against recorded anti-patterns"),
+            ]
             if workspace_path is not None:
                 ws_tools = create_workspace_file_tools(Path(workspace_path))
-                tools = list(ws_tools) + [GitTool, PytestRunnerTool, CodeCoverageTool]
+                tools = list(ws_tools) + [GitTool, PytestRunnerTool, CodeCoverageTool] + ctx_tools
                 append_tldr_tools(tools, Path(workspace_path), config=tool_config)
                 tools.extend(create_sandbox_tools(str(workspace_path)))
             else:
                 tools = [
                     FileWriterTool, BulkFileWriterTool, FileReaderTool, FileListTool,
                     GitTool, PytestRunnerTool, CodeCoverageTool,
-                ]
+                ] + ctx_tools
         else:
             # Simple mode: no tools — single-shot JSON output; workflow writes files
             # via output_parser.  Context is already injected in build_file_prompt.

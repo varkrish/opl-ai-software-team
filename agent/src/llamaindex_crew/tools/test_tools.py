@@ -25,13 +25,16 @@ from .file_tools import _resolve_workspace
 logger = logging.getLogger(__name__)
 
 
-def _read_test_plan(workspace: Path) -> Dict[str, str]:
-    """Parse test_plan.md key-value lines. Returns {} if the file is missing."""
-    plan_file = workspace / "test_plan.md"
-    if not plan_file.is_file():
-        return {}
+def parse_test_plan(text: str) -> Dict[str, str]:
+    """Parse the ``key: value`` execution-configuration lines out of a test plan.
+
+    Split out from :func:`_read_test_plan` so the context plane can parse a plan
+    recalled from the database, where there is no file on disk. One parser, so a
+    plan means the same thing whether it is read from the workspace or replayed
+    from a prior job.
+    """
     result: Dict[str, str] = {}
-    for line in plan_file.read_text(encoding="utf-8", errors="replace").splitlines():
+    for line in text.splitlines():
         stripped = line.strip()
         if not stripped or stripped.startswith("#"):
             continue
@@ -43,6 +46,14 @@ def _read_test_plan(workspace: Path) -> Dict[str, str]:
         if key:
             result[key] = value
     return result
+
+
+def _read_test_plan(workspace: Path) -> Dict[str, str]:
+    """Parse test_plan.md key-value lines. Returns {} if the file is missing."""
+    plan_file = workspace / "test_plan.md"
+    if not plan_file.is_file():
+        return {}
+    return parse_test_plan(plan_file.read_text(encoding="utf-8", errors="replace"))
 
 
 def _find_container_runtime() -> Optional[str]:
@@ -107,46 +118,121 @@ def _run_test_command_in_container(workspace: Path, command: str) -> tuple[int, 
         return 1, f"Container test error: {exc}"
 
 
-def _parse_test_output_with_llm(raw_output: str) -> Dict[str, Any]:
-    """Use LLM to parse arbitrary test-runner output into structured results."""
-    from ..utils.llm_config import get_llm_for_agent
+# Best-effort test counts, in priority order — first pattern that matches wins.
+# `.` never crosses a newline, so a pattern can only pair numbers that the
+# runner printed on the same summary line; unrelated "4 passed" / "9 failed"
+# lines elsewhere in a log can never be stitched into a bogus pair.
+#
+# Adding a runner is one entry. Getting it wrong costs a cosmetic count, so
+# these are deliberately literal rather than clever.
+_TEST_COUNT_PATTERNS: list[tuple[re.Pattern, str]] = [
+    # rust/cargo — "test result: ok. 3 passed; 1 failed; 0 ignored"
+    (re.compile(r"test result:.*?(\d+) passed; (\d+) failed"), "passed_failed"),
+    # maven surefire — "Tests run: 6, Failures: 1, Errors: 1, Skipped: 0"
+    (re.compile(r"Tests run: (\d+), Failures: (\d+), Errors: (\d+)"), "surefire"),
+    # pytest, jest, vitest — all three print FAILED BEFORE PASSED
+    #   pytest  "2 failed, 3 passed in 0.12s"
+    #   jest    "Tests:  1 failed, 7 passed, 8 total"
+    #   vitest  "Tests  1 failed | 3 passed (4)"
+    (re.compile(r"(\d+) failed\s*[,|]\s*(\d+) passed"), "failed_passed"),
+    # passed-first variants of the same family
+    (re.compile(r"(\d+) passed\s*[,|]\s*(\d+) failed"), "passed_failed"),
+    # all-green summary with no failure clause — "3 passed in 0.02s".
+    # The trailing duration is required: a bare "N passed" matches things like
+    # "Deploy step 4 passed" in a build log, which is not a test count.
+    (re.compile(r"(\d+) passed[^\n]*? in [\d.]+\s*m?s"), "passed_only"),
+    # TAP — count the result lines themselves
+    (re.compile(r"^(?:not ok|ok) \d+", re.MULTILINE), "tap"),
+    # go test — per-package verdicts, so these are package counts, not test counts
+    (re.compile(r"^(?:FAIL|ok)\s+\S+", re.MULTILINE), "go"),
+]
 
-    prompt = (
-        "Parse the test runner output below into JSON with exactly these keys:\n"
-        '  "passed" (bool), "total" (int), "passed_count" (int), '
-        '"failed_count" (int), "failures" (list of {"test": str, "error": str})\n'
-        "Output ONLY valid JSON — no markdown fences, no prose.\n\n"
-        f"Test output:\n{raw_output[:8000]}"
-    )
-    llm = get_llm_for_agent("worker")
-    response = str(llm.complete(prompt))
 
-    json_match = re.search(r"\{.*\}", response, re.DOTALL)
-    if not json_match:
-        passed = "passed" in raw_output.lower() and "failed" not in raw_output.lower()
-        return {
-            "passed": passed,
-            "total": 0,
-            "passed_count": 0,
-            "failed_count": 0 if passed else 1,
-            "failures": [] if passed else [{"test": "unknown", "error": raw_output[:500]}],
-        }
+def _extract_test_counts(raw_output: str) -> Dict[str, int]:
+    """Best-effort test counts from runner output. Empty dict when unparseable.
+
+    Returning nothing is a correct answer. The caller renders missing counts as
+    "unavailable", which is honest; a fabricated zero is not, and the small model
+    reading the critique cannot tell the difference between "nothing passed" and
+    "we could not tell".
+    """
+    for pattern, kind in _TEST_COUNT_PATTERNS:
+        if kind == "tap":
+            passed = len(re.findall(r"^ok \d+", raw_output, re.MULTILINE))
+            failed = len(re.findall(r"^not ok \d+", raw_output, re.MULTILINE))
+            if not (passed or failed):
+                continue
+            return {"passed_count": passed, "failed_count": failed, "total": passed + failed}
+
+        if kind == "go":
+            passed = len(re.findall(r"^ok\s+\S+", raw_output, re.MULTILINE))
+            failed = len(re.findall(r"^FAIL\s+\S+", raw_output, re.MULTILINE))
+            if not (passed or failed):
+                continue
+            return {"passed_count": passed, "failed_count": failed, "total": passed + failed}
+
+        # Last match, not first: summaries come at the end, and runners that
+        # print more than one tally put the one we want last. jest emits
+        # "Test Suites: 1 failed, 2 passed" before "Tests: 1 failed, 7 passed";
+        # vitest emits "Test Files" before "Tests". Taking the first match
+        # reports the file tally as if it were the test tally.
+        match = None
+        for match in pattern.finditer(raw_output):
+            pass
+        if match is None:
+            continue
+
+        if kind == "surefire":
+            total = int(match.group(1))
+            # Surefire separates assertion failures from thrown errors; both failed.
+            failed = int(match.group(2)) + int(match.group(3))
+            return {
+                "total": total,
+                "failed_count": failed,
+                "passed_count": max(total - failed, 0),
+            }
+        if kind == "passed_only":
+            passed = int(match.group(1))
+            return {"passed_count": passed, "failed_count": 0, "total": passed}
+
+        passed, failed = (
+            (int(match.group(2)), int(match.group(1)))
+            if kind == "failed_passed"
+            else (int(match.group(1)), int(match.group(2)))
+        )
+        return {"passed_count": passed, "failed_count": failed, "total": passed + failed}
+
+    return {}
+
+
+def _parse_test_output(exit_code: int, raw_output: str) -> Dict[str, Any]:
+    """Turn a test run into a verdict, without a model.
+
+    The exit code is the whole verdict — every runner in every language sets it,
+    and it was already overriding the old LLM parser whenever the two disagreed.
+    Counts are best-effort decoration and are omitted entirely when no pattern
+    matches, so an unrecognised runner degrades to "counts unavailable" rather
+    than to a fabricated zero.
+
+    Never raises: a parsing gap must cost a number, never a job.
+    """
+    passed = exit_code == 0
+    result: Dict[str, Any] = {"passed": passed, "failures": []}
+
+    if not passed:
+        # Tail, not head: runners put the summary and failure list at the end,
+        # while the head is setup noise the critique has no room for.
+        result["failures"] = [{
+            "test": "runner",
+            "error": (raw_output or f"test runner exited {exit_code} with no output")[-500:],
+        }]
+
     try:
-        parsed = json.loads(json_match.group(0))
-        parsed.setdefault("passed", parsed.get("failed_count", 0) == 0)
-        parsed.setdefault("total", 0)
-        parsed.setdefault("passed_count", 0)
-        parsed.setdefault("failed_count", 0)
-        parsed.setdefault("failures", [])
-        return parsed
-    except json.JSONDecodeError:
-        return {
-            "passed": False,
-            "total": 0,
-            "passed_count": 0,
-            "failed_count": 1,
-            "failures": [{"test": "parse_error", "error": response[:500]}],
-        }
+        result.update(_extract_test_counts(raw_output or ""))
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.debug("Test count extraction failed, continuing without counts: %s", exc)
+
+    return result
 
 
 def run_feature_tests(
@@ -171,11 +257,7 @@ def run_feature_tests(
         return {"passed": True, "skipped": True, "reason": f"no {cmd_key}"}
 
     exit_code, raw_output = _run_test_command_in_container(workspace, command)
-    parsed = _parse_test_output_with_llm(raw_output)
-    if exit_code != 0 and parsed.get("passed"):
-        parsed["passed"] = False
-        if not parsed.get("failures"):
-            parsed["failures"] = [{"test": "runner", "error": raw_output[:500]}]
+    parsed = _parse_test_output(exit_code, raw_output)
     parsed["layer"] = layer
     parsed["raw_output"] = raw_output[:4000]
     return parsed
@@ -288,14 +370,37 @@ CONTAINER_IMAGES = {
     "java_maven": "registry.access.redhat.com/ubi9/openjdk-21:latest",
     "java_gradle": "registry.access.redhat.com/ubi9/openjdk-21:latest",
     "go": "registry.access.redhat.com/ubi9/go-toolset:latest",
+    # Reuses the python image already pulled for "python" — matches
+    # preview_runner.PREVIEW_IMAGES, which does the same for the same reason.
+    "static": "registry.access.redhat.com/ubi9/python-311:latest",
 }
 
 CONTAINER_COMMANDS = {
     "node": "cd /app && npm install --ignore-scripts 2>&1 && node -e \"try{require('./server')}catch(e){process.exit(0)}\"",
-    "python": "cd /app && python -m py_compile *.py 2>&1 || true",
-    "java_maven": "cd /app && mvn compile -q 2>&1",
-    "java_gradle": "cd /app && gradle build -x test -q 2>&1",
-    "go": "cd /app && go build ./... 2>&1",
+    # compileall, not `py_compile *.py`: the glob only matches the workspace
+    # ROOT, so a project with its code under app/ or src/ compiled nothing —
+    # and the old `|| true` turned that no-op into a PASS. Seen live: exit 0
+    # with "[Errno 2] No such file or directory: '*.py'". compileall recurses
+    # and exits non-zero on a genuine syntax error, so no `|| true` here.
+    "python": "cd /app && python -m compileall -q "
+              "-x '(^|/)(\\.venv|venv|node_modules|__pycache__|\\.git)(/|$)' . 2>&1",
+    # -Dmaven.repo.local is required, not just $HOME: Maven reads the OS passwd
+    # home (/home/default), which is on the read-only sandbox root, so it fails
+    # with LocalRepositoryNotAccessibleException before compiling anything.
+    # Relative path so it resolves under whichever dir the command cd's into —
+    # an absolute one would survive the sandbox's `cd /app` rewrite and break.
+    # Maven's artifact resolver reads proxy settings from settings.xml, NOT
+    # from -Dhttp.proxyHost (those only affect direct java.net calls). Using
+    # the -D flags alone looked plausible and still failed with "Name or
+    # service not known" on parent-POM resolution; generating a settings.xml
+    # is what actually downloads. Guarded so an unset proxy still works.
+    "java_maven": "cd /app && if [ -n \"$http_proxy\" ]; then PH=$(echo \"$http_proxy\" | sed -E 's#^https?://##; s#:.*##'); PP=$(echo \"$http_proxy\" | sed -E 's#.*:##'); printf '<settings><proxies><proxy><id>p</id><active>true</active><protocol>http</protocol><host>%s</host><port>%s</port></proxy><proxy><id>ps</id><active>true</active><protocol>https</protocol><host>%s</host><port>%s</port></proxy></proxies></settings>' \"$PH\" \"$PP\" \"$PH\" \"$PP\" > /tmp/mvn-proxy.xml; MVNS=\"-s /tmp/mvn-proxy.xml\"; GP=\"-Dhttp.proxyHost=$PH -Dhttp.proxyPort=$PP -Dhttps.proxyHost=$PH -Dhttps.proxyPort=$PP\"; else MVNS=\"\"; GP=\"\"; fi && mvn compile -q -Dmaven.repo.local=.m2-repo-local $MVNS 2>&1",
+    # Gradle does honour the JVM proxy properties.
+    "java_gradle": "cd /app && if [ -n \"$http_proxy\" ]; then PH=$(echo \"$http_proxy\" | sed -E 's#^https?://##; s#:.*##'); PP=$(echo \"$http_proxy\" | sed -E 's#.*:##'); printf '<settings><proxies><proxy><id>p</id><active>true</active><protocol>http</protocol><host>%s</host><port>%s</port></proxy><proxy><id>ps</id><active>true</active><protocol>https</protocol><host>%s</host><port>%s</port></proxy></proxies></settings>' \"$PH\" \"$PP\" \"$PH\" \"$PP\" > /tmp/mvn-proxy.xml; MVNS=\"-s /tmp/mvn-proxy.xml\"; GP=\"-Dhttp.proxyHost=$PH -Dhttp.proxyPort=$PP -Dhttps.proxyHost=$PH -Dhttps.proxyPort=$PP\"; else MVNS=\"\"; GP=\"\"; fi && gradle build -x test -q --gradle-user-home .gradle-home $GP 2>&1",
+"go": "cd /app && go build ./... 2>&1",
+    # No build step to run for static HTML/CSS/JS — the meaningful smoke test
+    # is confirming the deliverable actually exists and isn't an empty stub.
+    "static": "cd /app && test -s index.html && echo 'static entry point present: index.html'",
 }
 
 # Sandbox containers have a read-only root, so toolchains that default to
@@ -318,8 +423,43 @@ SANDBOX_API_COMMANDS = {
 }
 
 
+def _project_type_from_stack_manifest(workspace: Path) -> Optional[str]:
+    """
+    Fall back to the job's own AI-derived stack contract when nothing on disk
+    identifies the stack.
+
+    ``stack_manifest.json`` is written by the solutioning loop before a single
+    file is generated, so it can answer even when generation hasn't produced a
+    file this detector recognises. Only ever consulted as a fallback — a
+    concrete manifest file on disk (package.json, pom.xml, ...) always wins,
+    since the workspace could contain a stale or copied stack_manifest.json
+    that no longer matches what was actually generated.
+
+    Only the unambiguous case is handled: ``forbidden_tiers`` containing
+    ``application_server`` is an explicit, already-existing lock against a
+    backend runtime. Deliberately not attempting to map ``chosen_stack``
+    keywords — that list can contain arbitrary free-text technology names from
+    the full solutioning path (e.g. "Frappe", "Rust/Actix") with no closed
+    vocabulary, so guessing from it would just relocate the guessing problem.
+    """
+    manifest_path = workspace / "stack_manifest.json"
+    if not manifest_path.exists():
+        return None
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError, UnicodeDecodeError):
+        return None
+    if not isinstance(manifest, dict):
+        return None
+
+    forbidden = {str(t).lower() for t in (manifest.get("forbidden_tiers") or [])}
+    if "application_server" in forbidden:
+        return "static"
+    return None
+
+
 def _detect_project_type(workspace: Path) -> str:
-    """Auto-detect the project type from manifest files."""
+    """Auto-detect the project type from manifest files, or the stack contract."""
     if (workspace / "pom.xml").exists():
         return "java_maven"
     if (workspace / "build.gradle").exists() or (workspace / "build.gradle.kts").exists():
@@ -336,7 +476,14 @@ def _detect_project_type(workspace: Path) -> str:
         return "python"
     if list(workspace.rglob("*.go")):
         return "go"
-    return "unknown"
+    # Plain static HTML/CSS/JS — no build step, so a root-level index.html is
+    # directly servable. Deliberately narrow to the root: a nested index.html
+    # (e.g. pages/index.html) implies a build/router step this check cannot
+    # infer, and misdetecting it would serve the wrong thing rather than fail
+    # loudly.
+    if (workspace / "index.html").exists():
+        return "static"
+    return _project_type_from_stack_manifest(workspace) or "unknown"
 
 
 class SmokeTestResult:
